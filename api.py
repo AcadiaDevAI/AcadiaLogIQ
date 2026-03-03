@@ -2,7 +2,6 @@ import json
 import logging
 import hashlib
 import os
-import shutil
 import sys
 import uuid
 from contextlib import asynccontextmanager
@@ -24,7 +23,7 @@ from slowapi.util import get_remote_address
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from config import settings
-from vector_store import get_collection, get_bm25_index, rebuild_bm25_from_chroma
+from vector_store import get_collection, get_bm25_index, rebuild_bm25_from_chroma, reset_chroma_collection
 
 
 if sys.version_info < (3, 11):
@@ -695,82 +694,101 @@ async def health_check():
 @app.post("/reset")
 async def reset_all(_: bool = Depends(verify_api_key)):
     """
-    FULL RESET: Deletes ALL indexed data from ChromaDB (disk + memory),
-    clears BM25 index, removes uploaded files from EC2 volume,
-    and clears all job tracking.
+    FULL RESET — safely clears all data without filesystem corruption.
 
-    Called when user clicks Refresh in the UI.
+    Uses ChromaDB's own delete_collection API (NOT shutil.rmtree) to avoid:
+    - "Device or resource busy" (can't rmtree a Docker mount point)
+    - "readonly database" (corrupted SQLite WAL after partial deletion)
+
+    Steps:
+    1. ChromaDB: delete_collection + recreate (same SQLite connection)
+    2. BM25: clear in-memory index
+    3. Uploads: delete files from EC2 volume
+    4. Jobs: clear in-memory tracking
     """
     global coll, bm25
     errors = []
 
-    # 1. Delete ChromaDB data from disk
-    chroma_path = settings.CHROMA_PERSIST_DIR
+    # 1. Reset ChromaDB via API (safe — no filesystem deletion)
+    deleted_chunks = 0
     try:
-        if os.path.exists(chroma_path):
-            shutil.rmtree(chroma_path)
-            logger.info("RESET: Deleted ChromaDB directory: %s", chroma_path)
-        os.makedirs(chroma_path, exist_ok=True)
-    except Exception as e:
-        logger.exception("RESET: Failed to delete ChromaDB: %s", e)
-        errors.append(f"ChromaDB cleanup: {e}")
-
-    # 2. Recreate ChromaDB collection (fresh)
-    try:
+        deleted_chunks = reset_chroma_collection()
+        # Get fresh collection reference
         coll = get_collection()
-        logger.info("RESET: ChromaDB collection recreated")
+        logger.info("RESET: ChromaDB cleared (%d chunks deleted), fresh collection ready", deleted_chunks)
     except Exception as e:
-        logger.exception("RESET: Failed to recreate collection: %s", e)
-        errors.append(f"ChromaDB recreate: {e}")
+        logger.exception("RESET: ChromaDB reset failed: %s", e)
+        errors.append(f"ChromaDB: {e}")
+        # Try to at least get a working collection reference
+        try:
+            coll = get_collection()
+        except Exception:
+            pass
 
-    # 3. Clear BM25 index
+    # 2. Clear BM25 keyword index
     try:
         if bm25:
+            old_size = bm25.size
             bm25.clear()
-            logger.info("RESET: BM25 index cleared")
+            logger.info("RESET: BM25 cleared (%d docs)", old_size)
     except Exception as e:
         logger.exception("RESET: BM25 clear failed: %s", e)
-        errors.append(f"BM25 clear: {e}")
+        errors.append(f"BM25: {e}")
 
-    # 4. Delete uploaded files from EC2 volume
-    upload_dir = settings.UPLOAD_DIR
+    # 3. Delete uploaded files from EC2 volume
     deleted_files = 0
     try:
+        upload_dir = settings.UPLOAD_DIR
         if upload_dir.exists():
             for f in upload_dir.iterdir():
                 if f.is_file():
-                    f.unlink()
-                    deleted_files += 1
+                    try:
+                        f.unlink()
+                        deleted_files += 1
+                    except Exception as fe:
+                        logger.warning("RESET: Could not delete %s: %s", f.name, fe)
             logger.info("RESET: Deleted %d files from %s", deleted_files, upload_dir)
     except Exception as e:
         logger.exception("RESET: Upload cleanup failed: %s", e)
-        errors.append(f"Upload cleanup: {e}")
+        errors.append(f"Uploads: {e}")
 
-    # 5. Clear job tracking
+    # 4. Clear job tracking
     job_count = len(UPLOAD_JOBS)
     UPLOAD_JOBS.clear()
     logger.info("RESET: Cleared %d job records", job_count)
 
-    # Summary
+    # Verify ChromaDB is truly empty
+    verify_count = 0
+    try:
+        if coll:
+            verify_count = coll.count()
+    except Exception:
+        pass
+
     if errors:
-        logger.warning("RESET completed with %d errors: %s", len(errors), errors)
+        logger.warning("RESET partial (%d errors): %s", len(errors), errors)
         return {
             "status": "partial",
-            "message": f"Reset completed with {len(errors)} errors",
+            "message": f"Reset completed with {len(errors)} error(s)",
             "errors": errors,
+            "deleted_chunks": deleted_chunks,
             "deleted_files": deleted_files,
             "cleared_jobs": job_count,
+            "chroma_count_after": verify_count,
+            "bm25_count_after": bm25.size if bm25 else 0,
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
 
-    logger.info("RESET: Complete — all data deleted")
+    logger.info("RESET: Complete — %d chunks, %d files, %d jobs cleared",
+                deleted_chunks, deleted_files, job_count)
     return {
         "status": "success",
         "message": "All data deleted — ChromaDB, BM25, uploads, jobs cleared",
+        "deleted_chunks": deleted_chunks,
         "deleted_files": deleted_files,
         "cleared_jobs": job_count,
-        "chroma_chunks": 0,
-        "bm25_docs": 0,
+        "chroma_count_after": verify_count,
+        "bm25_count_after": 0,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 

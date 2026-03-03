@@ -23,25 +23,79 @@ logger = logging.getLogger("acadia-log-iq")
 
 
 # ============================================================================
-# CHROMA VECTOR STORE
+# CHROMA VECTOR STORE — SINGLETON CLIENT
 # ============================================================================
+# IMPORTANT: We keep a single PersistentClient instance so that reset can
+# safely call client.delete_collection() through the SAME SQLite connection.
+# Creating multiple PersistentClient instances to the same path causes
+# WAL conflicts and "readonly database" errors.
+# ============================================================================
+_chroma_client = None
+
+
+def _get_chroma_client():
+    """Return the singleton Chroma PersistentClient."""
+    global _chroma_client
+    if _chroma_client is None:
+        chroma_path = settings.CHROMA_PERSIST_DIR
+        os.makedirs(chroma_path, exist_ok=True)
+        _chroma_client = chromadb.PersistentClient(
+            path=chroma_path,
+            settings=chromadb.Settings(
+                anonymized_telemetry=False,
+                allow_reset=True,
+            ),
+        )
+    return _chroma_client
+
+
 def get_collection() -> Any:
-    """Return a persistent Chroma collection."""
-    chroma_path = settings.CHROMA_PERSIST_DIR
-    os.makedirs(chroma_path, exist_ok=True)
-
-    client = chromadb.PersistentClient(
-        path=chroma_path,
-        settings=chromadb.Settings(
-            anonymized_telemetry=False,
-            allow_reset=True,
-        ),
-    )
-
+    """Return the persistent Chroma collection (creates if needed)."""
+    client = _get_chroma_client()
     return client.get_or_create_collection(
         name=settings.COLLECTION_NAME,
         metadata={"hnsw:space": "cosine"},
     )
+
+
+def reset_chroma_collection() -> int:
+    """
+    Safely reset ChromaDB by deleting and recreating the collection.
+
+    This uses ChromaDB's own API (not filesystem deletion), which:
+    - Goes through proper SQLite transactions
+    - Doesn't touch file handles or mount points
+    - Won't corrupt the WAL journal
+    - Won't cause "readonly database" errors
+
+    Returns: number of chunks that were deleted.
+    """
+    client = _get_chroma_client()
+    deleted_count = 0
+
+    try:
+        # Get current count before deletion
+        existing = client.get_or_create_collection(name=settings.COLLECTION_NAME)
+        deleted_count = existing.count()
+    except Exception:
+        pass
+
+    try:
+        # Delete the collection (drops all vectors, metadata, documents)
+        client.delete_collection(name=settings.COLLECTION_NAME)
+        logger.info("reset_chroma: Deleted collection '%s' (%d chunks)",
+                     settings.COLLECTION_NAME, deleted_count)
+    except Exception as e:
+        logger.warning("reset_chroma: delete_collection failed: %s", e)
+
+    # Recreate empty collection
+    new_coll = client.get_or_create_collection(
+        name=settings.COLLECTION_NAME,
+        metadata={"hnsw:space": "cosine"},
+    )
+    logger.info("reset_chroma: Recreated empty collection '%s'", settings.COLLECTION_NAME)
+
+    return deleted_count
 
 
 # ============================================================================
