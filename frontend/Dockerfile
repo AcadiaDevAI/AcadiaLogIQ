@@ -1,30 +1,32 @@
-FROM python:3.11-slim-bookworm
+# ---- Build Stage ----
+FROM node:20-alpine AS build
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y \
-    gcc \
-    g++ \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
-
-ENV PYTHONUNBUFFERED=1
-ENV PYTHONDONTWRITEBYTECODE=1
-
-# COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+COPY package.json ./
+RUN npm install --legacy-peer-deps
 
 COPY . .
 
-RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
-USER appuser
+# API_BASE is set at build time; defaults to relative /api proxied by nginx
+ARG REACT_APP_API_BASE=http://localhost:8000
+ENV REACT_APP_API_BASE=$REACT_APP_API_BASE
 
-RUN mkdir -p /app/uploads /app/data/chroma
+# Clerk publishable key (safe to embed in frontend — it's a PUBLIC key)
+ARG REACT_APP_CLERK_PUBLISHABLE_KEY=
+ENV REACT_APP_CLERK_PUBLISHABLE_KEY=$REACT_APP_CLERK_PUBLISHABLE_KEY
 
-EXPOSE 8000
+RUN npm run build
 
-HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl -f http://localhost:8000/health || exit 1
+# ---- Production Stage ----
+FROM nginx:alpine
 
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8000", "--no-access-log"]
+# Custom nginx config
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Copy built app
+COPY --from=build /app/build /usr/share/nginx/html
+
+EXPOSE 3000
+
+CMD ["nginx", "-g", "daemon off;"]
