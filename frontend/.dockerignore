@@ -1,20 +1,24 @@
-node_modules/
-build/
+# dependencies / build outputs
+node_modules
+dist
+build
+coverage
+
+# env & secrets
 .env
 .env.*
-.git/
-.github/
-.vscode/
-.idea/
+*.log
+
+# git / editor / OS junk
+.git
+.github
+.vscode
+.idea
+.DS_Store
+Thumbs.db
 *.swp
 *.swo
 *~
-.DS_Store
-Thumbs.db
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+
+# docker files (optional)
 .dockerignore
-Dockerfile
-README.md
-coverage/

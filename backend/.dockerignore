@@ -1,38 +1,33 @@
-.venv
+# python caches
 __pycache__
-*.pyc
-.env
-.git
-.vscode
-.idea
-node_modules
-dist
-__pycache__/
 *.py[cod]
+*.pyo
+*.pyd
 *.so
+
+# virtualenvs
+.venv
+venv
+env
+
+# env & secrets
 .env
 .env.*
-.venv/
-venv/
-data/
-uploads/
 *.log
-*.db
-*.sqlite
-*.sqlite3
-.git/
-.github/
-.vscode/
-.idea/
+
+# git / editor / OS junk
+.git
+.github
+.vscode
+.idea
+.DS_Store
+Thumbs.db
 *.swp
 *.swo
 *~
-.DS_Store
-Thumbs.db
-.dockerignore
-Dockerfile
-README.md
-tests/
-*.egg-info/
-dist/
-build/
+
+# build/test artifacts
+dist
+build
+*.egg-info
+tests
