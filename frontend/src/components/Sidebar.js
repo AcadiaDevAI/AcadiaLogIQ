@@ -213,19 +213,12 @@ export default function Sidebar() {
       {/* Header */}
       <div className="flex items-center justify-between px-4 py-4 border-b" style={{ borderColor: "var(--border-color)" }}>
         <div className="flex items-center gap-2">
-          {/* <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center" style={{ background: "linear-gradient(135deg, #6366f1, #4338ca)" }}>
+          <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-brand-500 to-brand-700 flex items-center justify-center" style={{ background: "linear-gradient(135deg, #6366f1, #4338ca)" }}>
             <span className="text-white text-sm font-bold">A</span>
-          </div> */}
-          <div className="w-8 h-8 rounded-lg flex items-center justify-center overflow-hidden bg-white shadow-sm">
-          <img
-            src="/logo.png"
-            alt="Acadia Logo"
-            className="w-6 h-6 object-contain"
-          />
           </div>
           <div>
-            <h1 className="text-sm font-bold t-text leading-none">Acadia doc IQ</h1>
-            {/* <p className="text-[10px] t-text-muted mt-0.5">Hybrid Search · AI Analysis</p> */}
+            <h1 className="text-sm font-bold t-text leading-none">Acadia Log IQ</h1>
+            <p className="text-[10px] t-text-muted mt-0.5">Hybrid Search · AI Analysis</p>
           </div>
         </div>
         <Button type="text" icon={<MenuFoldOutlined style={{ color: "var(--text-muted)" }} />} onClick={() => dispatch({ type: "TOGGLE_SIDEBAR" })} size="small" />

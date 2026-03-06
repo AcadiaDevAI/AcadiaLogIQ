@@ -24,20 +24,7 @@ function reducer(state, action) {
       return {
         ...state,
         sessionId: action.payload.id,
-        messages: (action.payload.messages || []).map((msg) => {
-          // Normalize sources: backend stores as {"docs": [...]} or {"logs":[], "kb":[]}
-          // Frontend expects a flat array
-          let sources = msg.sources;
-          if (sources && !Array.isArray(sources)) {
-            // It's a dict like {"docs": [...]} or {"logs":[], "kb":[]}
-            sources = [
-              ...(sources.docs || []),
-              ...(sources.logs || []),
-              ...(sources.kb || []),
-            ].filter(Boolean);
-          }
-          return { ...msg, sources: sources || [] };
-        }),
+        messages: action.payload.messages || [],
       };
 
     case "NEW_CHAT":
