@@ -44,7 +44,7 @@ export default function ChatInput({ onSend }) {
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
           placeholder={
-            state.isUploading ? "Upload in progress..." : state.isLoading ? "Thinking..." : "Ask about your logs..."
+            state.isUploading ? "Upload in progress..." : state.isLoading ? "Thinking..." : "How can I help you today?"
           }
           disabled={disabled}
           rows={1}

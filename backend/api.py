@@ -1139,18 +1139,27 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
 
     confidence = min(0.3 + len(doc_ranked) * 0.1, 1.0)
 
-    prompt = f"""You are an expert AI assistant analyzing uploaded documents.
-The document chunks below are ranked by relevance to the question.
+#     prompt = f"""You are an expert AI assistant analyzing uploaded documents.
+# The document chunks below are ranked by relevance to the question.
+    prompt = f"""{settings.LOGIQ_SYSTEM_PROMPT}
 
-DOCUMENTS:
+DOCUMENTS: (ranked, may include SOP/KB/Runbook/log excerpts):
 {doc_ctx}
 
 USER QUESTION: {req.q}
 
-Provide a concise, accurate answer based on the documents:
-- Reference specific source documents when possible.
-- If the answer comes from a specific document, mention it.
-- If insufficient info, say what's needed.
+# Provide a concise, accurate answer based on the documents:
+# - Reference specific source documents when possible.
+# - If the answer comes from a specific document, mention it.
+# - If insufficient info, say what's needed.
+
+OUTPUT RULES:
+- Follow the exact required structure headings.
+- Use bullet points under each heading.
+- Keep it practical for Tier-1/Tier-2 NOC troubleshooting.
+- If SOP/KB reference is not explicit in documents, say "Not found in provided documents" and suggest what to check.
+- If information is insufficient, state what additional logs/fields are needed (do not hallucinate).
+
 
 ANSWER:"""
 
