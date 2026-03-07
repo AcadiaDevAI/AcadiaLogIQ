@@ -663,24 +663,25 @@ def truncate_chunk(text: str, max_chars: int) -> str:
 def assemble_context(
     ranked: List[Tuple[str, str, Dict, float]],
     max_total_chars: int,
-    max_sources: int = 3,
+    max_sources: int = 5,
 ) -> Tuple[str, List[str]]:
     """
-    Build context from ranked chunks.
+    Build context from ranked chunks. Returns (context_str, sources).
 
-    Only sources from included chunks are considered.
-    Source selection is strict:
-    - aggregate included score per source
-    - prefer dominant source
-    - include secondary source only if it is strongly relevant
+    Source selection logic:
+    - Aggregate relevance scores per source document
+    - Any source with aggregate score >= 40% of the top source is included
+    - This naturally handles:
+      * Question about 1 doc → only that doc (others score far below 40%)
+      * Question about 2 docs → both docs (both score similarly)
+      * Question about all docs → all relevant docs shown
     """
     max_chunk = TOKEN_BUDGET["MAX_SINGLE_CHUNK_CHARS"]
     if not ranked:
         return "", []
 
     parts = []
-    included_source_scores: Dict[str, float] = {}
-    included_source_counts: Dict[str, int] = {}
+    source_scores: Dict[str, float] = {}
     total = 0
 
     for _, text, meta, score in ranked:
@@ -695,40 +696,30 @@ def assemble_context(
             remaining = max_total_chars - total
             if remaining > 300:
                 parts.append(f"[Source: {src}]\n{truncate_chunk(chunk, remaining - 60)}")
-                included_source_scores[src] = included_source_scores.get(src, 0.0) + score
-                included_source_counts[src] = included_source_counts.get(src, 0) + 1
+                source_scores[src] = source_scores.get(src, 0.0) + score
             break
 
         parts.append(entry)
-        included_source_scores[src] = included_source_scores.get(src, 0.0) + score
-        included_source_counts[src] = included_source_counts.get(src, 0) + 1
+        source_scores[src] = source_scores.get(src, 0.0) + score
         total += len(entry)
 
-    if not included_source_scores:
+    if not source_scores:
         return "\n\n".join(parts), []
 
-    ranked_sources = sorted(
-        included_source_scores.items(),
-        key=lambda x: (x[1], included_source_counts.get(x[0], 0)),
-        reverse=True,
+    # Sort by aggregate score
+    ranked_sources = sorted(source_scores.items(), key=lambda x: x[1], reverse=True)
+    top_score = ranked_sources[0][1]
+
+    # Include any source scoring >= 40% of the top source
+    threshold = top_score * 0.40
+    final_sources = [src for src, score in ranked_sources if score >= threshold]
+
+    logger.info(
+        "Source selection: %s | threshold=%.6f | final=%s",
+        {s: f"{sc:.6f}" for s, sc in ranked_sources},
+        threshold,
+        final_sources,
     )
-
-    top_name, top_score = ranked_sources[0]
-    top_count = included_source_counts.get(top_name, 0)
-
-    # Default: only show the top source
-    final_sources = [top_name]
-
-    # Allow a second source only if it is genuinely competitive
-    if len(ranked_sources) > 1:
-        second_name, second_score = ranked_sources[1]
-        second_count = included_source_counts.get(second_name, 0)
-
-        strong_second_score = second_score >= top_score * 0.80
-        strong_second_count = second_count >= top_count
-
-        if strong_second_score or strong_second_count:
-            final_sources.append(second_name)
 
     return "\n\n".join(parts), final_sources[:max_sources]
 
@@ -1105,6 +1096,77 @@ async def reset_all(user_id: Optional[str] = Depends(auth_dependency)):
         "cleared_jobs": job_count,
         "chroma_count_after": verify_count,
         "bm25_count_after": 0,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+# ============================================================================
+# ROUTES — PURGE ORPHAN CHUNKS
+# ============================================================================
+@app.post("/purge_orphans")
+async def purge_orphan_chunks(user_id: Optional[str] = Depends(auth_dependency)):
+    """
+    Delete all ChromaDB chunks that don't belong to any currently registered file.
+
+    This cleans up ghost data from previously deleted/uploaded files whose
+    chunks survived in the vector store (e.g., files uploaded before file_id
+    tracking was added, or files deleted while the server was down).
+
+    Safe to run anytime. Also rebuilds BM25 from the cleaned ChromaDB.
+    """
+    global bm25
+
+    if not coll:
+        raise HTTPException(503, "Vector store not ready")
+
+    # Get all known file_ids from current registry
+    known_file_ids = {f["id"] for f in UPLOADED_FILES.values()}
+
+    # Scan all chunks in ChromaDB
+    total_chunks = coll.count()
+    if total_chunks == 0:
+        return {"status": "clean", "total_chunks": 0, "orphans_deleted": 0}
+
+    orphan_ids = []
+    batch_size = 500
+    for offset in range(0, total_chunks, batch_size):
+        limit = min(batch_size, total_chunks - offset)
+        results = coll.get(
+            limit=limit, offset=offset,
+            include=["metadatas"],
+        )
+        ids = results.get("ids", [])
+        metas = results.get("metadatas", [])
+        for i, chunk_id in enumerate(ids):
+            meta = metas[i] if i < len(metas) else {}
+            chunk_file_id = meta.get("file_id")
+            # If chunk has no file_id or its file_id is not in registry → orphan
+            if not chunk_file_id or chunk_file_id not in known_file_ids:
+                orphan_ids.append(chunk_id)
+
+    # Delete orphans in batches
+    deleted = 0
+    for i in range(0, len(orphan_ids), 500):
+        batch = orphan_ids[i:i+500]
+        coll.delete(ids=batch)
+        deleted += len(batch)
+
+    # Rebuild BM25 from clean ChromaDB
+    bm25_count = 0
+    if bm25:
+        from vector_store import rebuild_bm25_from_chroma
+        bm25_count = rebuild_bm25_from_chroma(coll)
+
+    logger.info("PURGE: Deleted %d orphan chunks out of %d total. BM25 rebuilt with %d docs.",
+                deleted, total_chunks, bm25_count)
+
+    return {
+        "status": "purged",
+        "total_chunks_before": total_chunks,
+        "orphans_deleted": deleted,
+        "chunks_remaining": coll.count(),
+        "bm25_rebuilt": bm25_count,
+        "known_files": len(known_file_ids),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
