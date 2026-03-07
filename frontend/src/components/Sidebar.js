@@ -143,7 +143,7 @@ export default function Sidebar() {
       label: (
         <span className="flex items-center gap-1.5 text-xs">
           <FileOutlined />{" "}
-          <Badge count={state.uploadedFiles.length} size="small" style={{ backgroundColor: "#4f46e5" }}>Files</Badge>
+          <Badge count={state.uploadedFiles.length} size="small" style={{ backgroundColor: "#100d4b" }}>Files</Badge>
         </span>
       ),
       children: (
