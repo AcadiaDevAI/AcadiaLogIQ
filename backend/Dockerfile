@@ -1,3 +1,4 @@
+                                                                                                                                                                                                          
 FROM python:3.11-slim
 
 WORKDIR /app
@@ -19,8 +20,8 @@ RUN pip install --no-cache-dir --upgrade pip && \
 COPY backend /app/backend
 
 RUN useradd -m -u 1000 appuser && \
-    chown -R appuser:appuser /app && \
-    mkdir -p /app/uploads
+    mkdir -p /app/uploads && \
+    chown -R appuser:appuser /app
 
 USER appuser
 
