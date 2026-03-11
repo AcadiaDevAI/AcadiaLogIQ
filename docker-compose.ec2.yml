@@ -1,11 +1,9 @@
-version: "3.9"
-
 services:
   api:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: logiq-api
+    container_name: acadialogiq-api
     ports:
       - "8000:8000"
     env_file:
@@ -17,36 +15,20 @@ services:
       - PYTHONUNBUFFERED=1
     volumes:
       - uploads:/app/uploads
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 5
-      start_period: 30s
     restart: unless-stopped
-    networks:
-      - app-network
 
   ui:
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        REACT_APP_API_BASE: http://${EC2_PUBLIC_IP:-localhost}:8000
-        REACT_APP_CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY:-}
-    container_name: logiq-ui
+        REACT_APP_CLERK_PUBLISHABLE_KEY: ${REACT_APP_CLERK_PUBLISHABLE_KEY:-}
+    container_name: acadialogiq-ui
     ports:
       - "8501:80"
     depends_on:
-      api:
-        condition: service_healthy
+      - api
     restart: unless-stopped
-    networks:
-      - app-network
 
 volumes:
   uploads:
-
-networks:
-  app-network:
-    driver: bridge
