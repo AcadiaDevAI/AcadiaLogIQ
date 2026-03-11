@@ -1,8 +1,8 @@
-services:
+services: 
   api:
     build:
-      context: ./backend
-      dockerfile: Dockerfile
+      context: .
+      dockerfile: backend/Dockerfile
     container_name: acadialogiq-api
     ports:
       - "8000:8000"
