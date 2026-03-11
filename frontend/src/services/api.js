@@ -2,10 +2,13 @@ import axios from "axios";
 
 //const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:8000";
 //const API_BASE = process.env.REACT_APP_API_BASE || "http://18.233.93.19:8000";
-const API_BASE = window.location.origin.replace(":8501", ":8000");
+//const API_BASE = window.location.origin.replace(":8501", ":8000");
 // import axios from "axios";
 
-// const API_BASE = window.location.origin.replace(":8501", ":8000");
+//for local development
+//const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:8000";
+
+ const API_BASE = window.location.origin.replace(":8501", ":8000");
 const API_KEY = process.env.REACT_APP_API_KEY || "";
 
 const api = axios.create({

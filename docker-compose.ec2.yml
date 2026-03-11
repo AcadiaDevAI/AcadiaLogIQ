@@ -1,32 +1,28 @@
-# docker-compose.ec2.yml
-# Usage on EC2:
-#   export EC2_PUBLIC_IP=$(curl -s http://169.254.169.254/latest/meta-data/public-ipv4)
-#   export CLERK_PUBLISHABLE_KEY=pk_test_xxxx  (or pk_live_xxxx)
-#   docker compose -f docker-compose.ec2.yml up --build -d
+version: "3.9"
 
-
-services: 
+services:
   api:
     build:
       context: ./backend
       dockerfile: Dockerfile
+    container_name: logiq-api
     ports:
       - "8000:8000"
     env_file:
       - ./backend/.env
     environment:
-      - CHROMA_PERSIST_DIR=/app/data/chroma
+      - STORAGE_TYPE=local
+      - LOCAL_STORAGE_PATH=/app/uploads
       - UPLOAD_DIR=/app/uploads
       - PYTHONUNBUFFERED=1
     volumes:
-      - chroma_data:/app/data/chroma
       - uploads:/app/uploads
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
-      retries: 3
-      start_period: 20s
+      retries: 5
+      start_period: 30s
     restart: unless-stopped
     networks:
       - app-network
@@ -38,6 +34,7 @@ services:
       args:
         REACT_APP_API_BASE: http://${EC2_PUBLIC_IP:-localhost}:8000
         REACT_APP_CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY:-}
+    container_name: logiq-ui
     ports:
       - "8501:80"
     depends_on:
@@ -48,7 +45,6 @@ services:
       - app-network
 
 volumes:
-  chroma_data:
   uploads:
 
 networks:

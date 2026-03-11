@@ -23,7 +23,7 @@ import jwt
 from jwt import PyJWKClient, PyJWKClientError
 from fastapi import HTTPException, Request, status
 
-from config import settings
+from backend.config import settings
 
 logger = logging.getLogger("acadia-log-iq")
 

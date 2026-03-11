@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     # LLM: Mistral 7B Instruct (32K context window)
     BEDROCK_LLM_MODEL: str = "mistral.mistral-7b-instruct-v0:2"
 
+    DATABASE_URL: str
+    
     # Titan Embed V2 input limit ~8192 tokens.
     # Chunks are max 6000 chars, so 8000 gives headroom.
     MAX_CHARS: int = 8000

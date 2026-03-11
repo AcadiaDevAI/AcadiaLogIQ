@@ -1,7 +1,6 @@
 import json
 import logging
 import hashlib
-import os
 import sys
 import uuid
 from contextlib import asynccontextmanager
@@ -15,6 +14,7 @@ from fastapi import (
     BackgroundTasks, Depends, FastAPI, File, Header,
     HTTPException, Query, Request, UploadFile, status,
 )
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from slowapi import Limiter, _rate_limit_exceeded_handler
@@ -22,18 +22,37 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from config import settings
-from vector_store import get_collection, get_bm25_index, rebuild_bm25_from_chroma, reset_chroma_collection
-from clerk_auth import clerk_auth_dependency, is_clerk_enabled, get_clerk_user_display
+from backend.config import settings
+from backend.clerk_auth import clerk_auth_dependency, is_clerk_enabled, get_clerk_user_display
+from backend.storage.local_storage import LocalStorageProvider
+from backend.vector_store import (
+    count_pg_chunks,
+    create_ingestion_job,
+    delete_all_chat_sessions,
+    delete_chat_session,
+    delete_document_and_chunks,
+    get_bm25_index,
+    get_chat_session,
+    get_ingestion_job,
+    insert_document_and_chunks,
+    list_active_files,
+    list_chat_sessions,
+    pgvector_search,
+    purge_orphan_chunks_db,
+    rebuild_bm25_from_postgres,
+    reset_pg_data,
+    save_message_to_session,
+    update_ingestion_job,
+    update_message_feedback,
+)
+
+
 
 
 if sys.version_info < (3, 11):
     raise RuntimeError("Python 3.11+ required")
 
 
-# ============================================================================
-# LOGGING
-# ============================================================================
 logging.basicConfig(
     level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -41,9 +60,6 @@ logging.basicConfig(
 logger = logging.getLogger("acadia-log-iq")
 
 
-# ============================================================================
-# TOKEN BUDGET — MISTRAL 7B (32K CONTEXT)
-# ============================================================================
 CHARS_PER_TOKEN = 3
 
 TOKEN_BUDGET = {
@@ -73,10 +89,9 @@ HYBRID_CONFIG = {
     "RERANK_TOP_K_KB": 5,
 }
 
+storage = LocalStorageProvider()
 
-# ============================================================================
-# TYPES
-# ============================================================================
+
 class JobInfo(TypedDict, total=False):
     job_id: str
     status: str
@@ -94,21 +109,9 @@ class JobInfo(TypedDict, total=False):
     file_id: Optional[str]
 
 
-UPLOAD_JOBS: Dict[str, JobInfo] = {}
-coll = None
 bm25 = None
 
 
-# ============================================================================
-# IN-MEMORY STORES
-# ============================================================================
-CHAT_SESSIONS: Dict[str, dict] = {}
-UPLOADED_FILES: Dict[str, dict] = {}
-
-
-# ============================================================================
-# BEDROCK CLIENT
-# ============================================================================
 def _make_bedrock_client():
     boto_cfg = BotoConfig(
         retries={"max_attempts": 10, "mode": "adaptive"},
@@ -130,11 +133,7 @@ def _make_bedrock_client():
 bedrock = _make_bedrock_client()
 
 
-# ============================================================================
-# SES CLIENT (for feedback emails)
-# ============================================================================
 def _make_ses_client():
-    """Create SES client reusing same AWS credentials as Bedrock."""
     ses_region = settings.SES_REGION or settings.AWS_REGION
     kwargs = {
         "service_name": "ses",
@@ -148,21 +147,17 @@ def _make_ses_client():
     return boto3.client(**kwargs)
 
 
-# Initialize SES client (None if disabled or init fails)
 ses_client = None
 try:
     if settings.SES_ENABLED.lower() == "true":
         ses_client = _make_ses_client()
-        logger.info("SES ready (sender=%s, recipient=%s)",
-                     settings.SES_SENDER_EMAIL, settings.SES_FEEDBACK_RECIPIENT)
+        logger.info("SES ready")
 except Exception as e:
-    logger.warning("SES init failed (feedback emails disabled): %s", e)
+    logger.warning("SES init failed: %s", e)
 
 
 def send_feedback_email(subject: str, body_text: str, body_html: str) -> bool:
-    """Send feedback email via AWS SES. Returns True on success."""
     if not ses_client:
-        logger.warning("SES not configured — feedback email skipped")
         return False
     try:
         ses_client.send_email(
@@ -176,7 +171,6 @@ def send_feedback_email(subject: str, body_text: str, body_html: str) -> bool:
                 },
             },
         )
-        logger.info("Feedback email sent: %s", subject)
         return True
     except Exception as e:
         logger.exception("SES send_email failed: %s", e)
@@ -184,93 +178,25 @@ def send_feedback_email(subject: str, body_text: str, body_html: str) -> bool:
 
 
 def _resolve_user_display(user_id: Optional[str]) -> dict:
-    """Resolve user_id to {email, name, user_id} using Clerk Backend API."""
     return get_clerk_user_display(user_id)
 
 
-# ============================================================================
-# HELPERS
-# ============================================================================
 def _normalize_owner_id(user_id: Optional[str]) -> str:
     return user_id or "anonymous"
 
 
-def _filter_files_for_owner(user_id: Optional[str]) -> List[dict]:
-    owner_id = _normalize_owner_id(user_id)
-    return [
-        f for f in UPLOADED_FILES.values()
-        if f.get("owner_id", "anonymous") == owner_id
-    ]
-
-
 def _get_active_indexed_file_ids(user_id: Optional[str]) -> Set[str]:
     owner_id = _normalize_owner_id(user_id)
-    return {
-        f["id"]
-        for f in UPLOADED_FILES.values()
-        if f.get("owner_id", "anonymous") == owner_id and f.get("status") == "indexed"
-    }
+    return {f["id"] for f in list_active_files(owner_id) if f.get("status") == "indexed"}
 
 
-def _delete_physical_uploads_for_file(filename: str, job_id: Optional[str] = None) -> int:
-    deleted = 0
-    try:
-        upload_dir = settings.UPLOAD_DIR
-        if not upload_dir.exists():
-            return 0
-
-        for f in upload_dir.iterdir():
-            if not f.is_file():
-                continue
-            matched = False
-            if job_id and f.name.startswith(f"{job_id}_"):
-                matched = True
-            elif filename and (f.name == filename or filename in f.name):
-                matched = True
-
-            if matched:
-                try:
-                    f.unlink(missing_ok=True)
-                    deleted += 1
-                except Exception as e:
-                    logger.warning("Could not delete upload file %s: %s", f.name, e)
-    except Exception as e:
-        logger.warning("Physical upload cleanup failed for %s: %s", filename, e)
-    return deleted
-
-
-def _remove_file_references_from_sessions(filename: str, file_id: Optional[str] = None) -> int:
-    updated = 0
-    for session in CHAT_SESSIONS.values():
-        changed = False
-        for msg in session.get("messages", []):
-            sources = msg.get("sources")
-            if not isinstance(sources, dict):
-                continue
-            docs = sources.get("docs")
-            if isinstance(docs, list):
-                new_docs = [d for d in docs if d != filename]
-                if new_docs != docs:
-                    sources["docs"] = new_docs
-                    changed = True
-        if changed:
-            session["updated_at"] = datetime.now(timezone.utc).isoformat()
-            updated += 1
-    return updated
-
-
-# ============================================================================
-# LIFESPAN
-# ============================================================================
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global coll, bm25
+    global bm25
     logger.info("Starting API...")
-    coll = get_collection()
-    logger.info("Chroma ready: %s", settings.COLLECTION_NAME)
     bm25 = get_bm25_index()
-    doc_count = rebuild_bm25_from_chroma(coll)
-    logger.info("BM25 ready: %d docs", doc_count)
+    doc_count = rebuild_bm25_from_postgres()
+    logger.info("BM25 ready from PostgreSQL: %d docs", doc_count)
     yield
     logger.info("Shutting down...")
 
@@ -278,7 +204,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Acadia's Log IQ API",
     description="AI log analysis — Hybrid Search + Re-ranking",
-    version="2.1.0",
+    version="2.2.0",
     lifespan=lifespan,
 )
 
@@ -289,14 +215,18 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
+        "http://localhost:8001",
+        "http://127.0.0.1:8001",
         "http://localhost:3000",
-        "http://localhost:8000",
         "http://127.0.0.1:3000",
+        "http://localhost:8000",
         "http://127.0.0.1:8000",
-        "*",
     ],
-    allow_credentials=True, allow_methods=["*"], allow_headers=["*"],
-    expose_headers=["X-Processing-Time"], max_age=600,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+    expose_headers=["X-Processing-Time"],
+    max_age=600,
 )
 
 
@@ -312,16 +242,11 @@ async def auth_dependency(
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ) -> Optional[str]:
     if is_clerk_enabled():
-        user_id = await clerk_auth_dependency(request)
-        return user_id
-    else:
-        verify_api_key(x_api_key)
-        return None
+        return await clerk_auth_dependency(request)
+    verify_api_key(x_api_key)
+    return None
 
 
-# ============================================================================
-# PYDANTIC MODELS
-# ============================================================================
 class Question(BaseModel):
     q: str = Field(min_length=1, max_length=1000)
     session_id: Optional[str] = None
@@ -375,6 +300,7 @@ class ChatMessage(BaseModel):
     content: str
     sources: Optional[Dict] = None
     timestamp: str
+    feedback: Optional[str] = None
 
 
 class ChatSession(BaseModel):
@@ -396,17 +322,16 @@ class FileInfo(BaseModel):
     owner_id: Optional[str] = None
 
 
-# ============================================================================
-# EMBEDDING
-# ============================================================================
 def safe_embed(text: str) -> Optional[List[float]]:
     if not text or not text.strip():
         return None
     try:
         body = json.dumps({"inputText": text[: settings.MAX_CHARS]}).encode("utf-8")
         resp = bedrock.invoke_model(
-            modelId=settings.BEDROCK_EMBED_MODEL, body=body,
-            accept="application/json", contentType="application/json",
+            modelId=settings.BEDROCK_EMBED_MODEL,
+            body=body,
+            accept="application/json",
+            contentType="application/json",
         )
         payload = json.loads(resp["body"].read().decode("utf-8"))
         emb = payload.get("embedding")
@@ -416,9 +341,6 @@ def safe_embed(text: str) -> Optional[List[float]]:
         return None
 
 
-# ============================================================================
-# LLM GENERATION
-# ============================================================================
 def estimate_tokens(text: str) -> int:
     return len(text) // CHARS_PER_TOKEN
 
@@ -436,23 +358,28 @@ def safe_generate(prompt: str, max_tokens: int = None) -> str:
             pos = prompt.rfind(marker)
             if pos > 0:
                 tail = prompt[pos:]
-                prompt = prompt[: max_prompt_chars - len(tail) - 80] + \
-                    "\n\n[... context truncated ...]\n" + tail
+                prompt = (
+                    prompt[: max_prompt_chars - len(tail) - 80]
+                    + "\n\n[... context truncated ...]\n"
+                    + tail
+                )
             else:
                 prompt = prompt[:max_prompt_chars] + "\n\n[... truncated ...]\n"
 
-        logger.info("safe_generate: %d chars (~%d tok)", len(prompt), estimate_tokens(prompt))
-
-        body = json.dumps({
-            "prompt": prompt,
-            "max_tokens": max_tokens,
-            "temperature": 0.1,
-            "top_p": 0.9,
-        }).encode("utf-8")
+        body = json.dumps(
+            {
+                "prompt": prompt,
+                "max_tokens": max_tokens,
+                "temperature": 0.1,
+                "top_p": 0.9,
+            }
+        ).encode("utf-8")
 
         resp = bedrock.invoke_model(
-            modelId=settings.BEDROCK_LLM_MODEL, body=body,
-            accept="application/json", contentType="application/json",
+            modelId=settings.BEDROCK_LLM_MODEL,
+            body=body,
+            accept="application/json",
+            contentType="application/json",
         )
         payload = json.loads(resp["body"].read().decode("utf-8"))
 
@@ -469,9 +396,6 @@ def safe_generate(prompt: str, max_tokens: int = None) -> str:
         return "Error generating response. Please try again."
 
 
-# ============================================================================
-# HYBRID SEARCH
-# ============================================================================
 def hybrid_search(
     query: str,
     query_embedding: List[float],
@@ -487,20 +411,16 @@ def hybrid_search(
 
     vector_results = {}
     try:
-        cr = coll.query(
-            query_embeddings=[query_embedding],
+        vector_hits = pgvector_search(
+            query_embedding=query_embedding,
             n_results=HYBRID_CONFIG["VECTOR_CANDIDATES"],
-            where={"file_type": file_type},
+            allowed_file_ids=list(allowed_file_ids) if allowed_file_ids else None,
         )
 
-        ids = (cr.get("ids") or [[]])[0]
-        docs = (cr.get("documents") or [[]])[0]
-        metas = (cr.get("metadatas") or [[]])[0]
-        dists = (cr.get("distances") or [[]])[0]
-
         rank = 0
-        for i, doc_id in enumerate(ids):
-            meta = metas[i] if i < len(metas) else {}
+        for hit in vector_hits:
+            doc_id = hit["id"]
+            meta = hit["metadata"]
             meta_file_id = meta.get("file_id")
             meta_owner_id = meta.get("owner_id", "anonymous")
 
@@ -511,11 +431,12 @@ def hybrid_search(
 
             rank += 1
             vector_results[doc_id] = {
-                "text": docs[i] if i < len(docs) else "",
+                "text": hit["text"],
                 "metadata": meta,
                 "rank": rank,
-                "similarity": max(0, 1 - (dists[i] if i < len(dists) else 1.0)),
+                "similarity": max(0.0, 1.0 - float(hit["distance"])),
             }
+
     except Exception as e:
         logger.warning("Vector search failed (%s): %s", file_type, e)
 
@@ -525,10 +446,10 @@ def hybrid_search(
             raw_bm25 = bm25.search(
                 query,
                 n_results=HYBRID_CONFIG["BM25_CANDIDATES"],
-                file_type=file_type
+                file_type=file_type,
             )
             rank = 0
-            for doc_id, text, meta, score in raw_bm25:
+            for doc_id, text_value, meta, score in raw_bm25:
                 meta_file_id = meta.get("file_id")
                 meta_owner_id = meta.get("owner_id", "anonymous")
 
@@ -539,13 +460,15 @@ def hybrid_search(
 
                 rank += 1
                 bm25_results[doc_id] = {
-                    "text": text,
+                    "text": text_value,
                     "metadata": meta,
                     "rank": rank,
                     "bm25_score": score,
                 }
+
                 if rank >= HYBRID_CONFIG["BM25_CANDIDATES"]:
                     break
+
     except Exception as e:
         logger.warning("BM25 search failed: %s", e)
 
@@ -563,40 +486,27 @@ def hybrid_search(
 
     sorted_ids = sorted(combined, key=lambda x: combined[x], reverse=True)
 
-    results = [
+    return [
         (did, all_data[did]["text"], all_data[did]["metadata"], combined[did])
         for did in sorted_ids[:n_results]
     ]
 
-    logger.info(
-        "Hybrid(%s): vec=%d, bm25=%d, merged=%d, returned=%d, allowed_files=%d, owner=%s",
-        file_type,
-        len(vector_results),
-        len(bm25_results),
-        len(combined),
-        len(results),
-        len(allowed_file_ids or []),
-        owner_id,
-    )
-    return results
 
-
-# ============================================================================
-# RE-RANKING
-# ============================================================================
 def rerank_chunks(
-    query: str, chunks: List[Tuple[str, str, Dict, float]], top_k: int = 6,
+    query: str,
+    chunks: List[Tuple[str, str, Dict, float]],
+    top_k: int = 6,
 ) -> List[Tuple[str, str, Dict, float]]:
     if not chunks or len(chunks) <= 1:
         return chunks[:top_k]
 
-    candidates = chunks[:min(len(chunks), 12)]
+    candidates = chunks[: min(len(chunks), 12)]
 
     previews = []
     for i, (_, text, meta, _) in enumerate(candidates):
         preview = text[:600].replace("\n", " ").strip()
         src = meta.get("source", "?")
-        previews.append(f"[{i+1}] (source: {src}) {preview}")
+        previews.append(f"[{i + 1}] (source: {src}) {preview}")
 
     rerank_prompt = f"""Rate each chunk's relevance to the question (0=irrelevant, 10=perfect match).
 Question: {query}
@@ -608,7 +518,6 @@ Respond ONLY with a JSON array: [{{"chunk":1,"score":8}}, ...]"""
 
     try:
         resp = safe_generate(rerank_prompt, max_tokens=512)
-
         raw = resp.strip()
         if "```" in raw:
             raw = raw.split("```")[1] if "```json" not in raw else raw.split("```json")[1].split("```")[0]
@@ -633,7 +542,6 @@ Respond ONLY with a JSON array: [{{"chunk":1,"score":8}}, ...]"""
                 scored.append(c)
 
         scored.sort(key=lambda x: x[3], reverse=True)
-        logger.info("Re-ranked %d -> top %d", len(candidates), top_k)
         return scored[:top_k]
 
     except Exception as e:
@@ -641,9 +549,6 @@ Respond ONLY with a JSON array: [{{"chunk":1,"score":8}}, ...]"""
         return candidates[:top_k]
 
 
-# ============================================================================
-# CONTEXT ASSEMBLY
-# ============================================================================
 def truncate_chunk(text: str, max_chars: int) -> str:
     if len(text) <= max_chars:
         return text
@@ -654,86 +559,11 @@ def truncate_chunk(text: str, max_chars: int) -> str:
     return t + "\n[... truncated ...]"
 
 
-# def assemble_context(
-#     ranked: List[Tuple[str, str, Dict, float]],
-#     max_total_chars: int,
-#     max_sources: int = 3,
-# ) -> Tuple[str, List[str]]:
-#     """
-#     Build context from ranked chunks.
-
-#     Only sources from included chunks are considered.
-#     Source list is stricter:
-#     - aggregate included score per source
-#     - keep max 3
-#     - if top source strongly dominates, return only top source
-#     """
-#     max_chunk = TOKEN_BUDGET["MAX_SINGLE_CHUNK_CHARS"]
-#     if not ranked:
-#         return "", []
-
-#     parts = []
-#     included_source_scores: Dict[str, float] = {}
-#     total = 0
-
-#     for _, text, meta, score in ranked:
-#         if not text or not text.strip():
-#             continue
-
-#         chunk = truncate_chunk(text.strip(), max_chunk)
-#         src = meta.get("source", "unknown")
-#         entry = f"[Source: {src}]\n{chunk}"
-
-#         if total + len(entry) > max_total_chars:
-#             remaining = max_total_chars - total
-#             if remaining > 300:
-#                 parts.append(f"[Source: {src}]\n{truncate_chunk(chunk, remaining - 60)}")
-#                 included_source_scores[src] = included_source_scores.get(src, 0.0) + score
-#             break
-
-#         parts.append(entry)
-#         included_source_scores[src] = included_source_scores.get(src, 0.0) + score
-#         total += len(entry)
-
-#     if not included_source_scores:
-#         return "\n\n".join(parts), []
-
-#     ranked_sources = sorted(included_source_scores.items(), key=lambda x: x[1], reverse=True)
-#     final_sources = []
-
-#     if len(ranked_sources) == 1:
-#         final_sources = [ranked_sources[0][0]]
-#     else:
-#         top_name, top_score = ranked_sources[0]
-#         second_score = ranked_sources[1][1] if len(ranked_sources) > 1 else 0.0
-
-#         # If top source clearly dominates, show only it.
-#         if second_score <= 0 or top_score >= second_score * 2.0:
-#             final_sources = [top_name]
-#         else:
-#             threshold = top_score * 0.60
-#             final_sources = [src for src, score in ranked_sources if score >= threshold][:max_sources]
-#             if not final_sources:
-#                 final_sources = [top_name]
-
-#     return "\n\n".join(parts), final_sources
-
 def assemble_context(
     ranked: List[Tuple[str, str, Dict, float]],
     max_total_chars: int,
     max_sources: int = 5,
 ) -> Tuple[str, List[str]]:
-    """
-    Build context from ranked chunks. Returns (context_str, sources).
-
-    Source selection logic:
-    - Aggregate relevance scores per source document
-    - Any source with aggregate score >= 40% of the top source is included
-    - This naturally handles:
-      * Question about 1 doc → only that doc (others score far below 40%)
-      * Question about 2 docs → both docs (both score similarly)
-      * Question about all docs → all relevant docs shown
-    """
     max_chunk = TOKEN_BUDGET["MAX_SINGLE_CHUNK_CHARS"]
     if not ranked:
         return "", []
@@ -764,56 +594,36 @@ def assemble_context(
     if not source_scores:
         return "\n\n".join(parts), []
 
-    # Sort by aggregate score
     ranked_sources = sorted(source_scores.items(), key=lambda x: x[1], reverse=True)
     top_score = ranked_sources[0][1]
-
-    # Include any source scoring >= 40% of the top source
     threshold = top_score * 0.40
     final_sources = [src for src, score in ranked_sources if score >= threshold]
-
-    logger.info(
-        "Source selection: %s | threshold=%.6f | final=%s",
-        {s: f"{sc:.6f}" for s, sc in ranked_sources},
-        threshold,
-        final_sources,
-    )
-
     return "\n\n".join(parts), final_sources[:max_sources]
 
 
-# ============================================================================
-# FILE HASHING
-# ============================================================================
-def calculate_file_hash(fp: Path) -> str:
+def calculate_file_hash_bytes(content: bytes) -> str:
     sha = hashlib.sha256()
-    with fp.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            sha.update(chunk)
+    sha.update(content)
     return sha.hexdigest()
 
 
-# ============================================================================
-# TEXT EXTRACTION
-# ============================================================================
 def extract_text_from_pdf(fp: Path) -> str:
     try:
         import fitz
+
         parts = []
         with fitz.open(str(fp)) as doc:
             for i, page in enumerate(doc):
                 t = page.get_text("text")
                 if t and t.strip():
                     parts.append(f"--- Page {i+1} ---\n{t}")
-        if parts:
-            logger.info("PDF: %d pages, %d chars from %s", len(parts), sum(len(p) for p in parts), fp.name)
-            return "\n\n".join(parts)
-        return ""
+        return "\n\n".join(parts) if parts else ""
     except ImportError:
         pass
 
     try:
         import pdfplumber
+
         parts = []
         with pdfplumber.open(str(fp)) as pdf:
             for i, page in enumerate(pdf.pages):
@@ -830,12 +640,13 @@ def extract_text_from_docx(fp: Path) -> str:
         from docx import Document
     except ImportError:
         raise RuntimeError("pip install python-docx")
+
     doc = Document(str(fp))
     parts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
     for ti, table in enumerate(doc.tables):
         rows = [" | ".join(c.text.strip() for c in r.cells) for r in table.rows]
         if rows:
-            parts.append(f"--- Table {ti+1} ---")
+            parts.append(f"--- Table {ti + 1} ---")
             parts.extend(rows)
     return "\n".join(parts)
 
@@ -849,9 +660,6 @@ def extract_text(fp: Path) -> str:
     return fp.read_text(encoding="utf-8", errors="ignore")
 
 
-# ============================================================================
-# CHUNKING
-# ============================================================================
 def iter_text_chunks(text, max_chars=None, lines_per=None, overlap=None):
     max_chars = max_chars or CHUNK_CONFIG["MAX_CHUNK_CHARS"]
     lines_per = lines_per or CHUNK_CONFIG["LINES_PER_CHUNK"]
@@ -879,59 +687,44 @@ def iter_line_chunks(fp: Path, lines_per=None):
     lines_per = lines_per or CHUNK_CONFIG["LINES_PER_CHUNK"]
     ext = fp.suffix.lower()
     if ext in (".pdf", ".docx"):
-        try:
-            text = extract_text(fp)
-            if not text or not text.strip():
-                return
-            logger.info("Extracted %d chars from %s", len(text), fp.name)
-            n = 0
-            for c in iter_text_chunks(text, lines_per=lines_per):
-                n += 1
-                yield c
-            logger.info("%d chunks from %s", n, fp.name)
-        except RuntimeError as e:
-            logger.error("Extraction: %s", e)
-            raise
-        except Exception as e:
-            logger.exception("Failed: %s", e)
+        text = extract_text(fp)
+        if not text or not text.strip():
+            return
+        for c in iter_text_chunks(text, lines_per=lines_per):
+            yield c
         return
-    try:
-        text = fp.read_text(encoding="utf-8", errors="ignore")
-        if text and text.strip():
-            for c in iter_text_chunks(text, lines_per=lines_per):
-                yield c
-    except Exception as e:
-        logger.exception("Read failed %s: %s", fp, e)
+
+    text = fp.read_text(encoding="utf-8", errors="ignore")
+    if text and text.strip():
+        for c in iter_text_chunks(text, lines_per=lines_per):
+            yield c
 
 
-# ============================================================================
-# INDEX JOB
-# ============================================================================
 async def index_file_job(
     job_id: str,
-    fp: Path,
+    storage_uri: str,
     filename: str,
     file_type: str,
     file_id: str,
     owner_id: Optional[str],
+    file_size_mb: float,
 ):
     owner_id = _normalize_owner_id(owner_id)
+    update_ingestion_job(job_id, status="running")
 
     try:
-        job = UPLOAD_JOBS.get(job_id)
-        if not job:
-            return
+        local_path = storage.resolve_local_path(storage_uri)
+        if not local_path or not local_path.exists():
+            raise RuntimeError(f"Stored file path is not readable: {storage_uri}")
 
-        job["status"] = "running"
-
-        if file_id in UPLOADED_FILES:
-            UPLOADED_FILES[file_id]["status"] = "processing"
+        job = get_ingestion_job(job_id)
+        file_hash = job["file_hash"] if job else ""
 
         total, ok = 0, 0
-        b_emb, b_doc, b_meta, b_ids = [], [], [], []
+        chunk_rows = []
         bm25_ids, bm25_docs, bm25_metas = [], [], []
 
-        for chunk in iter_line_chunks(fp):
+        for chunk in iter_line_chunks(local_path):
             if not chunk or not chunk.strip():
                 continue
 
@@ -952,10 +745,14 @@ async def index_file_job(
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
 
-            b_ids.append(cid)
-            b_emb.append(emb)
-            b_doc.append(chunk)
-            b_meta.append(meta)
+            chunk_rows.append(
+                {
+                    "id": cid,
+                    "chunk_index": ok,
+                    "content": chunk,
+                    "embedding": emb,
+                }
+            )
 
             bm25_ids.append(cid)
             bm25_docs.append(chunk)
@@ -963,59 +760,50 @@ async def index_file_job(
 
             ok += 1
             if ok % 10 == 0:
-                job["processed_chunks"] = ok
+                update_ingestion_job(job_id, processed_chunks=str(ok), total_chunks=str(total))
 
-            if len(b_emb) >= settings.BATCH_SIZE:
-                coll.add(ids=b_ids, embeddings=b_emb, metadatas=b_meta, documents=b_doc)
-                b_ids, b_emb, b_meta, b_doc = [], [], [], []
-
-        if b_emb:
-            coll.add(ids=b_ids, embeddings=b_emb, metadatas=b_meta, documents=b_doc)
+        inserted = insert_document_and_chunks(
+            document_id=file_id,
+            filename=filename,
+            fingerprint=file_hash,
+            chunk_rows=chunk_rows,
+            owner_id=owner_id,
+            file_type=file_type,
+            storage_uri=storage_uri,
+            file_size_mb=file_size_mb,
+            metadata={"uploaded_via": "phase1_api"},
+        )
 
         if bm25 and bm25_ids:
+            # Remove older same-source docs so latest active doc remains in BM25 too.
+            bm25.remove_documents_by_source(filename)
             bm25.add_documents_batch(bm25_ids, bm25_docs, bm25_metas)
-            logger.info("BM25 +%d (total: %d)", len(bm25_ids), bm25.size)
 
-        try:
-            fp.unlink(missing_ok=True)
-        except Exception:
-            pass
+        update_ingestion_job(
+            job_id,
+            status="done",
+            processed_chunks=str(ok),
+            total_chunks=str(total),
+            successful_chunks=str(inserted),
+            completed_at=datetime.now(timezone.utc),
+        )
 
-        job.update({
-            "status": "done",
-            "processed_chunks": ok,
-            "total_chunks": total,
-            "successful_chunks": ok,
-            "completed_at": datetime.now(timezone.utc),
-        })
-
-        if file_id in UPLOADED_FILES:
-            UPLOADED_FILES[file_id]["status"] = "indexed"
-
-        logger.info("Job %s DONE: %d/%d from %s", job_id, ok, total, filename)
+        logger.info("Job %s DONE: %d/%d from %s", job_id, inserted, total, filename)
 
     except Exception as e:
         logger.exception("Job failed %s: %s", job_id, e)
-        if job_id in UPLOAD_JOBS:
-            UPLOAD_JOBS[job_id].update({
-                "status": "failed",
-                "error": str(e),
-                "completed_at": datetime.now(timezone.utc),
-            })
-        if file_id in UPLOADED_FILES:
-            UPLOADED_FILES[file_id]["status"] = "failed"
-        try:
-            fp.unlink(missing_ok=True)
-        except Exception:
-            pass
+        update_ingestion_job(
+            job_id,
+            status="failed",
+            error=str(e),
+            completed_at=datetime.now(timezone.utc),
+        )
 
 
-# ============================================================================
-# MIDDLEWARE
-# ============================================================================
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
     import time
+
     start = time.perf_counter()
     response = await call_next(request)
     ms = (time.perf_counter() - start) * 1000.0
@@ -1024,39 +812,28 @@ async def log_requests(request: Request, call_next):
     return response
 
 
-# ============================================================================
-# ROUTES — HEALTH
-# ============================================================================
 @app.get("/health")
 async def health_check():
-    cc = 0
+    chunk_count = 0
     try:
-        if coll:
-            cc = coll.count()
+        chunk_count = count_pg_chunks()
     except Exception:
         pass
+
     return {
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "model": settings.BEDROCK_LLM_MODEL,
         "services": {
-            "vector_store": f"{cc} chunks" if coll else "uninitialized",
+            "vector_store": f"{chunk_count} chunks" if chunk_count >= 0 else "uninitialized",
             "bm25_index": f"{bm25.size} docs" if bm25 else "uninitialized",
             "bedrock": "available",
         },
-        "search_mode": "hybrid (vector + BM25 + re-ranking)",
+        "search_mode": "hybrid (pgvector + BM25 + re-ranking)",
         "auth_mode": "clerk" if is_clerk_enabled() else ("api_key" if settings.API_KEY else "open"),
-        "token_budget": {
-            "model_max": TOKEN_BUDGET["MODEL_MAX_TOKENS"],
-            "max_log_chars": TOKEN_BUDGET["MAX_LOG_CONTEXT_CHARS"],
-            "max_kb_chars": TOKEN_BUDGET["MAX_KB_CONTEXT_CHARS"],
-        },
     }
 
 
-# ============================================================================
-# ROUTES — AUTH / USER
-# ============================================================================
 @app.get("/me")
 async def get_current_user(request: Request, user_id: Optional[str] = Depends(auth_dependency)):
     if is_clerk_enabled() and user_id:
@@ -1074,164 +851,34 @@ async def get_current_user(request: Request, user_id: Optional[str] = Depends(au
     }
 
 
-# ============================================================================
-# ROUTES — RESET
-# ============================================================================
 @app.post("/reset")
 async def reset_all(user_id: Optional[str] = Depends(auth_dependency)):
-    global coll, bm25
-    errors = []
-
-    deleted_chunks = 0
-    try:
-        deleted_chunks = reset_chroma_collection()
-        coll = get_collection()
-        logger.info("RESET: ChromaDB cleared (%d chunks deleted)", deleted_chunks)
-    except Exception as e:
-        logger.exception("RESET: ChromaDB reset failed: %s", e)
-        errors.append(f"ChromaDB: {e}")
-        try:
-            coll = get_collection()
-        except Exception:
-            pass
-
-    try:
-        if bm25:
-            old_size = bm25.size
-            bm25.clear()
-            logger.info("RESET: BM25 cleared (%d docs)", old_size)
-    except Exception as e:
-        logger.exception("RESET: BM25 clear failed: %s", e)
-        errors.append(f"BM25: {e}")
-
-    deleted_files = 0
-    try:
-        upload_dir = settings.UPLOAD_DIR
-        if upload_dir.exists():
-            for f in upload_dir.iterdir():
-                if f.is_file():
-                    try:
-                        f.unlink()
-                        deleted_files += 1
-                    except Exception as fe:
-                        logger.warning("RESET: Could not delete %s: %s", f.name, fe)
-            logger.info("RESET: Deleted %d files from %s", deleted_files, upload_dir)
-    except Exception as e:
-        logger.exception("RESET: Upload cleanup failed: %s", e)
-        errors.append(f"Uploads: {e}")
-
-    job_count = len(UPLOAD_JOBS)
-    UPLOAD_JOBS.clear()
-    UPLOADED_FILES.clear()
-    CHAT_SESSIONS.clear()
-    logger.info("RESET: Cleared %d job records", job_count)
-
-    verify_count = 0
-    try:
-        if coll:
-            verify_count = coll.count()
-    except Exception:
-        pass
-
-    if errors:
-        return {
-            "status": "partial",
-            "message": f"Reset completed with {len(errors)} error(s)",
-            "errors": errors,
-            "deleted_chunks": deleted_chunks,
-            "deleted_files": deleted_files,
-            "cleared_jobs": job_count,
-            "chroma_count_after": verify_count,
-            "bm25_count_after": bm25.size if bm25 else 0,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-        }
+    deleted_chunks = reset_pg_data()
+    if bm25:
+        bm25.clear()
 
     return {
         "status": "success",
         "message": "All data deleted",
         "deleted_chunks": deleted_chunks,
-        "deleted_files": deleted_files,
-        "cleared_jobs": job_count,
-        "chroma_count_after": verify_count,
-        "bm25_count_after": 0,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
-# ============================================================================
-# ROUTES — PURGE ORPHAN CHUNKS
-# ============================================================================
 @app.post("/purge_orphans")
 async def purge_orphan_chunks(user_id: Optional[str] = Depends(auth_dependency)):
-    """
-    Delete all ChromaDB chunks that don't belong to any currently registered file.
-
-    This cleans up ghost data from previously deleted/uploaded files whose
-    chunks survived in the vector store (e.g., files uploaded before file_id
-    tracking was added, or files deleted while the server was down).
-
-    Safe to run anytime. Also rebuilds BM25 from the cleaned ChromaDB.
-    """
-    global bm25
-
-    if not coll:
-        raise HTTPException(503, "Vector store not ready")
-
-    # Get all known file_ids from current registry
-    known_file_ids = {f["id"] for f in UPLOADED_FILES.values()}
-
-    # Scan all chunks in ChromaDB
-    total_chunks = coll.count()
-    if total_chunks == 0:
-        return {"status": "clean", "total_chunks": 0, "orphans_deleted": 0}
-
-    orphan_ids = []
-    batch_size = 500
-    for offset in range(0, total_chunks, batch_size):
-        limit = min(batch_size, total_chunks - offset)
-        results = coll.get(
-            limit=limit, offset=offset,
-            include=["metadatas"],
-        )
-        ids = results.get("ids", [])
-        metas = results.get("metadatas", [])
-        for i, chunk_id in enumerate(ids):
-            meta = metas[i] if i < len(metas) else {}
-            chunk_file_id = meta.get("file_id")
-            # If chunk has no file_id or its file_id is not in registry → orphan
-            if not chunk_file_id or chunk_file_id not in known_file_ids:
-                orphan_ids.append(chunk_id)
-
-    # Delete orphans in batches
-    deleted = 0
-    for i in range(0, len(orphan_ids), 500):
-        batch = orphan_ids[i:i+500]
-        coll.delete(ids=batch)
-        deleted += len(batch)
-
-    # Rebuild BM25 from clean ChromaDB
-    bm25_count = 0
-    if bm25:
-        from vector_store import rebuild_bm25_from_chroma
-        bm25_count = rebuild_bm25_from_chroma(coll)
-
-    logger.info("PURGE: Deleted %d orphan chunks out of %d total. BM25 rebuilt with %d docs.",
-                deleted, total_chunks, bm25_count)
+    deleted = purge_orphan_chunks_db()
+    bm25_count = rebuild_bm25_from_postgres()
 
     return {
         "status": "purged",
-        "total_chunks_before": total_chunks,
         "orphans_deleted": deleted,
-        "chunks_remaining": coll.count(),
+        "chunks_remaining": count_pg_chunks(),
         "bm25_rebuilt": bm25_count,
-        "known_files": len(known_file_ids),
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
-# ============================================================================
-# ROUTES — UPLOAD
-# ============================================================================
 @app.post("/upload", response_model=UploadResponse)
 @limiter.limit("100/minute")
 async def upload(
@@ -1247,58 +894,48 @@ async def upload(
 
     owner_id = _normalize_owner_id(user_id)
     job_id = uuid.uuid4().hex
-    file_id = uuid.uuid4().hex
-    fp = settings.UPLOAD_DIR / f"{job_id}_{Path(file.filename).name}"
+    file_id = str(uuid.uuid4())
 
     content = await file.read()
     size_mb = len(content) / (1024 * 1024)
     if size_mb > settings.MAX_FILE_SIZE_MB:
         raise HTTPException(400, f"File {size_mb:.1f}MB exceeds {settings.MAX_FILE_SIZE_MB}MB limit")
 
-    fp.write_bytes(content)
-    fh = calculate_file_hash(fp)
+    relative_name = f"{job_id}_{Path(file.filename).name}"
+    storage_uri = storage.save_bytes(relative_name, content)
+    file_hash = calculate_file_hash_bytes(content)
 
-    UPLOAD_JOBS[job_id] = {
-        "job_id": job_id,
-        "status": "queued",
-        "processed_chunks": 0,
-        "total_chunks": 0,
-        "successful_chunks": 0,
-        "file": file.filename,
-        "file_type": file_type,
-        "file_size_mb": size_mb,
-        "file_hash": fh,
-        "created_at": datetime.now(timezone.utc),
-        "owner_id": owner_id,
-        "file_id": file_id,
-    }
+    create_ingestion_job(
+        job_id=job_id,
+        file_id=file_id,
+        owner_id=owner_id,
+        file_name=file.filename,
+        file_type=file_type,
+        file_hash=file_hash,
+    )
 
-    UPLOADED_FILES[file_id] = {
-        "id": file_id,
-        "name": file.filename,
-        "file_type": file_type,
-        "size_mb": round(size_mb, 2),
-        "status": "uploading",
-        "job_id": job_id,
-        "uploaded_at": datetime.now(timezone.utc).isoformat(),
-        "owner_id": owner_id,
-    }
-
-    background_tasks.add_task(index_file_job, job_id, fp, file.filename, file_type, file_id, owner_id)
-
-    logger.info("Upload: %s (%.1fMB, %s, owner=%s, file_id=%s)", file.filename, size_mb, file_type, owner_id, file_id)
+    background_tasks.add_task(
+        index_file_job,
+        job_id,
+        storage_uri,
+        file.filename,
+        file_type,
+        file_id,
+        owner_id,
+        size_mb,
+    )
 
     return UploadResponse(
         job_id=job_id,
         file_id=file_id,
         message="Uploaded. Processing started.",
-        file_hash=fh,
+        file_hash=file_hash,
     )
 
 
 @app.get("/upload_status/{job_id}", response_model=JobStatus)
 async def upload_status(job_id: str, user_id: Optional[str] = Depends(auth_dependency)):
-    job = UPLOAD_JOBS.get(job_id)
+    job = get_ingestion_job(job_id)
     if not job:
         raise HTTPException(404, "Job not found")
 
@@ -1309,238 +946,100 @@ async def upload_status(job_id: str, user_id: Optional[str] = Depends(auth_depen
     return JobStatus(**job)
 
 
-# ============================================================================
-# ROUTES — FILES
-# ============================================================================
 @app.get("/files")
 async def list_files(user_id: Optional[str] = Depends(auth_dependency)):
-    files = sorted(
-        _filter_files_for_owner(user_id),
-        key=lambda x: x["uploaded_at"],
-        reverse=True,
-    )
+    owner_id = _normalize_owner_id(user_id)
+    files = list_active_files(owner_id)
     return {"files": files, "total": len(files)}
 
 
 @app.delete("/files/{file_id}")
 async def delete_file(file_id: str, user_id: Optional[str] = Depends(auth_dependency)):
-    """
-    Fully delete a file and all its indexed data:
-    1. Remove all chunks from ChromaDB by file_id
-    2. Remove all chunks from BM25
-    3. Remove physical upload file if still present
-    4. Remove file registry + job registry
-    5. Remove old source references from chat sessions
-    """
-    if file_id not in UPLOADED_FILES:
-        raise HTTPException(404, "File not found")
-
-    file_info = UPLOADED_FILES[file_id]
     owner_id = _normalize_owner_id(user_id)
-    if file_info.get("owner_id", "anonymous") != owner_id:
+    files = {f["id"]: f for f in list_active_files(owner_id)}
+    if file_id not in files:
         raise HTTPException(404, "File not found")
 
-    filename = file_info["name"]
-    job_id = file_info.get("job_id")
+    deleted_chunks = delete_document_and_chunks(file_id)
 
-    deleted_chunks = 0
-    bm25_removed = 0
-    deleted_files = 0
-    sessions_updated = 0
-    errors = []
-
-    # 1. Delete from Chroma by exact file_id
-    try:
-        if coll:
-            results = coll.get(where={"file_id": file_id}, include=[])
-            chunk_ids = results.get("ids", []) or []
-            if chunk_ids:
-                coll.delete(ids=chunk_ids)
-                deleted_chunks = len(chunk_ids)
-            logger.info(
-                "DELETE FILE: Removed %d chunks from ChromaDB for file_id=%s (%s)",
-                deleted_chunks, file_id, filename
-            )
-    except Exception as e:
-        logger.exception("DELETE FILE: Chroma cleanup failed for '%s': %s", filename, e)
-        errors.append(f"ChromaDB: {e}")
-
-    # 2. Delete from BM25
-    try:
-        if bm25:
-            if hasattr(bm25, "remove_documents_by_file_id"):
-                bm25_removed = bm25.remove_documents_by_file_id(file_id)
-            elif hasattr(bm25, "remove_documents_by_source"):
-                bm25_removed = bm25.remove_documents_by_source(filename)
-            logger.info("DELETE FILE: Removed %d docs from BM25 for '%s'", bm25_removed, filename)
-    except Exception as e:
-        logger.exception("DELETE FILE: BM25 cleanup failed for '%s': %s", filename, e)
-        errors.append(f"BM25: {e}")
-
-    # 3. Delete physical file
-    try:
-        deleted_files = _delete_physical_uploads_for_file(filename, job_id)
-        logger.info("DELETE FILE: Removed %d upload file(s) for '%s'", deleted_files, filename)
-    except Exception as e:
-        logger.warning("DELETE FILE: Disk cleanup failed: %s", e)
-
-    # 4. Remove from registries
-    try:
-        del UPLOADED_FILES[file_id]
-    except KeyError:
-        pass
-
-    if job_id and job_id in UPLOAD_JOBS:
-        del UPLOAD_JOBS[job_id]
-
-    # 5. Remove from session source references
-    try:
-        sessions_updated = _remove_file_references_from_sessions(filename, file_id)
-    except Exception as e:
-        logger.warning("DELETE FILE: Session cleanup failed: %s", e)
-
-    if errors:
-        return {
-            "status": "partial",
-            "file_id": file_id,
-            "filename": filename,
-            "deleted_chunks": deleted_chunks,
-            "bm25_removed": bm25_removed,
-            "deleted_files": deleted_files,
-            "sessions_updated": sessions_updated,
-            "errors": errors,
-        }
+    if bm25:
+        bm25.remove_documents_by_file_id(file_id)
 
     return {
         "status": "deleted",
         "file_id": file_id,
-        "filename": filename,
+        "filename": files[file_id]["name"],
         "deleted_chunks": deleted_chunks,
-        "bm25_removed": bm25_removed,
-        "deleted_files": deleted_files,
-        "sessions_updated": sessions_updated,
     }
 
 
-# ============================================================================
-# ROUTES — CHAT HISTORY
-# ============================================================================
 @app.get("/chat/sessions")
 async def list_sessions(user_id: Optional[str] = Depends(auth_dependency)):
     owner_id = _normalize_owner_id(user_id)
-    sessions = sorted(
-        [
-            {
-                "id": s["id"],
-                "title": s["title"],
-                "updated_at": s["updated_at"],
-                "message_count": len(s["messages"]),
-            }
-            for s in CHAT_SESSIONS.values()
-            if s.get("owner_id", "anonymous") == owner_id
-        ],
-        key=lambda x: x["updated_at"],
-        reverse=True,
-    )
-    return {"sessions": sessions}
+    return {"sessions": list_chat_sessions(owner_id)}
 
 
 @app.get("/chat/sessions/{session_id}")
 async def get_session(session_id: str, user_id: Optional[str] = Depends(auth_dependency)):
-    session = CHAT_SESSIONS.get(session_id)
     owner_id = _normalize_owner_id(user_id)
-    if not session or session.get("owner_id", "anonymous") != owner_id:
+    session = get_chat_session(session_id, owner_id)
+    if not session:
         raise HTTPException(404, "Session not found")
     return session
 
 
 @app.delete("/chat/sessions/{session_id}")
 async def delete_session(session_id: str, user_id: Optional[str] = Depends(auth_dependency)):
-    session = CHAT_SESSIONS.get(session_id)
     owner_id = _normalize_owner_id(user_id)
-    if not session or session.get("owner_id", "anonymous") != owner_id:
+    ok = delete_chat_session(session_id, owner_id)
+    if not ok:
         raise HTTPException(404, "Session not found")
-    del CHAT_SESSIONS[session_id]
     return {"status": "deleted", "session_id": session_id}
 
 
 @app.delete("/chat/sessions")
 async def delete_all_sessions(user_id: Optional[str] = Depends(auth_dependency)):
     owner_id = _normalize_owner_id(user_id)
-    to_delete = [sid for sid, s in CHAT_SESSIONS.items() if s.get("owner_id", "anonymous") == owner_id]
-    for sid in to_delete:
-        del CHAT_SESSIONS[sid]
-    return {"status": "cleared", "deleted_count": len(to_delete)}
+    deleted_count = delete_all_chat_sessions(owner_id)
+    return {"status": "cleared", "deleted_count": deleted_count}
 
 
-def _save_message_to_session(
-    session_id: Optional[str],
-    role: str,
-    content: str,
-    sources: Optional[Dict] = None,
-    owner_id: Optional[str] = None,
-) -> str:
-    now = datetime.now(timezone.utc).isoformat()
-    owner_id = _normalize_owner_id(owner_id)
-
-    if not session_id or session_id not in CHAT_SESSIONS:
-        session_id = uuid.uuid4().hex
-        title = content[:60] + "..." if len(content) > 60 else content
-        CHAT_SESSIONS[session_id] = {
-            "id": session_id,
-            "title": title,
-            "messages": [],
-            "created_at": now,
-            "updated_at": now,
-            "owner_id": owner_id,
-        }
-
-    msg = {"role": role, "content": content, "timestamp": now}
-    if sources:
-        msg["sources"] = sources
-
-    CHAT_SESSIONS[session_id]["messages"].append(msg)
-    CHAT_SESSIONS[session_id]["updated_at"] = now
-    return session_id
-
-
-# ============================================================================
-# ROUTES — ASK
-# ============================================================================
 @app.post("/ask", response_model=AnswerResponse)
 @limiter.limit("30/minute")
 async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(auth_dependency)):
-    """
-    Searches only currently active indexed files for this user.
-    Deleted files are excluded even if old chunks exist elsewhere.
-    """
     import time
+
     start = time.perf_counter()
 
-    if not coll:
+    if count_pg_chunks() < 0:
         raise HTTPException(503, "Vector store not ready")
 
     owner_id = _normalize_owner_id(user_id)
 
-    # Save user message
-    session_id = _save_message_to_session(req.session_id, "user", req.q, owner_id=owner_id)
+    session_id = save_message_to_session(
+        session_id=req.session_id,
+        role="user",
+        content=req.q,
+        owner_id=owner_id,
+    )
 
     active_file_ids = _get_active_indexed_file_ids(user_id)
     if not active_file_ids:
         answer = "No indexed files are currently available. Please upload a document first."
-        _save_message_to_session(session_id, "assistant", answer, {"docs": []}, owner_id=owner_id)
+        save_message_to_session(
+            session_id=session_id,
+            role="assistant",
+            content=answer,
+            owner_id=owner_id,
+            sources={"docs": []},
+        )
         return AnswerResponse(
             answer=answer,
             sources=[],
             confidence=0.0,
             processing_time_ms=int((time.perf_counter() - start) * 1000),
             session_id=session_id,
-            context_stats={
-                "search_mode": "hybrid (vector + BM25 + re-ranking)",
-                "active_file_count": 0,
-                "doc_candidates": 0,
-                "doc_after_rerank": 0,
-            },
+            context_stats={"active_file_count": 0},
         )
 
     q_emb = safe_embed(req.q)
@@ -1556,97 +1055,65 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         owner_id=owner_id,
     )
 
-    # Extra hard safety filter
     doc_cands = [
         item for item in doc_cands
         if item[2].get("file_id") in active_file_ids
         and item[2].get("owner_id", "anonymous") == owner_id
     ]
 
-    doc_ranked = rerank_chunks(
-        req.q,
-        doc_cands,
-        HYBRID_CONFIG["RERANK_TOP_K_LOG"] 
-    )
+    doc_ranked = rerank_chunks(req.q, doc_cands, HYBRID_CONFIG["RERANK_TOP_K_LOG"])
 
     max_ctx_chars = TOKEN_BUDGET["MAX_LOG_CONTEXT_CHARS"] + TOKEN_BUDGET["MAX_KB_CONTEXT_CHARS"]
     doc_ctx, doc_src = assemble_context(doc_ranked, max_ctx_chars)
 
     if not doc_ctx:
         answer = "I could not find relevant information in the currently uploaded files."
-        ms = int((time.perf_counter() - start) * 1000)
-        _save_message_to_session(session_id, "assistant", answer, {"docs": []}, owner_id=owner_id)
+        save_message_to_session(
+            session_id=session_id,
+            role="assistant",
+            content=answer,
+            owner_id=owner_id,
+            sources={"docs": []},
+        )
         return AnswerResponse(
             answer=answer,
             sources=[],
             confidence=0.05,
-            processing_time_ms=ms,
+            processing_time_ms=int((time.perf_counter() - start) * 1000),
             session_id=session_id,
-            context_stats={
-                "search_mode": "hybrid (vector + BM25 + re-ranking)",
-                "active_file_count": len(active_file_ids),
-                "doc_candidates": len(doc_cands),
-                "doc_after_rerank": len(doc_ranked),
-                "doc_context_chars": 0,
-            },
+            context_stats={"active_file_count": len(active_file_ids)},
         )
-
-    if len(doc_ctx) > MAX_TOTAL_PROMPT_CHARS - TOKEN_BUDGET["PROMPT_OVERHEAD_CHARS"]:
-        doc_ctx = truncate_chunk(doc_ctx, MAX_TOTAL_PROMPT_CHARS - TOKEN_BUDGET["PROMPT_OVERHEAD_CHARS"])
-
-    confidence = min(0.3 + len(doc_ranked) * 0.1, 1.0)
-
-#     prompt = f"""You are an expert AI assistant analyzing uploaded documents.
-
-# IMPORTANT RULES:
-# - Use ONLY the document context below.
-# - Ignore any deleted, missing, or previously uploaded files not present in the context.
-# - If the answer is mainly from one document, mention only that document.
-# - In the final answer, be precise and avoid mixing unrelated documents.
-# - If the information is not present in the current uploaded files, clearly say so.
-
-# DOCUMENTS:
-# {doc_ctx}
-
-# USER QUESTION: {req.q}
-
-# Provide a concise, accurate answer based only on the current uploaded documents.
-
-# ANSWER:"""
 
     prompt = f"""You are an expert AI assistant analyzing uploaded documents.
 
 IMPORTANT RULES:
 - Use ONLY the document context below.
-- Ignore any deleted, missing, or previously uploaded files not present in the context.
+- Ignore any deleted, missing, or superseded files not present in the context.
 - If the answer is mainly from one document, rely only on that document.
 - Do NOT mix unrelated documents.
 - If the information is not present in the current uploaded files, clearly say so.
 - Every answer MUST be in bullet-point format.
-- Keep bullets concise, factual, and directly based on the provided document context.
-- Do not add a source section inside the answer. Sources are handled separately.
 
 DOCUMENTS:
 {doc_ctx}
 
 USER QUESTION: {req.q}
 
-Provide a concise, accurate answer based only on the current uploaded documents.
-
 ANSWER:"""
-
-    ptok = estimate_tokens(prompt)
-    max_tok = TOKEN_BUDGET["MODEL_MAX_TOKENS"] - TOKEN_BUDGET["MAX_GENERATION_TOKENS"]
-    logger.info(
-        "ASK: q='%s' | active_files=%d | cands=%d | reranked=%d | ~%d tok (limit %d)",
-        req.q[:50], len(active_file_ids), len(doc_cands), len(doc_ranked), ptok, max_tok
-    )
 
     answer = safe_generate(prompt)
     ms = int((time.perf_counter() - start) * 1000)
 
     sources_dict = {"docs": doc_src}
-    _save_message_to_session(session_id, "assistant", answer, sources_dict, owner_id=owner_id)
+    save_message_to_session(
+        session_id=session_id,
+        role="assistant",
+        content=answer,
+        owner_id=owner_id,
+        sources=sources_dict,
+    )
+
+    confidence = min(0.3 + len(doc_ranked) * 0.1, 1.0)
 
     return AnswerResponse(
         answer=answer,
@@ -1660,34 +1127,24 @@ ANSWER:"""
             "doc_candidates": len(doc_cands),
             "doc_after_rerank": len(doc_ranked),
             "doc_context_chars": len(doc_ctx),
-            "prompt_chars": len(prompt),
-            "prompt_tokens": ptok,
-            "max_tokens": max_tok,
-            "headroom": max_tok - ptok,
         },
     )
 
 
-# ============================================================================
-# ROUTES — FEEDBACK
-# ============================================================================
-
 class FeedbackSubmitRequest(BaseModel):
-    """Request body for submitting feedback (like or dislike)."""
     session_id: Optional[str] = None
-    message_index: Optional[int] = None       # index of the AI message in the session
-    feedback_type: str = Field(pattern="^(like|dislike)$")  # "like" or "dislike"
-    feedback_text: str = Field(default="", max_length=1200)  # optional message (up to 1200 chars)
-    question: Optional[str] = None             # the user's question (for email context)
-    answer: Optional[str] = None               # the AI's answer preview (for email context)
+    message_index: Optional[int] = None
+    feedback_type: str = Field(pattern="^(like|dislike)$")
+    feedback_text: str = Field(default="", max_length=1200)
+    question: Optional[str] = None
+    answer: Optional[str] = None
     model_config = ConfigDict(extra="ignore")
 
 
 class FeedbackStateRequest(BaseModel):
-    """Request body for persisting like/dislike state on a message."""
     session_id: str
     message_index: int
-    feedback_type: str = Field(pattern="^(like|dislike|none)$")  # "like", "dislike", or "none" to clear
+    feedback_type: str = Field(pattern="^(like|dislike|none)$")
     model_config = ConfigDict(extra="ignore")
 
 
@@ -1696,31 +1153,11 @@ async def save_feedback_state(
     req: FeedbackStateRequest,
     user_id: Optional[str] = Depends(auth_dependency),
 ):
-    """
-    Persist like/dislike state on a specific message in a session.
-    This state survives sign-out and page refresh because it's stored
-    in the backend session data.
-
-    The frontend reads it back when loading a session via GET /chat/sessions/{id}.
-    """
     owner = _normalize_owner_id(user_id)
-    session = CHAT_SESSIONS.get(req.session_id)
-
-    if not session or session.get("owner_id", "anonymous") != owner:
+    feedback_value = None if req.feedback_type == "none" else req.feedback_type
+    ok = update_message_feedback(req.session_id, owner, req.message_index, feedback_value)
+    if not ok:
         raise HTTPException(404, "Session not found")
-
-    messages = session.get("messages", [])
-    if req.message_index < 0 or req.message_index >= len(messages):
-        raise HTTPException(400, "Invalid message index")
-
-    # Store feedback_type on the message object itself
-    # "none" clears the feedback (user un-clicked)
-    if req.feedback_type == "none":
-        messages[req.message_index].pop("feedback", None)
-    else:
-        messages[req.message_index]["feedback"] = req.feedback_type
-
-    session["updated_at"] = datetime.now(timezone.utc).isoformat()
     return {"status": "saved", "feedback_type": req.feedback_type}
 
 
@@ -1730,13 +1167,6 @@ async def submit_feedback(
     background_tasks: BackgroundTasks,
     user_id: Optional[str] = Depends(auth_dependency),
 ):
-    """
-    Submit feedback (like or dislike) with an optional message.
-    Sends an email via SES with the user's real name, email, feedback type, and message.
-    """
-    owner = _normalize_owner_id(user_id)
-
-    # Resolve actual user name/email from Clerk
     user_info = _resolve_user_display(user_id)
     display_name = user_info["name"]
     display_email = user_info["email"]
@@ -1746,17 +1176,14 @@ async def submit_feedback(
     label = "Positive" if is_like else "Negative"
     color = "#10b981" if is_like else "#dc2626"
     header_bg = "#4f46e5" if is_like else "#dc2626"
-
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
     subject = f"Acadia Doc IQ — {emoji} {label} Feedback from {display_name}"
 
-    # Plain text version
     body_text = (
         f"Feedback Type: {label} ({emoji})\n"
         f"User: {display_name}\n"
         f"Email: {display_email}\n"
-        f"User ID: {owner}\n"
         f"Timestamp: {now}\n"
         f"Session: {req.session_id or 'N/A'}\n"
     )
@@ -1766,10 +1193,7 @@ async def submit_feedback(
         body_text += f"Answer Preview: {req.answer[:300]}\n"
     if req.feedback_text.strip():
         body_text += f"\nFeedback Message:\n{req.feedback_text}\n"
-    else:
-        body_text += "\nFeedback Message: (none provided)\n"
 
-    # HTML version — nice formatted email
     feedback_html = ""
     if req.feedback_text.strip():
         feedback_html = f"""
@@ -1779,13 +1203,8 @@ async def submit_feedback(
             </div>
         """
 
-    question_row = ""
-    if req.question:
-        question_row = f'<tr><td style="padding: 8px 0; font-weight: bold; vertical-align: top;">Question</td><td>{req.question}</td></tr>'
-
-    answer_row = ""
-    if req.answer:
-        answer_row = f'<tr><td style="padding: 8px 0; font-weight: bold; vertical-align: top;">Answer</td><td style="font-size: 12px; color: #666;">{req.answer[:500]}</td></tr>'
+    question_row = f'<tr><td style="padding: 8px 0; font-weight: bold;">Question</td><td>{req.question}</td></tr>' if req.question else ""
+    answer_row = f'<tr><td style="padding: 8px 0; font-weight: bold;">Answer</td><td>{(req.answer or "")[:500]}</td></tr>' if req.answer else ""
 
     body_html = f"""
     <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
@@ -1799,7 +1218,7 @@ async def submit_feedback(
                     <td style="color: {color}; font-weight: bold; font-size: 16px;">{emoji} {label}</td>
                 </tr>
                 <tr><td style="padding: 8px 0; font-weight: bold;">Name</td><td>{display_name}</td></tr>
-                <tr><td style="padding: 8px 0; font-weight: bold;">Email</td><td><a href="mailto:{display_email}">{display_email}</a></td></tr>
+                <tr><td style="padding: 8px 0; font-weight: bold;">Email</td><td>{display_email}</td></tr>
                 <tr><td style="padding: 8px 0; font-weight: bold;">Sent At</td><td>{now}</td></tr>
                 {question_row}
                 {answer_row}
@@ -1810,30 +1229,8 @@ async def submit_feedback(
     """
 
     background_tasks.add_task(send_feedback_email, subject, body_text, body_html)
-    logger.info("Feedback [%s] from %s (%s): %s", req.feedback_type, display_name, display_email, req.feedback_text[:100] or "(no message)")
     return {"status": "sent", "message": "Thank you for your feedback!"}
 
-
-# ============================================================================
-# ERROR HANDLERS
-# ============================================================================
-# @app.exception_handler(HTTPException)
-# async def http_err(request, exc):
-#     return JSONResponse(exc.status_code, {
-#         "error": exc.detail,
-#         "path": request.url.path,
-#         "timestamp": datetime.now(timezone.utc).isoformat(),
-#     })
-
-
-# @app.exception_handler(Exception)
-# async def general_err(request, exc):
-#     logger.exception("Unhandled: %s", exc)
-#     return JSONResponse(500, {
-#         "error": "Internal server error",
-#         "path": request.url.path,
-#         "timestamp": datetime.now(timezone.utc).isoformat(),
-#     })
 
 @app.exception_handler(HTTPException)
 async def http_err(request, exc):
@@ -1858,3 +1255,71 @@ async def general_err(request, exc):
             "timestamp": datetime.now(timezone.utc).isoformat(),
         },
     )
+    
+@app.get("/debug/file/{file_id}")
+async def debug_file(file_id: str, user_id: Optional[str] = Depends(auth_dependency)):
+    owner_id = _normalize_owner_id(user_id)
+
+    from backend.db.connection import SessionLocal
+    from sqlalchemy import text
+
+    with SessionLocal() as db:
+        doc = db.execute(
+            text(
+                """
+                SELECT id::text, owner_id, name, status, current_version_id::text
+                FROM documents
+                WHERE id = :file_id
+                """
+            ),
+            {"file_id": file_id},
+        ).mappings().first()
+
+        versions = db.execute(
+            text(
+                """
+                SELECT id::text, document_id::text, is_active, fingerprint, uploaded_at
+                FROM document_versions
+                WHERE document_id = :file_id
+                ORDER BY uploaded_at DESC
+                """
+            ),
+            {"file_id": file_id},
+        ).mappings().all()
+
+        chunk_count = db.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM chunks
+                WHERE document_id = :file_id
+                """
+            ),
+            {"file_id": file_id},
+        ).scalar_one()
+
+        embedding_count = db.execute(
+            text(
+                """
+                SELECT COUNT(*)
+                FROM embeddings
+                WHERE chunk_id IN (
+                    SELECT id FROM chunks WHERE document_id = :file_id
+                )
+                """
+            ),
+            {"file_id": file_id},
+        ).scalar_one()
+
+    if not doc:
+        raise HTTPException(404, "File not found")
+
+    if doc["owner_id"] != owner_id:
+        raise HTTPException(404, "File not found")
+
+    return {
+        "document": dict(doc),
+        "versions": [dict(v) for v in versions],
+        "chunk_count": int(chunk_count or 0),
+        "embedding_count": int(embedding_count or 0),
+    }
