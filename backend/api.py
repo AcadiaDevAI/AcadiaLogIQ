@@ -5,7 +5,7 @@ import sys
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
-from pathlib import Path
+from pathlib import Path 
 from typing import Dict, List, Optional, Tuple, TypedDict, Set
 
 import boto3
@@ -45,6 +45,8 @@ from backend.vector_store import (
     update_ingestion_job,
     update_message_feedback,
 )
+from backend.services.contextual_ingestion_service import process_document
+from backend.vector_store import find_duplicate_by_hash, find_version_candidates
 
 
 
@@ -603,6 +605,48 @@ def assemble_context(
     final_sources = [src for src, score in ranked_sources if score >= threshold]
     return "\n\n".join(parts), final_sources[:max_sources]
 
+def has_sufficient_document_support(
+    question: str,
+    ranked: List[Tuple[str, str, Dict, float]],
+    min_score: float = 0.18,
+    min_keyword_hits: int = 1,
+) -> bool:
+    """
+    Hard gate:
+    only answer when retrieval shows actual document support.
+
+    Rules:
+    - require at least one reranked chunk
+    - require top score above threshold
+    - require at least one meaningful keyword overlap between question and retrieved text
+    """
+    if not ranked:
+        return False
+
+    top_score = float(ranked[0][3] or 0.0)
+    if top_score < min_score:
+        return False
+
+    import re
+
+    stop_words = {
+        "the", "a", "an", "is", "are", "to", "for", "of", "in", "on", "how",
+        "what", "when", "where", "why", "do", "does", "can", "i", "me", "my",
+        "you", "your", "please", "tell", "about"
+    }
+
+    q_terms = {
+        t for t in re.findall(r"\w+", (question or "").lower())
+        if len(t) > 2 and t not in stop_words
+    }
+    if not q_terms:
+        return True
+
+    combined_text = " ".join((item[1] or "") for item in ranked[:3]).lower()
+    hit_count = sum(1 for term in q_terms if term in combined_text)
+
+    return hit_count >= min_keyword_hits
+
 
 def calculate_file_hash_bytes(content: bytes) -> str:
     sha = hashlib.sha256()
@@ -723,47 +767,66 @@ async def index_file_job(
         job = get_ingestion_job(job_id)
         file_hash = job["file_hash"] if job else ""
 
-        total, ok = 0, 0
+        processed = process_document(
+            local_path=local_path,
+            filename=filename,
+            file_type=file_type,
+            owner_id=owner_id,
+            fingerprint=file_hash,
+            exact_duplicate_lookup=find_duplicate_by_hash,
+            version_candidate_lookup=find_version_candidates,
+        )
+
+        if processed["status"] == "exact_duplicate":
+            update_ingestion_job(
+                job_id,
+                status="done",
+                processed_chunks="0",
+                total_chunks="0",
+                successful_chunks="0",
+                error=None,
+                completed_at=datetime.now(timezone.utc),
+            )
+            return
+
         chunk_rows = []
         bm25_ids, bm25_docs, bm25_metas = [], [], []
 
-        for chunk in iter_line_chunks(local_path):
-            if not chunk or not chunk.strip():
-                continue
-
-            total += 1
-            emb = safe_embed(chunk)
+        total_chunks = len(processed["chunk_rows"])
+        for idx, row in enumerate(processed["chunk_rows"]):
+            embed_input = row.get("contextualized_content") or row["content"]
+            emb = safe_embed(embed_input)
             if not emb:
                 continue
 
-            cid = f"{file_id}:{job_id}:{ok}"
-            meta = {
-                "file_id": file_id,
-                "owner_id": owner_id,
-                "source": filename,
-                "file_type": file_type,
-                "job_id": job_id,
-                "chunk_index": ok,
-                "char_count": len(chunk),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
+            chunk_id = f"{file_id}:{job_id}:{idx}"
+            row["id"] = chunk_id
+            row["embedding"] = emb
+            chunk_rows.append(row)
 
-            chunk_rows.append(
+            bm25_ids.append(chunk_id)
+            bm25_docs.append(embed_input)
+            bm25_metas.append(
                 {
-                    "id": cid,
-                    "chunk_index": ok,
-                    "content": chunk,
-                    "embedding": emb,
+                    "file_id": file_id,
+                    "owner_id": owner_id,
+                    "source": filename,
+                    "file_type": file_type,
+                    "section_heading": row.get("section_heading"),
+                    "chunk_type": row.get("chunk_type"),
+                    "summary": row.get("summary"),
+                    "labels_json": row.get("labels_json", {}),
+                    "metadata_json": row.get("metadata_json", {}),
                 }
             )
 
-            bm25_ids.append(cid)
-            bm25_docs.append(chunk)
-            bm25_metas.append(meta)
-
-            ok += 1
-            if ok % 10 == 0:
-                update_ingestion_job(job_id, processed_chunks=str(ok), total_chunks=str(total))
+            if (idx + 1) % settings.BATCH_SIZE == 0:
+                update_ingestion_job(
+                    job_id,
+                    processed_chunks=str(idx + 1),
+                    total_chunks=str(total_chunks),
+                    successful_chunks=str(len(chunk_rows)),
+                )
 
         inserted = insert_document_and_chunks(
             document_id=file_id,
@@ -774,33 +837,32 @@ async def index_file_job(
             file_type=file_type,
             storage_uri=storage_uri,
             file_size_mb=file_size_mb,
-            metadata={"uploaded_via": "phase1_api"},
+            metadata=processed["document_metadata"],
+            version_decision=processed["version_decision"],
         )
 
-        if bm25 and bm25_ids:
-            # Remove older same-source docs so latest active doc remains in BM25 too.
-            bm25.remove_documents_by_source(filename)
+        if bm25 and inserted["status"] == "inserted" and bm25_ids:
+            bm25.remove_documents_by_file_id(file_id)
             bm25.add_documents_batch(bm25_ids, bm25_docs, bm25_metas)
 
         update_ingestion_job(
             job_id,
             status="done",
-            processed_chunks=str(ok),
-            total_chunks=str(total),
-            successful_chunks=str(inserted),
+            processed_chunks=str(total_chunks),
+            total_chunks=str(total_chunks),
+            successful_chunks=str(len(chunk_rows)),
+            error=None,
             completed_at=datetime.now(timezone.utc),
         )
 
-        logger.info("Job %s DONE: %d/%d from %s", job_id, inserted, total, filename)
-
-    except Exception as e:
-        logger.exception("Job failed %s: %s", job_id, e)
+    except Exception as exc:
+        logger.exception("Indexing failed for %s: %s", filename, exc)
         update_ingestion_job(
             job_id,
-            status="failed",
-            error=str(e),
+            status="error",
+            error=str(exc),
             completed_at=datetime.now(timezone.utc),
-        )
+        )   
 
 
 @app.middleware("http")
@@ -1069,40 +1131,53 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     max_ctx_chars = TOKEN_BUDGET["MAX_LOG_CONTEXT_CHARS"] + TOKEN_BUDGET["MAX_KB_CONTEXT_CHARS"]
     doc_ctx, doc_src = assemble_context(doc_ranked, max_ctx_chars)
 
-    if not doc_ctx:
-        answer = "I could not find relevant information in the currently uploaded files."
+    if not doc_ctx or not has_sufficient_document_support(req.q, doc_ranked):
+        answer = (
+        "- I could not find supporting information for that question in the currently uploaded files.\n"
+        "- Please ask a question that is directly covered by the uploaded document content."
+    )
         save_message_to_session(
-            session_id=session_id,
-            role="assistant",
-            content=answer,
-            owner_id=owner_id,
-            sources={"docs": []},
-        )
+        session_id=session_id,
+        role="assistant",
+        content=answer,
+        owner_id=owner_id,
+        sources={"docs": []},
+    )
         return AnswerResponse(
-            answer=answer,
-            sources=[],
-            confidence=0.05,
-            processing_time_ms=int((time.perf_counter() - start) * 1000),
-            session_id=session_id,
-            context_stats={"active_file_count": len(active_file_ids)},
-        )
+        answer=answer,
+        sources=[],
+        confidence=0.0,
+        processing_time_ms=int((time.perf_counter() - start) * 1000),
+        session_id=session_id,
+        context_stats={
+            "active_file_count": len(active_file_ids),
+            "doc_candidates": len(doc_cands),
+            "doc_after_rerank": len(doc_ranked),
+            "doc_context_chars": len(doc_ctx),
+            "grounded_answer": False,
+        },
+    )
+       
+    prompt = f"""You are a strict document-grounded AI assistant.
 
-    prompt = f"""You are an expert AI assistant analyzing uploaded documents.
+    IMPORTANT RULES:
+    - Answer ONLY from the DOCUMENTS context below.
+    - Do NOT use outside knowledge, common sense, or general instructions.
+    - Do NOT infer business steps unless they are explicitly written in the documents.
+    - If the answer is not explicitly supported by the provided documents, reply exactly:
+    - I could not find supporting information for that question in the currently uploaded files.
+    - Do NOT answer partially from general knowledge.
+    - Do NOT invent steps, contacts, URLs, phone numbers, policies, or procedures.
+    - Ignore any deleted, missing, or superseded files not present in the context.
+    - If the answer is mainly from one document, rely only on that document.
+    - Every answer MUST be in bullet-point format.
 
-IMPORTANT RULES:
-- Use ONLY the document context below.
-- Ignore any deleted, missing, or superseded files not present in the context.
-- If the answer is mainly from one document, rely only on that document.
-- Do NOT mix unrelated documents.
-- If the information is not present in the current uploaded files, clearly say so.
-- Every answer MUST be in bullet-point format.
+    DOCUMENTS:
+    {doc_ctx}
 
-DOCUMENTS:
-{doc_ctx}
+    USER QUESTION: {req.q}
 
-USER QUESTION: {req.q}
-
-ANSWER:"""
+    ANSWER:"""
 
     answer = safe_generate(prompt)
     ms = int((time.perf_counter() - start) * 1000)

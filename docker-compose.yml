@@ -32,14 +32,14 @@ services:
       start_period: 30s
     restart: unless-stopped
     networks:
-      - app-network
+      - app-network 
 
   ui:
     build:
       context: ./frontend
       dockerfile: Dockerfile
       args:
-        REACT_APP_API_BASE: http://${EC2_PUBLIC_IP:-localhost}:8000
+        REACT_APP_API_BASE: /api
         REACT_APP_CLERK_PUBLISHABLE_KEY: ${CLERK_PUBLISHABLE_KEY:-}
     container_name: logiq-ui
     ports:

@@ -10,7 +10,7 @@ What this version adds:
 - database-backed file listing helpers
 """
 
-import json
+import json 
 import logging
 import math
 import re
@@ -22,6 +22,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from sqlalchemy import bindparam, text
 
 from backend.db.connection import SessionLocal
+from difflib import SequenceMatcher
+from backend.config import settings
 
 logger = logging.getLogger("acadia-log-iq")
 
@@ -199,6 +201,92 @@ def _vector_literal(values: List[float]) -> str:
 
 def _now():
     return datetime.now(timezone.utc)
+
+def _name_similarity(a: Optional[str], b: Optional[str]) -> float:
+    a = (a or "").strip().lower()
+    b = (b or "").strip().lower()
+    if not a or not b:
+        return 0.0
+    return SequenceMatcher(None, a, b).ratio()
+
+
+def find_duplicate_by_hash(*, owner_id: str, fingerprint: str) -> Optional[Dict[str, Any]]:
+    with SessionLocal() as db:
+        row = db.execute(
+            text(
+                """
+                SELECT
+                    d.id::text AS document_id,
+                    d.normalized_name,
+                    d.version_family_key,
+                    dv.version_label,
+                    dv.version_rank,
+                    dv.document_date,
+                    dv.effective_date,
+                    dv.created_date
+                FROM documents d
+                JOIN document_versions dv ON dv.document_id = d.id
+                WHERE d.owner_id = :owner_id
+                  AND dv.fingerprint = :fingerprint
+                ORDER BY dv.uploaded_at DESC
+                LIMIT 1
+                """
+            ),
+            {"owner_id": owner_id, "fingerprint": fingerprint},
+        ).mappings().first()
+    return dict(row) if row else None
+
+
+def find_version_candidates(
+    *,
+    owner_id: str,
+    normalized_name: str,
+    title: Optional[str],
+    limit: int = 8,
+) -> List[Dict[str, Any]]:
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                    d.id::text AS document_id,
+                    d.name,
+                    d.normalized_name,
+                    d.version_family_key,
+                    d.status,
+                    dm.title,
+                    dm.document_type,
+                    dm.vendor,
+                    dm.product,
+                    dm.domain,
+                    dm.version_label,
+                    dm.document_date,
+                    dm.effective_date,
+                    dm.created_date,
+                    d.updated_at
+                FROM documents d
+                LEFT JOIN document_metadata dm ON dm.document_id = d.id
+                WHERE d.owner_id = :owner_id
+                ORDER BY d.updated_at DESC, d.created_at DESC
+                LIMIT :limit
+                """
+            ),
+            {"owner_id": owner_id, "limit": limit * 3},
+        ).mappings().all()
+
+    ranked = []
+    for row in rows:
+        score = max(
+            _name_similarity(normalized_name, row.get("normalized_name")),
+            _name_similarity(title, row.get("title")),
+        )
+        if score >= 0.60:
+            item = dict(row)
+            item["similarity_score"] = round(score, 4)
+            ranked.append(item)
+
+    ranked.sort(key=lambda x: x["similarity_score"], reverse=True)
+    return ranked[:limit]
 
 
 # ============================================================================
@@ -437,31 +525,45 @@ def insert_document_and_chunks(
     storage_uri: Optional[str] = None,
     file_size_mb: Optional[float] = None,
     metadata: Optional[Dict[str, Any]] = None,
+    version_decision: Optional[Dict[str, Any]] = None,
 ):
-    """
-    Create a new active document + version + metadata + chunks + embeddings.
+    version_decision = version_decision or {
+        "decision": "new_document",
+        "matched_document_id": None,
+        "normalized_name": filename,
+        "version_family_key": filename,
+        "version_label": None,
+        "version_rank": 0.0,
+        "document_date": None,
+        "effective_date": None,
+        "created_date": None,
+    }
 
-    Important Phase 1 behavior:
-    - Any existing active same-name document for this owner becomes superseded.
-    - Retrieval only uses active documents/current_version chunks.
-    """
-    _supersede_existing_active_document(owner_id, filename)
+    if version_decision.get("decision") == "exact_duplicate":
+        return {
+            "status": "duplicate_skipped",
+            "document_id": version_decision.get("matched_document_id"),
+            "version_id": None,
+            "inserted_chunks": 0,
+        }
 
     version_id = str(uuid.uuid4())
+    matched_document_id = version_decision.get("matched_document_id")
 
     with SessionLocal() as db:
         try:
-            # 1) Insert document first with NULL current_version_id
             db.execute(
                 text(
                     """
                     INSERT INTO documents(
-                        id, owner_id, name, file_type, status,
-                        current_version_id, created_at, updated_at
+                        id, owner_id, name, normalized_name, file_type, source_type,
+                        status, current_version_id, created_at, updated_at,
+                        version_family_key, duplicate_status, latest_effective_at
                     )
                     VALUES (
-                        :document_id, :owner_id, :filename, :file_type, 'active',
-                        NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                        :document_id, :owner_id, :filename, :normalized_name, :file_type, 'file',
+                        'active', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+                        :version_family_key, 'unique', :latest_effective_at
                     )
                     """
                 ),
@@ -469,21 +571,31 @@ def insert_document_and_chunks(
                     "document_id": document_id,
                     "owner_id": owner_id,
                     "filename": filename,
+                    "normalized_name": version_decision.get("normalized_name"),
                     "file_type": file_type,
+                    "version_family_key": version_decision.get("version_family_key"),
+                    "latest_effective_at": version_decision.get("effective_date")
+                    or version_decision.get("document_date")
+                    or version_decision.get("created_date"),
                 },
             )
 
-            # 2) Insert version row referencing the document
             db.execute(
                 text(
                     """
                     INSERT INTO document_versions(
                         id, document_id, version_number, fingerprint, storage_uri,
-                        file_size_mb, is_active, uploaded_at, created_at
+                        file_size_mb, is_active, uploaded_at, created_at,
+                        version_label, version_rank, document_date, effective_date, created_date,
+                        extraction_model, contextualization_model, parse_strategy,
+                        duplicate_decision_json, enrichment_json
                     )
                     VALUES (
                         :version_id, :document_id, 1, :fingerprint, :storage_uri,
-                        :file_size_mb, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                        :file_size_mb, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+                        :version_label, :version_rank, :document_date, :effective_date, :created_date,
+                        'phase2_parser', :contextualization_model, 'structure_aware',
+                        CAST(:duplicate_decision_json AS JSONB), CAST(:enrichment_json AS JSONB)
                     )
                     """
                 ),
@@ -493,10 +605,17 @@ def insert_document_and_chunks(
                     "fingerprint": fingerprint,
                     "storage_uri": storage_uri,
                     "file_size_mb": str(file_size_mb or 0),
+                    "version_label": version_decision.get("version_label"),
+                    "version_rank": float(version_decision.get("version_rank") or 0.0),
+                    "document_date": version_decision.get("document_date"),
+                    "effective_date": version_decision.get("effective_date"),
+                    "created_date": version_decision.get("created_date"),
+                    "contextualization_model": "bedrock_haiku" if settings.ENABLE_METADATA_EXTRACTION else None,
+                    "duplicate_decision_json": json.dumps(version_decision),
+                    "enrichment_json": json.dumps((metadata or {}).get("metadata_json", {})),
                 },
             )
 
-            # 3) Update document to point to the current version
             db.execute(
                 text(
                     """
@@ -506,41 +625,77 @@ def insert_document_and_chunks(
                     WHERE id = :document_id
                     """
                 ),
-                {
-                    "document_id": document_id,
-                    "version_id": version_id,
-                },
+                {"document_id": document_id, "version_id": version_id},
             )
 
-            # 4) Metadata
+            meta = metadata or {}
             db.execute(
                 text(
                     """
-                    INSERT INTO document_metadata(document_id, metadata_json, created_at, updated_at)
-                    VALUES (:document_id, CAST(:metadata_json AS jsonb), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                    INSERT INTO document_metadata(
+                        document_id, metadata_json, created_at, updated_at, title, section_count, chunk_count,
+                        metadata_version, extracted_at, vendor, product, domain, document_type,
+                        version_label, document_date, effective_date, created_date
+                    )
+                    VALUES (
+                        :document_id, CAST(:metadata_json AS JSONB), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+                        :title, :section_count, :chunk_count, :metadata_version, :extracted_at,
+                        :vendor, :product, :domain, :document_type, :version_label,
+                        :document_date, :effective_date, :created_date
+                    )
                     ON CONFLICT (document_id)
-                    DO UPDATE SET metadata_json = EXCLUDED.metadata_json,
-                                  updated_at = CURRENT_TIMESTAMP
+                    DO UPDATE SET
+                        metadata_json = EXCLUDED.metadata_json,
+                        updated_at = CURRENT_TIMESTAMP,
+                        title = EXCLUDED.title,
+                        section_count = EXCLUDED.section_count,
+                        chunk_count = EXCLUDED.chunk_count,
+                        metadata_version = EXCLUDED.metadata_version,
+                        extracted_at = EXCLUDED.extracted_at,
+                        vendor = EXCLUDED.vendor,
+                        product = EXCLUDED.product,
+                        domain = EXCLUDED.domain,
+                        document_type = EXCLUDED.document_type,
+                        version_label = EXCLUDED.version_label,
+                        document_date = EXCLUDED.document_date,
+                        effective_date = EXCLUDED.effective_date,
+                        created_date = EXCLUDED.created_date
                     """
                 ),
                 {
                     "document_id": document_id,
-                    "metadata_json": json.dumps(metadata or {}),
+                    "metadata_json": json.dumps(meta.get("metadata_json", {})),
+                    "title": meta.get("title"),
+                    "section_count": int(meta.get("section_count") or 0),
+                    "chunk_count": int(meta.get("chunk_count") or 0),
+                    "metadata_version": meta.get("metadata_version", "phase2"),
+                    "extracted_at": meta.get("extracted_at"),
+                    "vendor": meta.get("vendor"),
+                    "product": meta.get("product"),
+                    "domain": meta.get("domain"),
+                    "document_type": meta.get("document_type"),
+                    "version_label": meta.get("version_label"),
+                    "document_date": meta.get("document_date"),
+                    "effective_date": meta.get("effective_date"),
+                    "created_date": meta.get("created_date"),
                 },
             )
 
             inserted = 0
-
-            # 5) Chunks + embeddings
             for row in chunk_rows:
                 db.execute(
                     text(
                         """
                         INSERT INTO chunks(
-                            id, document_id, document_version_id, chunk_index, content, created_at
+                            id, document_id, document_version_id, chunk_index, content, created_at,
+                            chunk_type, section_heading, page_number, token_estimate,
+                            summary, contextualized_content, labels_json, metadata_json, source_order
                         )
                         VALUES (
-                            :chunk_id, :document_id, :version_id, :chunk_index, :content, CURRENT_TIMESTAMP
+                            :chunk_id, :document_id, :version_id, :chunk_index, :content, CURRENT_TIMESTAMP,
+                            :chunk_type, :section_heading, :page_number, :token_estimate,
+                            :summary, :contextualized_content, CAST(:labels_json AS JSONB),
+                            CAST(:metadata_json AS JSONB), :source_order
                         )
                         """
                     ),
@@ -550,6 +705,15 @@ def insert_document_and_chunks(
                         "version_id": version_id,
                         "chunk_index": row["chunk_index"],
                         "content": row["content"],
+                        "chunk_type": row.get("chunk_type"),
+                        "section_heading": row.get("section_heading"),
+                        "page_number": row.get("page_number"),
+                        "token_estimate": row.get("token_estimate"),
+                        "summary": row.get("summary"),
+                        "contextualized_content": row.get("contextualized_content"),
+                        "labels_json": json.dumps(row.get("labels_json", {})),
+                        "metadata_json": json.dumps(row.get("metadata_json", {})),
+                        "source_order": row.get("source_order"),
                     },
                 )
 
@@ -557,11 +721,7 @@ def insert_document_and_chunks(
                     text(
                         """
                         INSERT INTO embeddings(chunk_id, embedding, created_at)
-                        VALUES (
-                            :chunk_id,
-                            CAST(:embedding AS vector),
-                            CURRENT_TIMESTAMP
-                        )
+                        VALUES (:chunk_id, CAST(:embedding AS vector), CURRENT_TIMESTAMP)
                         """
                     ),
                     {
@@ -569,17 +729,51 @@ def insert_document_and_chunks(
                         "embedding": _vector_literal(row["embedding"]),
                     },
                 )
-
                 inserted += 1
 
+            if version_decision.get("decision") == "new_version" and matched_document_id:
+                db.execute(
+                    text(
+                        """
+                        UPDATE documents
+                        SET status = 'superseded',
+                            superseded_by_document_id = :new_document_id,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE id = :matched_document_id
+                        """
+                    ),
+                    {
+                        "new_document_id": document_id,
+                        "matched_document_id": matched_document_id,
+                    },
+                )
+                db.execute(
+                    text(
+                        """
+                        UPDATE document_versions
+                        SET is_active = FALSE,
+                            superseded_at = CURRENT_TIMESTAMP
+                        WHERE document_id = :matched_document_id
+                          AND is_active = TRUE
+                        """
+                    ),
+                    {"matched_document_id": matched_document_id},
+                )
+            else:
+                _supersede_existing_active_document(owner_id, filename)
+
             db.commit()
-            return inserted
+            return {
+                "status": "inserted",
+                "document_id": document_id,
+                "version_id": version_id,
+                "inserted_chunks": inserted,
+            }
 
         except Exception:
             db.rollback()
             raise
-
-
+        
 def delete_document_and_chunks(document_id: str) -> int:
     """
     Delete one logical document and everything connected to it.
@@ -680,6 +874,8 @@ def delete_document_and_chunks(document_id: str) -> int:
             raise
 
 
+
+
 def reset_pg_data() -> int:
     """
     Full reset used by /reset.
@@ -740,30 +936,39 @@ def purge_orphan_chunks_db() -> int:
 # ============================================================================
 # BM25 REBUILD FROM ACTIVE POSTGRES CHUNKS
 # ============================================================================
-def rebuild_bm25_from_postgres() -> int:
+def rebuild_bm25_from_postgres(include_old_versions: Optional[bool] = None) -> int:
     bm25_index.clear()
+    include_old_versions = settings.INCLUDE_OLD_VERSIONS if include_old_versions is None else include_old_versions
+
+    sql = """
+        SELECT
+            c.id,
+            COALESCE(c.contextualized_content, c.content) AS content,
+            d.id::text AS file_id,
+            d.owner_id,
+            d.name AS source,
+            d.file_type,
+            c.section_heading,
+            c.chunk_type,
+            c.summary,
+            c.labels_json,
+            c.metadata_json
+        FROM chunks c
+        JOIN documents d ON d.id = c.document_id
+        JOIN document_versions dv ON dv.id = c.document_version_id
+        WHERE 1=1
+    """
+    if not include_old_versions:
+        sql += """
+          AND d.status = 'active'
+          AND dv.is_active = TRUE
+          AND d.current_version_id = dv.id
+        """
+
+    sql += " ORDER BY c.created_at ASC, c.chunk_index ASC"
 
     with SessionLocal() as db:
-        rows = db.execute(
-            text(
-                """
-                SELECT
-                    c.id,
-                    c.content,
-                    d.id::text AS file_id,
-                    d.owner_id,
-                    d.name AS source,
-                    d.file_type
-                FROM chunks c
-                JOIN documents d ON d.id = c.document_id
-                JOIN document_versions dv ON dv.id = c.document_version_id
-                WHERE d.status = 'active'
-                  AND dv.is_active = TRUE
-                  AND d.current_version_id = dv.id
-                ORDER BY c.created_at ASC, c.chunk_index ASC
-                """
-            )
-        ).mappings().all()
+        rows = db.execute(text(sql)).mappings().all()
 
     ids, docs, metas = [], [], []
     for row in rows:
@@ -775,12 +980,16 @@ def rebuild_bm25_from_postgres() -> int:
                 "owner_id": row["owner_id"],
                 "source": row["source"],
                 "file_type": row["file_type"],
+                "section_heading": row["section_heading"],
+                "chunk_type": row["chunk_type"],
+                "summary": row["summary"],
+                "labels_json": row["labels_json"] or {},
+                "metadata_json": row["metadata_json"] or {},
             }
         )
 
     if ids:
         bm25_index.add_documents_batch(ids, docs, metas)
-
     return bm25_index.size
 
 
@@ -792,11 +1001,20 @@ def pgvector_search(
     query_embedding: List[float],
     n_results: int = 10,
     allowed_file_ids: Optional[List[str]] = None,
+    include_old_versions: Optional[bool] = None,
 ) -> List[Dict[str, Any]]:
+    include_old_versions = settings.INCLUDE_OLD_VERSIONS if include_old_versions is None else include_old_versions
+
     sql = """
         SELECT
             c.id,
             c.content,
+            c.contextualized_content,
+            c.summary,
+            c.section_heading,
+            c.chunk_type,
+            c.labels_json,
+            c.metadata_json,
             d.id::text AS file_id,
             d.owner_id,
             d.name AS source,
@@ -806,10 +1024,14 @@ def pgvector_search(
         JOIN chunks c ON c.id = e.chunk_id
         JOIN documents d ON d.id = c.document_id
         JOIN document_versions dv ON dv.id = c.document_version_id
-        WHERE d.status = 'active'
+        WHERE 1=1
+    """
+    if not include_old_versions:
+        sql += """
+          AND d.status = 'active'
           AND dv.is_active = TRUE
           AND d.current_version_id = dv.id
-    """
+        """
 
     params: Dict[str, Any] = {
         "query_embedding": _vector_literal(query_embedding),
@@ -829,7 +1051,6 @@ def pgvector_search(
         stmt = text(sql)
         if allowed_file_ids:
             stmt = stmt.bindparams(bindparam("allowed_ids", expanding=True))
-
         rows = db.execute(stmt, params).mappings().all()
 
     hits = []
@@ -837,13 +1058,18 @@ def pgvector_search(
         hits.append(
             {
                 "id": row["id"],
-                "text": row["content"],
+                "text": row["contextualized_content"] or row["content"],
                 "distance": float(row["distance"]),
                 "metadata": {
                     "file_id": row["file_id"],
                     "owner_id": row["owner_id"],
                     "source": row["source"],
                     "file_type": row["file_type"],
+                    "section_heading": row["section_heading"],
+                    "chunk_type": row["chunk_type"],
+                    "summary": row["summary"],
+                    "labels_json": row["labels_json"] or {},
+                    "metadata_json": row["metadata_json"] or {},
                 },
             }
         )

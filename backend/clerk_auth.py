@@ -1,5 +1,5 @@
 """
-Clerk JWT Verification for FastAPI.
+Clerk JWT Verification for FastAPI. 
 
 Validates Clerk-issued JWTs on incoming requests.
 Uses Clerk's JWKS endpoint to fetch public keys and verifies:
