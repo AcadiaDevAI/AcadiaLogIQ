@@ -77,13 +77,20 @@ class Settings(BaseSettings):
     CHUNK_OVERLAP_CHARS: int = 150
     CHUNK_BATCH_SIZE: int = 6
 
-    MAX_METADATA_INPUT_CHARS: int = 12000
-    MAX_CONTEXT_SUMMARY_CHARS: int = 280
-    MAX_OPERATIONAL_LABELS: int = 12
-    MAX_METADATA_RETRIES: int = 3
+    MAX_METADATA_INPUT_CHARS: int = 1800
+    MAX_CONTEXT_SUMMARY_CHARS: int = 120
+    MAX_OPERATIONAL_LABELS: int = 8
+    MAX_METADATA_RETRIES: int = 2
 
     HAIKU_TEMPERATURE: float = 0.0
-    HAIKU_MAX_TOKENS: int = 900
+    HAIKU_MAX_TOKENS: int = 4096
+
+    # ----------------------------------------------------------------
+    # Concurrency
+    # ----------------------------------------------------------------
+
+    METADATA_CONCURRENCY: int = 4
+    EMBED_CONCURRENCY: int = 8
 
     # ----------------------------------------------------------------
     # Feature flags

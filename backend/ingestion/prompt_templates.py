@@ -1,10 +1,12 @@
 """
-Phase 2 prompt templates.
+Phase 2 prompt templates — optimized for speed.
 
-What this file adds:
-- strict JSON metadata extraction prompts
-- structured operational labeling prompts
-- version support decision prompts
+Changes from original:
+- Leaner chunk metadata schema (fewer per-chunk fields)
+- Document-level fields extracted once, not repeated per chunk
+- Shorter system prompt to reduce input tokens
+- Explicit instruction to keep output compact
+- Dates must be full YYYY-MM-DD (partial date fix)
 """
 
 from textwrap import dedent
@@ -12,10 +14,8 @@ from textwrap import dedent
 
 CHUNK_METADATA_SYSTEM = dedent(
     """
-    You extract operational retrieval metadata from document chunks.
-    Always return strict JSON only.
-    Never include markdown fences or commentary.
-    Keep outputs concise, grounded, and directly supported by the text.
+    Extract retrieval metadata from document chunks. Return strict JSON only.
+    No markdown fences. No commentary. Be concise. Prefer null over guessing.
     """
 ).strip()
 
@@ -23,8 +23,7 @@ CHUNK_METADATA_SYSTEM = dedent(
 def build_chunk_metadata_prompt(*, document_name: str, source_type: str, chunk_batch_json: str) -> str:
     return dedent(
         f"""
-        Analyze the following document chunks and return strict JSON with this schema:
-
+        Return strict JSON matching this schema exactly:
         {{
           "document": {{
             "title": "string|null",
@@ -36,42 +35,34 @@ def build_chunk_metadata_prompt(*, document_name: str, source_type: str, chunk_b
             "document_date": "YYYY-MM-DD|null",
             "effective_date": "YYYY-MM-DD|null",
             "created_date": "YYYY-MM-DD|null",
-            "tags": ["string"],
-            "keywords": ["string"]
+            "tags": ["max 4 strings"],
+            "keywords": ["max 4 strings"]
           }},
           "chunks": [
             {{
               "chunk_index": 0,
               "section": "string|null",
               "chunk_type": "symptom_chunk|diagnostic_chunk|resolution_chunk|escalation_chunk|command_chunk|validation_chunk|summary_chunk|reference_chunk|classification_chunk|error_chunk|workaround_chunk|root_cause_chunk|general_chunk",
-              "document_type": "string|null",
-              "vendor": "string|null",
-              "product": "string|null",
-              "domain": "string|null",
-              "version": "string|null",
-              "date": "YYYY-MM-DD|null",
-              "tags": ["string"],
+              "tags": ["max 3"],
               "entities": [{{"text":"string","label":"string"}}],
-              "keywords": ["string"],
-              "summary": "string|null",
-              "purpose_description": "string|null",
-              "operational_context": "string|null"
+              "keywords": ["max 3"],
+              "summary": "<=80 chars",
+              "operational_context": "<=60 chars"
             }}
           ]
         }}
 
         Rules:
-        - Use only evidence from the text.
-        - Prefer operational meanings over generic labels.
-        - summary must be <= 280 chars.
-        - purpose_description should help retrieval precision.
-        - If a value is not clear, use null or an empty list.
-        - Entities can use labels like PRODUCT, SERVICE, VENDOR, COMMAND, TEAM, DATE, ERROR_CODE, API, ENVIRONMENT.
+        - Dates must be full YYYY-MM-DD format. If only year-month is known, use first of month (e.g. 2024-10 -> 2024-10-01). If only year, use YYYY-01-01.
+        - Use null or [] if unknown. Do not guess.
+        - entities: max 3 per chunk.
+        - Do not add extra keys.
+        - Keep output compact — short values only.
 
-        Document name: {document_name}
-        Source type: {source_type}
+        Document: {document_name}
+        Source: {source_type}
 
-        Chunk batch:
+        Chunks:
         {chunk_batch_json}
         """
     ).strip()
@@ -79,9 +70,8 @@ def build_chunk_metadata_prompt(*, document_name: str, source_type: str, chunk_b
 
 VERSION_DECISION_SYSTEM = dedent(
     """
-    You support duplicate and version detection for operational documents.
-    Always return strict JSON only.
-    Prefer conservative decisions when uncertain.
+    Detect duplicates and versions for operational documents.
+    Return strict JSON only. Prefer conservative decisions.
     """
 ).strip()
 
@@ -89,12 +79,9 @@ VERSION_DECISION_SYSTEM = dedent(
 def build_version_decision_prompt(*, incoming_json: str, candidates_json: str) -> str:
     return dedent(
         f"""
-        Determine whether the incoming document is:
-        - exact_duplicate
-        - new_version
-        - new_document
+        Classify the incoming document as exact_duplicate, new_version, or new_document.
 
-        Return strict JSON in this exact shape:
+        Return strict JSON:
         {{
           "decision": "exact_duplicate|new_version|new_document",
           "matched_document_id": "string|null",
@@ -109,16 +96,16 @@ def build_version_decision_prompt(*, incoming_json: str, candidates_json: str) -
           "created_date": "YYYY-MM-DD|null"
         }}
 
-        Decision rules:
-        - exact_duplicate only if content/fingerprint match or extremely clear same-content evidence.
-        - new_version only if title/name/metadata strongly indicate same logical document family.
-        - version ordering priority is explicit version, then effective/document dates, then upload timestamp fallback.
+        Rules:
+        - Dates must be full YYYY-MM-DD. Pad partial dates (e.g. 2024-10 -> 2024-10-01).
+        - exact_duplicate only if content/fingerprint match.
+        - new_version only if title/metadata strongly indicate same document family.
         - If uncertain, return new_document.
 
-        Incoming document:
+        Incoming:
         {incoming_json}
 
-        Existing candidates:
+        Candidates:
         {candidates_json}
         """
     ).strip()

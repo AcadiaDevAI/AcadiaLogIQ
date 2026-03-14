@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -66,6 +67,101 @@ def _safe_json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False, default=str)
 
 
+def _safe_str(value: Any, max_len: int = 300) -> Optional[str]:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    text = re.sub(r"\s+", " ", text)
+    return text[:max_len]
+
+
+def _safe_list_of_str(values: Any, *, max_items: int, item_max_len: int = 80) -> List[str]:
+    if not isinstance(values, list):
+        return []
+    cleaned: List[str] = []
+    seen = set()
+    for value in values:
+        text = _safe_str(value, max_len=item_max_len)
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(text)
+        if len(cleaned) >= max_items:
+            break
+    return cleaned
+
+
+def _safe_entities(values: Any, *, max_items: int = 5) -> List[Dict[str, str]]:
+    if not isinstance(values, list):
+        return []
+    cleaned: List[Dict[str, str]] = []
+    seen = set()
+    for item in values:
+        if not isinstance(item, dict):
+            continue
+        text = _safe_str(item.get("text"), max_len=100)
+        label = _safe_str(item.get("label"), max_len=40)
+        if not text or not label:
+            continue
+        key = (text.lower(), label.upper())
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append({"text": text, "label": label.upper()})
+        if len(cleaned) >= max_items:
+            break
+    return cleaned
+
+
+def _safe_date(value: Any) -> Optional[str]:
+    """
+    Normalize a date string from Haiku into a valid ISO date (YYYY-MM-DD).
+    Handles partial dates like '2024-10', '2024', or already-valid dates.
+    Returns None if the value cannot be parsed.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # Full ISO date: YYYY-MM-DD
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text):
+        try:
+            datetime.strptime(text, "%Y-%m-%d")
+            return text
+        except ValueError:
+            return None
+
+    # Partial: YYYY-MM -> pad to first of month
+    if re.fullmatch(r"\d{4}-\d{2}", text):
+        try:
+            datetime.strptime(text + "-01", "%Y-%m-%d")
+            return text + "-01"
+        except ValueError:
+            return None
+
+    # Partial: YYYY -> pad to Jan 1
+    if re.fullmatch(r"\d{4}", text):
+        return text + "-01-01"
+
+    # Full ISO datetime -> extract just the date
+    match = re.match(r"(\d{4}-\d{2}-\d{2})", text)
+    if match:
+        try:
+            datetime.strptime(match.group(1), "%Y-%m-%d")
+            return match.group(1)
+        except ValueError:
+            return None
+
+    return None
+
+
 def _fallback_chunk_metadata(
     chunk: ParsedChunk,
     document_name: str,
@@ -96,6 +192,91 @@ def _fallback_chunk_metadata(
     }
 
 
+def _normalize_chunk_metadata(
+    item: Dict[str, Any],
+    document_meta: Dict[str, Any],
+    chunk: ParsedChunk,
+    document_name: str,
+    source_type: str,
+) -> Dict[str, Any]:
+    fallback = _fallback_chunk_metadata(chunk, document_name, source_type)
+    return {
+        "section": _safe_str(item.get("section")) or fallback["section"],
+        "chunk_type": _safe_str(item.get("chunk_type"), max_len=60) or fallback["chunk_type"],
+        "document_type": _safe_str(item.get("document_type"), max_len=40)
+        or _safe_str(document_meta.get("document_type"), max_len=40)
+        or fallback["document_type"],
+        "vendor": _safe_str(item.get("vendor"), max_len=80) or _safe_str(document_meta.get("vendor"), max_len=80),
+        "product": _safe_str(item.get("product"), max_len=80) or _safe_str(document_meta.get("product"), max_len=80),
+        "domain": _safe_str(item.get("domain"), max_len=80) or _safe_str(document_meta.get("domain"), max_len=80),
+        "version": _safe_str(item.get("version"), max_len=40) or _safe_str(document_meta.get("version"), max_len=40),
+        "date": _safe_date(item.get("date")) or _safe_date(document_meta.get("document_date")),
+        "tags": _safe_list_of_str(item.get("tags"), max_items=6),
+        "entities": _safe_entities(item.get("entities"), max_items=5),
+        "keywords": _safe_list_of_str(item.get("keywords"), max_items=8),
+        "summary": _safe_str(item.get("summary"), max_len=settings.MAX_CONTEXT_SUMMARY_CHARS),
+        "purpose_description": _safe_str(item.get("purpose_description"), max_len=160),
+        "operational_context": _safe_str(item.get("operational_context"), max_len=120)
+        or fallback["operational_context"],
+        "title": _safe_str(document_meta.get("title"), max_len=160) or document_name,
+        "source_type": source_type,
+        "document_date": _safe_date(document_meta.get("document_date")),
+        "effective_date": _safe_date(document_meta.get("effective_date")),
+        "created_date": _safe_date(document_meta.get("created_date")),
+    }
+
+
+
+def _extract_chunk_metadata_once(
+    *,
+    document_name: str,
+    source_type: str,
+    chunks: List[ParsedChunk],
+) -> Optional[Dict[int, Dict[str, Any]]]:
+    payload = []
+    for chunk in chunks:
+        payload.append(
+            {
+                "chunk_index": chunk.chunk_index,
+                "section_heading": chunk.section_heading,
+                "operational_section": chunk.operational_section,
+                "chunk_type_hint": chunk.chunk_type,
+                "text": chunk.text[: min(settings.MAX_METADATA_INPUT_CHARS, 2200)],
+            }
+        )
+
+    prompt = build_chunk_metadata_prompt(
+        document_name=document_name,
+        source_type=source_type,
+        chunk_batch_json=_safe_json(payload),
+    )
+    result = haiku_client.invoke_json(system=CHUNK_METADATA_SYSTEM, prompt=prompt)
+
+    if not result or "chunks" not in result or not isinstance(result.get("chunks"), list):
+        return None
+
+    indexed: Dict[int, Dict[str, Any]] = {}
+    document_meta = result.get("document", {}) if isinstance(result.get("document"), dict) else {}
+    chunk_lookup = {chunk.chunk_index: chunk for chunk in chunks}
+
+    for item in result.get("chunks", []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            chunk_index = int(item.get("chunk_index", -1))
+        except Exception:
+            continue
+        chunk = chunk_lookup.get(chunk_index)
+        if chunk is None:
+            continue
+        indexed[chunk_index] = _normalize_chunk_metadata(item, document_meta, chunk, document_name, source_type)
+
+    if not indexed:
+        return None
+
+    return indexed
+
+
 def batch_extract_chunk_metadata(
     *,
     document_name: str,
@@ -108,66 +289,36 @@ def batch_extract_chunk_metadata(
             for chunk in chunks
         }
 
-    payload = []
-    for chunk in chunks:
-        payload.append(
-            {
-                "chunk_index": chunk.chunk_index,
-                "section_heading": chunk.section_heading,
-                "operational_section": chunk.operational_section,
-                "chunk_type_hint": chunk.chunk_type,
-                "text": chunk.text[: settings.MAX_METADATA_INPUT_CHARS],
-            }
-        )
-
-    prompt = build_chunk_metadata_prompt(
+    result = _extract_chunk_metadata_once(
         document_name=document_name,
         source_type=source_type,
-        chunk_batch_json=_safe_json(payload),
+        chunks=chunks,
     )
-    result = haiku_client.invoke_json(system=CHUNK_METADATA_SYSTEM, prompt=prompt)
 
-    if not result or "chunks" not in result:
-        return {
-            chunk.chunk_index: _fallback_chunk_metadata(chunk, document_name, source_type)
-            for chunk in chunks
-        }
+    if result is not None:
+        for chunk in chunks:
+            if chunk.chunk_index not in result:
+                result[chunk.chunk_index] = _fallback_chunk_metadata(chunk, document_name, source_type)
+        return result
 
-    indexed: Dict[int, Dict[str, Any]] = {}
-    document_meta = result.get("document", {}) or {}
+    if len(chunks) > 1:
+        merged: Dict[int, Dict[str, Any]] = {}
+        for chunk in chunks:
+            one = _extract_chunk_metadata_once(
+                document_name=document_name,
+                source_type=source_type,
+                chunks=[chunk],
+            )
+            if one and chunk.chunk_index in one:
+                merged[chunk.chunk_index] = one[chunk.chunk_index]
+            else:
+                merged[chunk.chunk_index] = _fallback_chunk_metadata(chunk, document_name, source_type)
+        return merged
 
-    for item in result.get("chunks", []):
-        chunk_index = int(item.get("chunk_index", -1))
-        if chunk_index < 0:
-            continue
-
-        indexed[chunk_index] = {
-            "section": item.get("section"),
-            "chunk_type": item.get("chunk_type"),
-            "document_type": item.get("document_type") or document_meta.get("document_type"),
-            "vendor": item.get("vendor") or document_meta.get("vendor"),
-            "product": item.get("product") or document_meta.get("product"),
-            "domain": item.get("domain") or document_meta.get("domain"),
-            "version": item.get("version") or document_meta.get("version"),
-            "date": item.get("date") or document_meta.get("document_date"),
-            "tags": item.get("tags", []) or [],
-            "entities": item.get("entities", []) or [],
-            "keywords": item.get("keywords", []) or [],
-            "summary": item.get("summary"),
-            "purpose_description": item.get("purpose_description"),
-            "operational_context": item.get("operational_context"),
-            "title": document_meta.get("title") or document_name,
-            "source_type": source_type,
-            "document_date": document_meta.get("document_date"),
-            "effective_date": document_meta.get("effective_date"),
-            "created_date": document_meta.get("created_date"),
-        }
-
-    for chunk in chunks:
-        if chunk.chunk_index not in indexed:
-            indexed[chunk.chunk_index] = _fallback_chunk_metadata(chunk, document_name, source_type)
-
-    return indexed
+    return {
+        chunk.chunk_index: _fallback_chunk_metadata(chunk, document_name, source_type)
+        for chunk in chunks
+    }
 
 
 def decide_version(
@@ -267,15 +418,43 @@ def process_document(
         }
 
     all_chunk_meta: Dict[int, Dict[str, Any]] = {}
+
+    # Build batches
+    batches: List[List[ParsedChunk]] = []
     for start in range(0, len(chunks), settings.CHUNK_BATCH_SIZE):
-        batch = chunks[start : start + settings.CHUNK_BATCH_SIZE]
-        all_chunk_meta.update(
-            batch_extract_chunk_metadata(
+        batches.append(chunks[start : start + settings.CHUNK_BATCH_SIZE])
+
+    # Extract metadata concurrently across batches
+    max_workers = min(settings.METADATA_CONCURRENCY, len(batches))
+    if max_workers <= 1 or not settings.ENABLE_METADATA_EXTRACTION:
+        # Sequential fallback
+        for batch in batches:
+            all_chunk_meta.update(
+                batch_extract_chunk_metadata(
+                    document_name=filename,
+                    source_type=file_type,
+                    chunks=batch,
+                )
+            )
+    else:
+        def _extract_batch(batch: List[ParsedChunk]) -> Dict[int, Dict[str, Any]]:
+            return batch_extract_chunk_metadata(
                 document_name=filename,
                 source_type=file_type,
                 chunks=batch,
             )
-        )
+
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(_extract_batch, b): b for b in batches}
+            for future in as_completed(futures):
+                try:
+                    all_chunk_meta.update(future.result())
+                except Exception as exc:
+                    batch = futures[future]
+                    logger.warning("Metadata extraction failed for batch starting at chunk %s: %s",
+                                   batch[0].chunk_index if batch else "?", exc)
+                    for chunk in batch:
+                        all_chunk_meta[chunk.chunk_index] = _fallback_chunk_metadata(chunk, filename, file_type)
 
     doc_title = filename
     doc_type = infer_document_type(filename, None)
@@ -297,9 +476,9 @@ def process_document(
         product = product or meta.get("product")
         domain = domain or meta.get("domain")
         version = version or meta.get("version")
-        document_date = document_date or meta.get("document_date") or meta.get("date")
-        effective_date = effective_date or meta.get("effective_date")
-        created_date = created_date or meta.get("created_date")
+        document_date = document_date or _safe_date(meta.get("document_date")) or _safe_date(meta.get("date"))
+        effective_date = effective_date or _safe_date(meta.get("effective_date"))
+        created_date = created_date or _safe_date(meta.get("created_date"))
 
         contextualized = chunk.text
         if settings.ENABLE_CHUNK_SUMMARY and meta.get("summary"):

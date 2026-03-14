@@ -3,6 +3,7 @@ import logging
 import hashlib
 import sys
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path 
@@ -793,9 +794,32 @@ async def index_file_job(
         bm25_ids, bm25_docs, bm25_metas = [], [], []
 
         total_chunks = len(processed["chunk_rows"])
+
+        # --- Concurrent embedding ---
+        embed_inputs: List[Tuple[int, Dict[str, Any], str]] = []
         for idx, row in enumerate(processed["chunk_rows"]):
-            embed_input = row.get("contextualized_content") or row["content"]
-            emb = safe_embed(embed_input)
+            embed_text = row.get("contextualized_content") or row["content"]
+            embed_inputs.append((idx, row, embed_text))
+
+        embeddings_map: Dict[int, List[float]] = {}
+        embed_workers = min(settings.EMBED_CONCURRENCY, max(1, total_chunks))
+
+        with ThreadPoolExecutor(max_workers=embed_workers) as executor:
+            future_to_idx = {
+                executor.submit(safe_embed, text): idx
+                for idx, _row, text in embed_inputs
+            }
+            for future in as_completed(future_to_idx):
+                idx = future_to_idx[future]
+                try:
+                    emb = future.result()
+                    if emb:
+                        embeddings_map[idx] = emb
+                except Exception:
+                    pass
+
+        for idx, row, embed_text in embed_inputs:
+            emb = embeddings_map.get(idx)
             if not emb:
                 continue
 
@@ -805,7 +829,7 @@ async def index_file_job(
             chunk_rows.append(row)
 
             bm25_ids.append(chunk_id)
-            bm25_docs.append(embed_input)
+            bm25_docs.append(embed_text)
             bm25_metas.append(
                 {
                     "file_id": file_id,
@@ -820,10 +844,10 @@ async def index_file_job(
                 }
             )
 
-            if (idx + 1) % settings.BATCH_SIZE == 0:
+            if (len(chunk_rows)) % settings.BATCH_SIZE == 0:
                 update_ingestion_job(
                     job_id,
-                    processed_chunks=str(idx + 1),
+                    processed_chunks=str(len(chunk_rows)),
                     total_chunks=str(total_chunks),
                     successful_chunks=str(len(chunk_rows)),
                 )

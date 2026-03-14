@@ -202,6 +202,51 @@ def _vector_literal(values: List[float]) -> str:
 def _now():
     return datetime.now(timezone.utc)
 
+
+def _safe_date(value) -> Optional[str]:
+    """
+    Normalize a date string into a valid ISO date (YYYY-MM-DD) for PostgreSQL
+    timestamp columns. Handles partial dates like '2024-10' or '2024'.
+    Returns None if the value cannot be parsed.
+    """
+    if value is None:
+        return None
+    text_val = str(value).strip()
+    if not text_val:
+        return None
+
+    # Full ISO date: YYYY-MM-DD
+    if re.fullmatch(r"\d{4}-\d{2}-\d{2}", text_val):
+        try:
+            datetime.strptime(text_val, "%Y-%m-%d")
+            return text_val
+        except ValueError:
+            return None
+
+    # Partial: YYYY-MM -> pad to first of month
+    if re.fullmatch(r"\d{4}-\d{2}", text_val):
+        try:
+            datetime.strptime(text_val + "-01", "%Y-%m-%d")
+            return text_val + "-01"
+        except ValueError:
+            return None
+
+    # Partial: YYYY -> pad to Jan 1
+    if re.fullmatch(r"\d{4}", text_val):
+        return text_val + "-01-01"
+
+    # Full ISO datetime -> extract just the date
+    match = re.match(r"(\d{4}-\d{2}-\d{2})", text_val)
+    if match:
+        try:
+            datetime.strptime(match.group(1), "%Y-%m-%d")
+            return match.group(1)
+        except ValueError:
+            return None
+
+    return None
+
+
 def _name_similarity(a: Optional[str], b: Optional[str]) -> float:
     a = (a or "").strip().lower()
     b = (b or "").strip().lower()
@@ -574,9 +619,11 @@ def insert_document_and_chunks(
                     "normalized_name": version_decision.get("normalized_name"),
                     "file_type": file_type,
                     "version_family_key": version_decision.get("version_family_key"),
-                    "latest_effective_at": version_decision.get("effective_date")
-                    or version_decision.get("document_date")
-                    or version_decision.get("created_date"),
+                    "latest_effective_at": _safe_date(
+                        version_decision.get("effective_date")
+                        or version_decision.get("document_date")
+                        or version_decision.get("created_date")
+                    ),
                 },
             )
 
@@ -607,9 +654,9 @@ def insert_document_and_chunks(
                     "file_size_mb": str(file_size_mb or 0),
                     "version_label": version_decision.get("version_label"),
                     "version_rank": float(version_decision.get("version_rank") or 0.0),
-                    "document_date": version_decision.get("document_date"),
-                    "effective_date": version_decision.get("effective_date"),
-                    "created_date": version_decision.get("created_date"),
+                    "document_date": _safe_date(version_decision.get("document_date")),
+                    "effective_date": _safe_date(version_decision.get("effective_date")),
+                    "created_date": _safe_date(version_decision.get("created_date")),
                     "contextualization_model": "bedrock_haiku" if settings.ENABLE_METADATA_EXTRACTION else None,
                     "duplicate_decision_json": json.dumps(version_decision),
                     "enrichment_json": json.dumps((metadata or {}).get("metadata_json", {})),
@@ -675,9 +722,9 @@ def insert_document_and_chunks(
                     "domain": meta.get("domain"),
                     "document_type": meta.get("document_type"),
                     "version_label": meta.get("version_label"),
-                    "document_date": meta.get("document_date"),
-                    "effective_date": meta.get("effective_date"),
-                    "created_date": meta.get("created_date"),
+                    "document_date": _safe_date(meta.get("document_date")),
+                    "effective_date": _safe_date(meta.get("effective_date")),
+                    "created_date": _safe_date(meta.get("created_date")),
                 },
             )
 
