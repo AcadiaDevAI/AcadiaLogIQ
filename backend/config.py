@@ -1,3 +1,9 @@
+"""
+Phase 3 Configuration — Hybrid Retrieval Orchestration.
+Adds search weights, reranker config, query classifier thresholds,
+and metadata filter settings on top of Phase 2 ingestion config.
+"""
+
 import sys
 from pathlib import Path
 from typing import List, Optional
@@ -17,11 +23,9 @@ class Settings(BaseSettings):
     """
     Global application configuration.
 
-    Phase-2 additions:
-    - contextual ingestion controls
-    - duplicate/version detection flags
-    - Bedrock Claude Haiku metadata extraction
-    - PostgreSQL + pgvector only
+    Phase-2: contextual ingestion, duplicate/version detection, Haiku metadata
+    Phase-3: hybrid retrieval orchestration, query classification,
+             weighted fusion, modular reranking, metadata filters
     """
 
     # ----------------------------------------------------------------
@@ -32,12 +36,7 @@ class Settings(BaseSettings):
 
     MAX_FILE_SIZE_MB: int = 100
     ALLOWED_FILE_TYPES: List[str] = [
-        "log",
-        "txt",
-        "md",
-        "json",
-        "pdf",
-        "docx",
+        "log", "txt", "md", "json", "pdf", "docx",
     ]
 
     # ----------------------------------------------------------------
@@ -86,11 +85,52 @@ class Settings(BaseSettings):
     HAIKU_MAX_TOKENS: int = 4096
 
     # ----------------------------------------------------------------
-    # Concurrency
+    # Concurrency (Phase 2)
     # ----------------------------------------------------------------
 
     METADATA_CONCURRENCY: int = 4
     EMBED_CONCURRENCY: int = 8
+
+    # ----------------------------------------------------------------
+    # Phase-3: Hybrid Retrieval Orchestration
+    # ----------------------------------------------------------------
+
+    # --- Search channel weights (used in RRF fusion) ---
+    VECTOR_WEIGHT: float = 0.45       # semantic similarity channel
+    BM25_WEIGHT: float = 0.30         # BM25 term-frequency channel
+    KEYWORD_WEIGHT: float = 0.25      # PostgreSQL full-text / exact match channel
+
+    # --- Candidate pool sizes per channel ---
+    VECTOR_CANDIDATES: int = 25
+    BM25_CANDIDATES: int = 20
+    KEYWORD_CANDIDATES: int = 15
+
+    # --- Full-text / keyword search ---
+    FTS_MIN_RANK: float = 0.01        # minimum pg ts_rank to keep a result
+    EXACT_TERM_BOOST: float = 2.0     # extra RRF weight for exact-match terms
+
+    # --- Reciprocal Rank Fusion ---
+    RRF_K: int = 60                   # RRF smoothing constant
+
+    # --- Reranker ---
+    RERANKER_BACKEND: str = "llm"     # "llm" | "cross_encoder" | "none"
+    RERANK_TOP_K: int = 6             # final chunks sent to LLM context
+    RERANK_CANDIDATES: int = 15       # how many fused results enter reranker
+    RERANK_SCORE_WEIGHT: float = 0.70 # reranker score contribution in final blend
+    RERANK_FUSION_WEIGHT: float = 0.30  # original fusion score contribution
+
+    # --- Query classifier ---
+    KEYWORD_QUERY_THRESHOLD: float = 0.60   # classifier score above this → keyword-heavy
+    SEMANTIC_QUERY_THRESHOLD: float = 0.60  # classifier score above this → semantic-heavy
+    ENABLE_QUERY_CLASSIFICATION: bool = True
+
+    # --- Metadata filter ---
+    ENABLE_METADATA_FILTER: bool = True
+    METADATA_FILTER_CANDIDATES: int = 10
+
+    # --- Grounding gate ---
+    MIN_GROUNDING_SCORE: float = 0.18
+    MIN_KEYWORD_OVERLAP: int = 1
 
     # ----------------------------------------------------------------
     # Feature flags

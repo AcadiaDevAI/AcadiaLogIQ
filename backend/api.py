@@ -48,6 +48,7 @@ from backend.vector_store import (
 )
 from backend.services.contextual_ingestion_service import process_document
 from backend.vector_store import find_duplicate_by_hash, find_version_candidates
+from backend.retrieval.orchestrator import retrieve as orchestrator_retrieve
 
 
 
@@ -1096,6 +1097,11 @@ async def delete_all_sessions(user_id: Optional[str] = Depends(auth_dependency))
 @app.post("/ask", response_model=AnswerResponse)
 @limiter.limit("30/minute")
 async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(auth_dependency)):
+    """
+    Phase 3 /ask endpoint — hybrid retrieval with query classification,
+    multi-channel search (vector + BM25 + keyword + metadata), fusion, and reranking.
+    The UI contract is unchanged: same request/response shapes as Phase 2.
+    """
     import time
 
     start = time.perf_counter()
@@ -1105,6 +1111,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
 
     owner_id = _normalize_owner_id(user_id)
 
+    # --- Save user message to session ---
     session_id = save_message_to_session(
         session_id=req.session_id,
         role="user",
@@ -1112,6 +1119,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         owner_id=owner_id,
     )
 
+    # --- Check for active indexed files ---
     active_file_ids = _get_active_indexed_file_ids(user_id)
     if not active_file_ids:
         answer = "No indexed files are currently available. Please upload a document first."
@@ -1131,57 +1139,59 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             context_stats={"active_file_count": 0},
         )
 
+    # --- Embed the query ---
     q_emb = safe_embed(req.q)
     if not q_emb:
         raise HTTPException(500, "Embedding failed")
 
-    doc_cands = hybrid_search(
-        req.q,
-        q_emb,
-        "kb",
-        HYBRID_CONFIG["VECTOR_CANDIDATES"],
-        allowed_file_ids=active_file_ids,
+    # ==================================================================
+    # Phase 3: Run the retrieval orchestrator
+    # Coordinates: classify → search (vector+BM25+keyword+metadata) → fuse → rerank
+    # ==================================================================
+    retrieval = orchestrator_retrieve(
+        query=req.q,
+        query_embedding=q_emb,
         owner_id=owner_id,
+        allowed_file_ids=active_file_ids,
+        file_type="kb",
+        generate_fn=safe_generate,
+        bm25_search_fn=bm25.search if bm25 and bm25.size > 0 else None,
+        vector_search_fn=pgvector_search,
     )
 
-    doc_cands = [
-        item for item in doc_cands
-        if item[2].get("file_id") in active_file_ids
-        and item[2].get("owner_id", "anonymous") == owner_id
-    ]
+    doc_ranked = retrieval.ranked
 
-    doc_ranked = rerank_chunks(req.q, doc_cands, HYBRID_CONFIG["RERANK_TOP_K_LOG"])
-
+    # --- Assemble context from reranked chunks ---
     max_ctx_chars = TOKEN_BUDGET["MAX_LOG_CONTEXT_CHARS"] + TOKEN_BUDGET["MAX_KB_CONTEXT_CHARS"]
     doc_ctx, doc_src = assemble_context(doc_ranked, max_ctx_chars)
 
+    # --- Grounding gate: reject if insufficient document support ---
     if not doc_ctx or not has_sufficient_document_support(req.q, doc_ranked):
         answer = (
-        "- I could not find supporting information for that question in the currently uploaded files.\n"
-        "- Please ask a question that is directly covered by the uploaded document content."
-    )
+            "- I could not find supporting information for that question in the currently uploaded files.\n"
+            "- Please ask a question that is directly covered by the uploaded document content."
+        )
         save_message_to_session(
-        session_id=session_id,
-        role="assistant",
-        content=answer,
-        owner_id=owner_id,
-        sources={"docs": []},
-    )
+            session_id=session_id,
+            role="assistant",
+            content=answer,
+            owner_id=owner_id,
+            sources={"docs": []},
+        )
         return AnswerResponse(
-        answer=answer,
-        sources=[],
-        confidence=0.0,
-        processing_time_ms=int((time.perf_counter() - start) * 1000),
-        session_id=session_id,
-        context_stats={
-            "active_file_count": len(active_file_ids),
-            "doc_candidates": len(doc_cands),
-            "doc_after_rerank": len(doc_ranked),
-            "doc_context_chars": len(doc_ctx),
-            "grounded_answer": False,
-        },
-    )
-       
+            answer=answer,
+            sources=[],
+            confidence=0.0,
+            processing_time_ms=int((time.perf_counter() - start) * 1000),
+            session_id=session_id,
+            context_stats={
+                "active_file_count": len(active_file_ids),
+                "grounded_answer": False,
+                **retrieval.stats,
+            },
+        )
+
+    # --- Generate answer from Mistral using the grounded context ---
     prompt = f"""You are a strict document-grounded AI assistant.
 
     IMPORTANT RULES:
@@ -1206,6 +1216,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     answer = safe_generate(prompt)
     ms = int((time.perf_counter() - start) * 1000)
 
+    # --- Save assistant response ---
     sources_dict = {"docs": doc_src}
     save_message_to_session(
         session_id=session_id,
@@ -1224,11 +1235,10 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         processing_time_ms=ms,
         session_id=session_id,
         context_stats={
-            "search_mode": "hybrid (vector + BM25 + re-ranking)",
             "active_file_count": len(active_file_ids),
-            "doc_candidates": len(doc_cands),
             "doc_after_rerank": len(doc_ranked),
             "doc_context_chars": len(doc_ctx),
+            **retrieval.stats,
         },
     )
 
