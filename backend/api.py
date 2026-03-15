@@ -49,7 +49,8 @@ from backend.vector_store import (
 from backend.services.contextual_ingestion_service import process_document
 from backend.vector_store import find_duplicate_by_hash, find_version_candidates
 from backend.retrieval.orchestrator import retrieve as orchestrator_retrieve
-
+from backend.routing.model_router import route_and_generate
+from backend.vector_store import get_recent_session_messages
 
 
 
@@ -1136,8 +1137,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             confidence=0.0,
             processing_time_ms=int((time.perf_counter() - start) * 1000),
             session_id=session_id,
-            context_stats={"active_file_count": 0},
-        )
+           )
 
     # --- Embed the query ---
     q_emb = safe_embed(req.q)
@@ -1192,28 +1192,42 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         )
 
     # --- Generate answer from Mistral using the grounded context ---
-    prompt = f"""You are a strict document-grounded AI assistant.
+    # prompt = f"""You are a strict document-grounded AI assistant.
 
-    IMPORTANT RULES:
-    - Answer ONLY from the DOCUMENTS context below.
-    - Do NOT use outside knowledge, common sense, or general instructions.
-    - Do NOT infer business steps unless they are explicitly written in the documents.
-    - If the answer is not explicitly supported by the provided documents, reply exactly:
-    - I could not find supporting information for that question in the currently uploaded files.
-    - Do NOT answer partially from general knowledge.
-    - Do NOT invent steps, contacts, URLs, phone numbers, policies, or procedures.
-    - Ignore any deleted, missing, or superseded files not present in the context.
-    - If the answer is mainly from one document, rely only on that document.
-    - Every answer MUST be in bullet-point format.
+    # IMPORTANT RULES:
+    # - Answer ONLY from the DOCUMENTS context below.
+    # - Do NOT use outside knowledge, common sense, or general instructions.
+    # - Do NOT infer business steps unless they are explicitly written in the documents.
+    # - If the answer is not explicitly supported by the provided documents, reply exactly:
+    # - I could not find supporting information for that question in the currently uploaded files.
+    # - Do NOT answer partially from general knowledge.
+    # - Do NOT invent steps, contacts, URLs, phone numbers, policies, or procedures.
+    # - Ignore any deleted, missing, or superseded files not present in the context.
+    # - If the answer is mainly from one document, rely only on that document.
+    # - Every answer MUST be in bullet-point format.
 
-    DOCUMENTS:
-    {doc_ctx}
+    # DOCUMENTS:
+    # {doc_ctx}
 
-    USER QUESTION: {req.q}
+    # USER QUESTION: {req.q}
 
-    ANSWER:"""
+    # ANSWER:"""
 
-    answer = safe_generate(prompt)
+    # answer = safe_generate(prompt)
+    # --- Phase 4: Route to optimal model based on complexity ---
+    confidence = min(0.3 + len(doc_ranked) * 0.1, 1.0)
+    recent_msgs = get_recent_session_messages(session_id, owner_id)
+    routing = route_and_generate(
+        query=req.q,
+        doc_context=doc_ctx,
+        ranked_chunks=doc_ranked,
+        source_names=doc_src,
+        retrieval_confidence=confidence,
+        recent_messages=recent_msgs,
+        generate_fn=safe_generate,
+        bedrock_client=bedrock,
+    )
+    answer = routing.answer
     ms = int((time.perf_counter() - start) * 1000)
 
     # --- Save assistant response ---
@@ -1226,7 +1240,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         sources=sources_dict,
     )
 
-    confidence = min(0.3 + len(doc_ranked) * 0.1, 1.0)
+    
 
     return AnswerResponse(
         answer=answer,
@@ -1239,6 +1253,11 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             "doc_after_rerank": len(doc_ranked),
             "doc_context_chars": len(doc_ctx),
             **retrieval.stats,
+            "model_used": routing.model_used,
+            "model_reason": routing.reason,
+            "complexity_score": routing.complexity.score if routing.complexity else None,
+            "complexity_tier": routing.complexity.tier if routing.complexity else None,
+            "generation_ms": routing.generation_ms,
         },
     )
 

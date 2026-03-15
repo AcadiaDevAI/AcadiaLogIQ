@@ -1,7 +1,8 @@
 """
-Phase 3 Configuration — Hybrid Retrieval Orchestration.
-Adds search weights, reranker config, query classifier thresholds,
-and metadata filter settings on top of Phase 2 ingestion config.
+Phase 4 Configuration — Model Routing & Context-Aware Generation.
+Adds Sonnet model ID, complexity classifier thresholds, routing policy,
+cost tier weights, and session context settings.
+Includes all Phase 2 + Phase 3 settings.
 """
 
 import sys
@@ -23,9 +24,10 @@ class Settings(BaseSettings):
     """
     Global application configuration.
 
-    Phase-2: contextual ingestion, duplicate/version detection, Haiku metadata
-    Phase-3: hybrid retrieval orchestration, query classification,
-             weighted fusion, modular reranking, metadata filters
+    Phase 2: contextual ingestion, duplicate/version detection, Haiku metadata
+    Phase 3: hybrid retrieval orchestration, query classification, fusion, reranking
+    Phase 4: complexity classification, cost-optimized model routing,
+             session-aware context builder, Sonnet/Haiku/Mistral routing policy
     """
 
     # ----------------------------------------------------------------
@@ -40,7 +42,7 @@ class Settings(BaseSettings):
     ]
 
     # ----------------------------------------------------------------
-    # AWS / Bedrock
+    # AWS / Bedrock — model IDs
     # ----------------------------------------------------------------
 
     AWS_REGION: str = "us-east-1"
@@ -51,7 +53,8 @@ class Settings(BaseSettings):
 
     BEDROCK_EMBED_MODEL: str = "amazon.titan-embed-text-v2:0"
     BEDROCK_LLM_MODEL: str = "mistral.mistral-7b-instruct-v0:2"
-    BEDROCK_HAIKU_MODEL: str = "us.anthropic.claude-3-5-haiku-20241022-v1:0"
+    BEDROCK_HAIKU_MODEL: str = "us.anthropic.claude-haiku-4-5-20251001-v1:0"
+    BEDROCK_SONNET_MODEL: str = "us.anthropic.claude-sonnet-4-6"
 
     # ----------------------------------------------------------------
     # Database
@@ -95,42 +98,72 @@ class Settings(BaseSettings):
     # Phase-3: Hybrid Retrieval Orchestration
     # ----------------------------------------------------------------
 
-    # --- Search channel weights (used in RRF fusion) ---
-    VECTOR_WEIGHT: float = 0.45       # semantic similarity channel
-    BM25_WEIGHT: float = 0.30         # BM25 term-frequency channel
-    KEYWORD_WEIGHT: float = 0.25      # PostgreSQL full-text / exact match channel
+    VECTOR_WEIGHT: float = 0.45
+    BM25_WEIGHT: float = 0.30
+    KEYWORD_WEIGHT: float = 0.25
 
-    # --- Candidate pool sizes per channel ---
     VECTOR_CANDIDATES: int = 25
     BM25_CANDIDATES: int = 20
     KEYWORD_CANDIDATES: int = 15
 
-    # --- Full-text / keyword search ---
-    FTS_MIN_RANK: float = 0.01        # minimum pg ts_rank to keep a result
-    EXACT_TERM_BOOST: float = 2.0     # extra RRF weight for exact-match terms
+    FTS_MIN_RANK: float = 0.01
+    EXACT_TERM_BOOST: float = 2.0
 
-    # --- Reciprocal Rank Fusion ---
-    RRF_K: int = 60                   # RRF smoothing constant
+    RRF_K: int = 60
 
-    # --- Reranker ---
-    RERANKER_BACKEND: str = "llm"     # "llm" | "cross_encoder" | "none"
-    RERANK_TOP_K: int = 6             # final chunks sent to LLM context
-    RERANK_CANDIDATES: int = 15       # how many fused results enter reranker
-    RERANK_SCORE_WEIGHT: float = 0.70 # reranker score contribution in final blend
-    RERANK_FUSION_WEIGHT: float = 0.30  # original fusion score contribution
+    RERANKER_BACKEND: str = "llm"
+    RERANK_TOP_K: int = 6
+    RERANK_CANDIDATES: int = 15
+    RERANK_SCORE_WEIGHT: float = 0.70
+    RERANK_FUSION_WEIGHT: float = 0.30
 
-    # --- Query classifier ---
-    KEYWORD_QUERY_THRESHOLD: float = 0.60   # classifier score above this → keyword-heavy
-    SEMANTIC_QUERY_THRESHOLD: float = 0.60  # classifier score above this → semantic-heavy
+    KEYWORD_QUERY_THRESHOLD: float = 0.60
+    SEMANTIC_QUERY_THRESHOLD: float = 0.60
     ENABLE_QUERY_CLASSIFICATION: bool = True
 
-    # --- Metadata filter ---
     ENABLE_METADATA_FILTER: bool = True
     METADATA_FILTER_CANDIDATES: int = 10
 
-    # --- Grounding gate ---
     MIN_GROUNDING_SCORE: float = 0.18
     MIN_KEYWORD_OVERLAP: int = 1
+
+    # ----------------------------------------------------------------
+    # Phase-4: Model Routing & Context-Aware Generation
+    # ----------------------------------------------------------------
+
+    # --- Routing policy ---
+    ENABLE_MODEL_ROUTING: bool = True         # False = always use Mistral (Phase 2 behavior)
+    ROUTING_DEFAULT_MODEL: str = "mistral"    # fallback when routing disabled
+
+    # --- Complexity classifier ---
+    # Queries scoring above COMPLEX_THRESHOLD get Sonnet
+    # Queries scoring below SIMPLE_THRESHOLD get Mistral
+    # Queries in between get Haiku
+    COMPLEXITY_SIMPLE_THRESHOLD: float = 0.30
+    COMPLEXITY_COMPLEX_THRESHOLD: float = 0.70
+
+    # --- Sonnet usage guardrails ---
+    SONNET_MAX_TOKENS: int = 4096
+    SONNET_TEMPERATURE: float = 0.1
+    SONNET_MONTHLY_BUDGET_USD: float = 50.0   # soft budget cap (logged, not enforced)
+
+    # --- Haiku answer generation ---
+    HAIKU_ANSWER_MAX_TOKENS: int = 2048
+    HAIKU_ANSWER_TEMPERATURE: float = 0.1
+
+    # --- Context builder ---
+    SESSION_CONTEXT_MAX_MESSAGES: int = 4     # how many recent Q&A pairs to include
+    SESSION_CONTEXT_MAX_CHARS: int = 2000     # max chars for session history in prompt
+    INCLUDE_METADATA_IN_PROMPT: bool = True   # include vendor/domain hints in prompt
+    INCLUDE_CONFIDENCE_IN_PROMPT: bool = True  # include retrieval confidence signal
+
+    # --- Complexity signal weights ---
+    # These control how different signals contribute to complexity score
+    CX_WEIGHT_MULTI_STEP: float = 0.30       # multi-step / comparison queries
+    CX_WEIGHT_REASONING: float = 0.25        # requires inference or synthesis
+    CX_WEIGHT_CONTEXT_SIZE: float = 0.15     # large context = harder to get right
+    CX_WEIGHT_LOW_CONFIDENCE: float = 0.20   # low retrieval confidence = risky
+    CX_WEIGHT_MULTI_DOC: float = 0.10        # spans multiple source documents
 
     # ----------------------------------------------------------------
     # Feature flags

@@ -1277,6 +1277,28 @@ def get_chat_session(session_id: str, owner_id: str) -> Optional[Dict[str, Any]]
     }
 
 
+
+def get_recent_session_messages(session_id: str, owner_id: str, limit: int = 4) -> List[Dict[str, str]]:
+    """Retrieve the most recent messages from a chat session for context building."""
+    if not session_id:
+        return []
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(
+                """
+                SELECT role, content
+                FROM chat_messages
+                WHERE session_id = :session_id
+                ORDER BY id DESC
+                LIMIT :limit
+                """
+            ),
+            {"session_id": session_id, "limit": limit},
+        ).mappings().all()
+    return [{"role": row["role"], "content": row["content"]} for row in reversed(rows)]
+
+
+
 def delete_chat_session(session_id: str, owner_id: str) -> bool:
     with SessionLocal() as db:
         row = db.execute(
