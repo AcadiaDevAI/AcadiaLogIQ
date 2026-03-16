@@ -1,8 +1,7 @@
 """
-Phase 4 Configuration — Model Routing & Context-Aware Generation.
-Adds Sonnet model ID, complexity classifier thresholds, routing policy,
-cost tier weights, and session context settings.
-Includes all Phase 2 + Phase 3 settings.
+Phase 5 Configuration — Multi-Agent Troubleshooting Layer.
+Adds agent escalation thresholds, per-agent model/token budgets,
+and cost controls. Includes all Phase 2 + 3 + 4 settings.
 """
 
 import sys
@@ -26,8 +25,8 @@ class Settings(BaseSettings):
 
     Phase 2: contextual ingestion, duplicate/version detection, Haiku metadata
     Phase 3: hybrid retrieval orchestration, query classification, fusion, reranking
-    Phase 4: complexity classification, cost-optimized model routing,
-             session-aware context builder, Sonnet/Haiku/Mistral routing policy
+    Phase 4: complexity classification, cost-optimized model routing, context builder
+    Phase 5: selective multi-agent troubleshooting for complex queries only
     """
 
     # ----------------------------------------------------------------
@@ -108,7 +107,6 @@ class Settings(BaseSettings):
 
     FTS_MIN_RANK: float = 0.01
     EXACT_TERM_BOOST: float = 2.0
-
     RRF_K: int = 60
 
     RERANKER_BACKEND: str = "llm"
@@ -131,39 +129,58 @@ class Settings(BaseSettings):
     # Phase-4: Model Routing & Context-Aware Generation
     # ----------------------------------------------------------------
 
-    # --- Routing policy ---
-    ENABLE_MODEL_ROUTING: bool = True         # False = always use Mistral (Phase 2 behavior)
-    ROUTING_DEFAULT_MODEL: str = "mistral"    # fallback when routing disabled
+    ENABLE_MODEL_ROUTING: bool = True
+    ROUTING_DEFAULT_MODEL: str = "mistral"
 
-    # --- Complexity classifier ---
-    # Queries scoring above COMPLEX_THRESHOLD get Sonnet
-    # Queries scoring below SIMPLE_THRESHOLD get Mistral
-    # Queries in between get Haiku
     COMPLEXITY_SIMPLE_THRESHOLD: float = 0.30
     COMPLEXITY_COMPLEX_THRESHOLD: float = 0.70
 
-    # --- Sonnet usage guardrails ---
     SONNET_MAX_TOKENS: int = 4096
     SONNET_TEMPERATURE: float = 0.1
-    SONNET_MONTHLY_BUDGET_USD: float = 50.0   # soft budget cap (logged, not enforced)
+    SONNET_MONTHLY_BUDGET_USD: float = 50.0
 
-    # --- Haiku answer generation ---
     HAIKU_ANSWER_MAX_TOKENS: int = 2048
     HAIKU_ANSWER_TEMPERATURE: float = 0.1
 
-    # --- Context builder ---
-    SESSION_CONTEXT_MAX_MESSAGES: int = 4     # how many recent Q&A pairs to include
-    SESSION_CONTEXT_MAX_CHARS: int = 2000     # max chars for session history in prompt
-    INCLUDE_METADATA_IN_PROMPT: bool = True   # include vendor/domain hints in prompt
-    INCLUDE_CONFIDENCE_IN_PROMPT: bool = True  # include retrieval confidence signal
+    SESSION_CONTEXT_MAX_MESSAGES: int = 4
+    SESSION_CONTEXT_MAX_CHARS: int = 2000
+    INCLUDE_METADATA_IN_PROMPT: bool = True
+    INCLUDE_CONFIDENCE_IN_PROMPT: bool = True
 
-    # --- Complexity signal weights ---
-    # These control how different signals contribute to complexity score
-    CX_WEIGHT_MULTI_STEP: float = 0.30       # multi-step / comparison queries
-    CX_WEIGHT_REASONING: float = 0.25        # requires inference or synthesis
-    CX_WEIGHT_CONTEXT_SIZE: float = 0.15     # large context = harder to get right
-    CX_WEIGHT_LOW_CONFIDENCE: float = 0.20   # low retrieval confidence = risky
-    CX_WEIGHT_MULTI_DOC: float = 0.10        # spans multiple source documents
+    CX_WEIGHT_MULTI_STEP: float = 0.30
+    CX_WEIGHT_REASONING: float = 0.25
+    CX_WEIGHT_CONTEXT_SIZE: float = 0.15
+    CX_WEIGHT_LOW_CONFIDENCE: float = 0.20
+    CX_WEIGHT_MULTI_DOC: float = 0.10
+
+    # ----------------------------------------------------------------
+    # Phase-5: Multi-Agent Troubleshooting
+    # ----------------------------------------------------------------
+
+    # --- Master switch ---
+    ENABLE_AGENT_MODE: bool = True            # False = Phase 4 behavior, no agents
+
+    # --- Escalation gate ---
+    # Agent mode activates ONLY when complexity tier is 'complex' AND
+    # the query matches one of the agent-eligible patterns.
+    # This prevents agents from firing on simple or moderate queries.
+    AGENT_COMPLEXITY_THRESHOLD: float = 0.65  # complexity score must exceed this
+    AGENT_MIN_SOURCES: int = 1                # minimum source docs to justify agents
+    AGENT_MAX_STEPS: int = 4                  # max planning steps (cost ceiling)
+
+    # --- Per-agent model assignment ---
+    AGENT_PLANNER_MODEL: str = "sonnet"       # Planner needs deep reasoning
+    AGENT_ANALYSIS_MODEL: str = "haiku"       # Analysis is mid-tier
+    AGENT_COMPOSER_MODEL: str = "haiku"       # Composer assembles final answer
+
+    # --- Per-agent token budgets ---
+    AGENT_PLANNER_MAX_TOKENS: int = 1024      # plan is compact
+    AGENT_ANALYSIS_MAX_TOKENS: int = 1500     # per-step analysis
+    AGENT_COMPOSER_MAX_TOKENS: int = 2048     # final answer
+
+    # --- Cost controls ---
+    AGENT_MAX_TOTAL_TOKENS: int = 8000        # hard ceiling across all agents
+    AGENT_TIMEOUT_SECONDS: int = 45           # total wall-clock limit for agent flow
 
     # ----------------------------------------------------------------
     # Feature flags

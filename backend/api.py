@@ -51,6 +51,7 @@ from backend.vector_store import find_duplicate_by_hash, find_version_candidates
 from backend.retrieval.orchestrator import retrieve as orchestrator_retrieve
 from backend.routing.model_router import route_and_generate
 from backend.vector_store import get_recent_session_messages
+from backend.agents.orchestrator import should_escalate_to_agents, run_agent_pipeline
 
 
 
@@ -1227,7 +1228,31 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         generate_fn=safe_generate,
         bedrock_client=bedrock,
     )
-    answer = routing.answer
+    # answer = routing.answer
+    # ==================================================================
+    # Phase 5: Escalate to multi-agent pipeline for complex queries
+    # ==================================================================
+    agent_result = None
+    should_agent, agent_reason = should_escalate_to_agents(
+        query=req.q,
+        complexity_score=routing.complexity.score if routing.complexity else 0.0,
+        complexity_tier=routing.complexity.tier if routing.complexity else "simple",
+        source_count=len(set(doc_src)),
+    )
+
+    if should_agent:
+        logger.info("Escalating to agent pipeline: %s", agent_reason)
+        agent_result = run_agent_pipeline(
+            query=req.q,
+            doc_context=doc_ctx,
+            ranked_chunks=doc_ranked,
+            source_names=doc_src,
+            generate_fn=safe_generate,
+            bedrock_client=bedrock,
+        )
+        answer = agent_result.answer
+    else:
+        answer = routing.answer
     ms = int((time.perf_counter() - start) * 1000)
 
     # --- Save assistant response ---
@@ -1258,6 +1283,11 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             "complexity_score": routing.complexity.score if routing.complexity else None,
             "complexity_tier": routing.complexity.tier if routing.complexity else None,
             "generation_ms": routing.generation_ms,
+            "agent_mode": agent_result.agent_mode if agent_result else False,
+            "agent_reason": agent_reason,
+            "agent_steps": len(agent_result.steps) if agent_result else 0,
+            "agent_tokens": agent_result.total_tokens if agent_result else 0,
+            "agent_ms": agent_result.total_ms if agent_result else 0,
         },
     )
 
