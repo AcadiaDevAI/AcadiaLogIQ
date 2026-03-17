@@ -52,6 +52,7 @@ from backend.retrieval.orchestrator import retrieve as orchestrator_retrieve
 from backend.routing.model_router import route_and_generate
 from backend.vector_store import get_recent_session_messages
 from backend.agents.orchestrator import should_escalate_to_agents, run_agent_pipeline
+from backend.validation.validator import validate_answer
 
 
 
@@ -385,7 +386,8 @@ def safe_generate(prompt: str, max_tokens: int = None) -> str:
         ).encode("utf-8")
 
         resp = bedrock.invoke_model(
-            modelId=settings.BEDROCK_LLM_MODEL,
+            modelId=settings.BEDROCK_LLM_MODEL, 
+            # modelId=settings.BEDROCK_SONNET_MODEL,
             body=body,
             accept="application/json",
             contentType="application/json",
@@ -915,7 +917,8 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "model": settings.BEDROCK_LLM_MODEL,
+        "model": settings.BEDROCK_LLM_MODEL, 
+        #"model": settings.BEDROCK_SONNET_MODEL, 
         "services": {
             "vector_store": f"{chunk_count} chunks" if chunk_count >= 0 else "uninitialized",
             "bm25_index": f"{bm25.size} docs" if bm25 else "uninitialized",
@@ -1100,9 +1103,12 @@ async def delete_all_sessions(user_id: Optional[str] = Depends(auth_dependency))
 @limiter.limit("30/minute")
 async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(auth_dependency)):
     """
-    Phase 3 /ask endpoint — hybrid retrieval with query classification,
-    multi-channel search (vector + BM25 + keyword + metadata), fusion, and reranking.
-    The UI contract is unchanged: same request/response shapes as Phase 2.
+    /ask endpoint — Phases 3-6 integrated pipeline.
+    Phase 3: hybrid retrieval (vector + BM25 + keyword + metadata) → fusion → rerank
+    Phase 4: complexity-based model routing (Mistral / Haiku / Sonnet)
+    Phase 5: selective multi-agent escalation for complex queries
+    Phase 6: answer validation guardrails, confidence scoring, version awareness
+    UI contract unchanged: same request/response shapes.
     """
     import time
 
@@ -1216,19 +1222,19 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
 
     # answer = safe_generate(prompt)
     # --- Phase 4: Route to optimal model based on complexity ---
-    confidence = min(0.3 + len(doc_ranked) * 0.1, 1.0)
+    retrieval_confidence = min(0.3 + len(doc_ranked) * 0.1, 1.0)
     recent_msgs = get_recent_session_messages(session_id, owner_id)
     routing = route_and_generate(
         query=req.q,
         doc_context=doc_ctx,
         ranked_chunks=doc_ranked,
         source_names=doc_src,
-        retrieval_confidence=confidence,
+        retrieval_confidence=retrieval_confidence,
         recent_messages=recent_msgs,
         generate_fn=safe_generate,
         bedrock_client=bedrock,
     )
-    # answer = routing.answer
+
     # ==================================================================
     # Phase 5: Escalate to multi-agent pipeline for complex queries
     # ==================================================================
@@ -1250,9 +1256,26 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             generate_fn=safe_generate,
             bedrock_client=bedrock,
         )
-        answer = agent_result.answer
+        raw_answer = agent_result.answer
     else:
-        answer = routing.answer
+        raw_answer = routing.answer
+
+    # ==================================================================
+    # Phase 6: Validate answer before returning
+    # Checks grounding faithfulness, fabricated specifics, version
+    # awareness, and computes calibrated confidence score.
+    # ==================================================================
+    validation = validate_answer(
+        query=req.q,
+        answer=raw_answer,
+        doc_context=doc_ctx,
+        ranked_chunks=doc_ranked,
+        source_names=doc_src,
+        model_used=routing.model_used,
+    )
+    answer = validation.answer            # may be original, modified, or fallback
+    confidence = validation.confidence    # calibrated confidence replaces old calculation
+
     ms = int((time.perf_counter() - start) * 1000)
 
     # --- Save assistant response ---
@@ -1265,8 +1288,6 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         sources=sources_dict,
     )
 
-    
-
     return AnswerResponse(
         answer=answer,
         sources=doc_src,
@@ -1278,16 +1299,25 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             "doc_after_rerank": len(doc_ranked),
             "doc_context_chars": len(doc_ctx),
             **retrieval.stats,
+            # Phase 4: model routing stats
             "model_used": routing.model_used,
             "model_reason": routing.reason,
             "complexity_score": routing.complexity.score if routing.complexity else None,
             "complexity_tier": routing.complexity.tier if routing.complexity else None,
             "generation_ms": routing.generation_ms,
+            # Phase 5: agent stats
             "agent_mode": agent_result.agent_mode if agent_result else False,
             "agent_reason": agent_reason,
             "agent_steps": len(agent_result.steps) if agent_result else 0,
             "agent_tokens": agent_result.total_tokens if agent_result else 0,
             "agent_ms": agent_result.total_ms if agent_result else 0,
+            # Phase 6: validation stats
+            "validation_passed": validation.passed,
+            "validation_confidence": round(validation.confidence, 3),
+            "validation_modified": validation.was_modified,
+            "validation_issues": len(validation.issues),
+            "validation_ms": validation.validation_ms,
+            "version_warning": bool(validation.version_warning),
         },
     )
 

@@ -1,7 +1,8 @@
 """
-Phase 5 Configuration — Multi-Agent Troubleshooting Layer.
-Adds agent escalation thresholds, per-agent model/token budgets,
-and cost controls. Includes all Phase 2 + 3 + 4 settings.
+Configuration — Phases 2-6 Complete + Accuracy Fixes.
+Includes: contextual ingestion, hybrid retrieval, model routing,
+multi-agent troubleshooting, answer validation guardrails,
+and accuracy fixes (scenario-aware chunking, Haiku default).
 """
 
 import sys
@@ -27,6 +28,8 @@ class Settings(BaseSettings):
     Phase 3: hybrid retrieval orchestration, query classification, fusion, reranking
     Phase 4: complexity classification, cost-optimized model routing, context builder
     Phase 5: selective multi-agent troubleshooting for complex queries only
+    Phase 6: answer validation guardrails, confidence scoring, version-aware checks
+    Accuracy fix: scenario-aware chunking, Haiku as default generation model
     """
 
     # ----------------------------------------------------------------
@@ -70,13 +73,17 @@ class Settings(BaseSettings):
     BATCH_SIZE: int = 10
 
     # ----------------------------------------------------------------
-    # Phase-2 contextual chunking
+    # Phase-2 contextual chunking (accuracy fix: generous limits)
     # ----------------------------------------------------------------
 
-    CHUNK_MAX_CHARS: int = 2200
-    CHUNK_MIN_CHARS: int = 450
-    CHUNK_OVERLAP_CHARS: int = 150
+    CHUNK_MAX_CHARS: int = 6000
+    CHUNK_MIN_CHARS: int = 200
+    CHUNK_OVERLAP_CHARS: int = 0
     CHUNK_BATCH_SIZE: int = 6
+
+    # LLM-based section discovery fallback (for unstructured documents)
+    ENABLE_LLM_CHUNK_FALLBACK: bool = True    # False = skip LLM, use char-based chunking
+    LLM_CHUNK_FALLBACK_PREVIEW_CHARS: int = 8000  # how much text to send to Haiku
 
     MAX_METADATA_INPUT_CHARS: int = 1800
     MAX_CONTEXT_SUMMARY_CHARS: int = 120
@@ -126,11 +133,11 @@ class Settings(BaseSettings):
     MIN_KEYWORD_OVERLAP: int = 1
 
     # ----------------------------------------------------------------
-    # Phase-4: Model Routing & Context-Aware Generation
+    # Phase-4: Model Routing (accuracy fix: Haiku default, not Mistral)
     # ----------------------------------------------------------------
 
     ENABLE_MODEL_ROUTING: bool = True
-    ROUTING_DEFAULT_MODEL: str = "mistral"
+    ROUTING_DEFAULT_MODEL: str = "haiku"
 
     COMPLEXITY_SIMPLE_THRESHOLD: float = 0.30
     COMPLEXITY_COMPLEX_THRESHOLD: float = 0.70
@@ -157,30 +164,63 @@ class Settings(BaseSettings):
     # Phase-5: Multi-Agent Troubleshooting
     # ----------------------------------------------------------------
 
+    ENABLE_AGENT_MODE: bool = True
+    AGENT_COMPLEXITY_THRESHOLD: float = 0.65
+    AGENT_MIN_SOURCES: int = 1
+    AGENT_MAX_STEPS: int = 4
+
+    AGENT_PLANNER_MODEL: str = "sonnet"
+    AGENT_ANALYSIS_MODEL: str = "haiku"
+    AGENT_COMPOSER_MODEL: str = "haiku"
+
+    AGENT_PLANNER_MAX_TOKENS: int = 1024
+    AGENT_ANALYSIS_MAX_TOKENS: int = 1500
+    AGENT_COMPOSER_MAX_TOKENS: int = 2048
+
+    AGENT_MAX_TOTAL_TOKENS: int = 8000
+    AGENT_TIMEOUT_SECONDS: int = 45
+
+    # ----------------------------------------------------------------
+    # Phase-6: Validation Guardrails & Confidence Scoring
+    # ----------------------------------------------------------------
+
     # --- Master switch ---
-    ENABLE_AGENT_MODE: bool = True            # False = Phase 4 behavior, no agents
+    ENABLE_ANSWER_VALIDATION: bool = True
 
-    # --- Escalation gate ---
-    # Agent mode activates ONLY when complexity tier is 'complex' AND
-    # the query matches one of the agent-eligible patterns.
-    # This prevents agents from firing on simple or moderate queries.
-    AGENT_COMPLEXITY_THRESHOLD: float = 0.65  # complexity score must exceed this
-    AGENT_MIN_SOURCES: int = 1                # minimum source docs to justify agents
-    AGENT_MAX_STEPS: int = 4                  # max planning steps (cost ceiling)
+    # --- Confidence scoring weights ---
+    CONF_WEIGHT_RETRIEVAL: float = 0.30
+    CONF_WEIGHT_COVERAGE: float = 0.25
+    CONF_WEIGHT_GROUNDING: float = 0.25
+    CONF_WEIGHT_CONSISTENCY: float = 0.20
 
-    # --- Per-agent model assignment ---
-    AGENT_PLANNER_MODEL: str = "sonnet"       # Planner needs deep reasoning
-    AGENT_ANALYSIS_MODEL: str = "haiku"       # Analysis is mid-tier
-    AGENT_COMPOSER_MODEL: str = "haiku"       # Composer assembles final answer
+    # --- Validation thresholds ---
+    VALIDATION_MIN_CONFIDENCE: float = 0.35
+    VALIDATION_MIN_GROUNDING: float = 0.25
+    VALIDATION_MIN_COVERAGE: float = 0.20
 
-    # --- Per-agent token budgets ---
-    AGENT_PLANNER_MAX_TOKENS: int = 1024      # plan is compact
-    AGENT_ANALYSIS_MAX_TOKENS: int = 1500     # per-step analysis
-    AGENT_COMPOSER_MAX_TOKENS: int = 2048     # final answer
+    # --- Hallucination detection ---
+    VALIDATION_HALLUCINATION_PHRASES: List[str] = [
+        "as an AI",
+        "I don't have access",
+        "based on my training",
+        "in general",
+        "typically",
+        "it is commonly known",
+        "from my knowledge",
+        "as of my last update",
+    ]
 
-    # --- Cost controls ---
-    AGENT_MAX_TOTAL_TOKENS: int = 8000        # hard ceiling across all agents
-    AGENT_TIMEOUT_SECONDS: int = 45           # total wall-clock limit for agent flow
+    # --- Version awareness ---
+    VALIDATION_WARN_SUPERSEDED: bool = True
+    VALIDATION_SUPERSEDED_PENALTY: float = 0.20
+
+    # --- Retry policy ---
+    VALIDATION_MAX_RETRIES: int = 1
+    VALIDATION_RETRY_EXPAND_K: int = 3
+
+    # --- Evaluation hooks ---
+    ENABLE_EVAL_LOGGING: bool = True
+    EVAL_LOG_FILE: Optional[str] = None
 
     # ----------------------------------------------------------------
     # Feature flags
@@ -245,4 +285,4 @@ AWS_REGION = settings.AWS_REGION
 BEDROCK_EMBED_MODEL = settings.BEDROCK_EMBED_MODEL
 BEDROCK_LLM_MODEL = settings.BEDROCK_LLM_MODEL
 
-settings.UPLOAD_DIR.mkdir(exist_ok=True, parents=True)
+settings.UPLOAD_DIR.mkdir(exist_ok=True, parents=True) 
