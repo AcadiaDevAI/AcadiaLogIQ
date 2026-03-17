@@ -110,6 +110,11 @@ body {
   margin-top: 1em;
   margin-bottom: 0.5em;
 }
+.markdown-body strong,
+.markdown-body b {
+  font-weight: 700;
+  color: var(--text-primary);
+}
 .markdown-body p { margin-bottom: 0.75em; }
 .markdown-body code {
   background: var(--code-bg);
