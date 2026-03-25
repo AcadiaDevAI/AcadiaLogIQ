@@ -121,6 +121,81 @@ def retrieve(
 
     allowed_ids_list = list(allowed_file_ids) if allowed_file_ids else None
 
+    # def _run_vector():
+    #     """Channel 1: pgvector cosine similarity search."""
+    #     if vector_search_fn is None:
+    #         return []
+    #     try:
+    #         hits = vector_search_fn(
+    #             query_embedding=query_embedding,
+    #             n_results=settings.VECTOR_CANDIDATES,
+    #             allowed_file_ids=allowed_ids_list,
+    #         )
+    #         # Filter by owner and allowed files
+    #         filtered = []
+    #         for hit in hits:
+    #             meta = hit.get("metadata", {})
+    #             if meta.get("owner_id", "anonymous") != owner_id:
+    #                 continue
+    #             if allowed_file_ids and meta.get("file_id") not in allowed_file_ids:
+    #                 continue
+    #             filtered.append(hit)
+    #         return filtered
+    #     except Exception as exc:
+    #         logger.warning("Vector search channel failed: %s", exc)
+    #         return []
+
+    # def _run_bm25():
+    #     """Channel 2: in-memory BM25 term frequency search."""
+    #     if bm25_search_fn is None:
+    #         return []
+    #     try:
+    #         raw_hits = bm25_search_fn(
+    #             query,
+    #             n_results=settings.BM25_CANDIDATES,
+    #             file_type=file_type,
+    #         )
+    #         # Filter by owner and allowed files
+    #         filtered = []
+    #         for doc_id, text_val, meta, score in raw_hits:
+    #             if meta.get("owner_id", "anonymous") != owner_id:
+    #                 continue
+    #             if allowed_file_ids and meta.get("file_id") not in allowed_file_ids:
+    #                 continue
+    #             filtered.append((doc_id, text_val, meta, score))
+    #         return filtered
+    #     except Exception as exc:
+    #         logger.warning("BM25 search channel failed: %s", exc)
+    #         return []
+
+    # def _run_keyword():
+    #     """Channel 3: PostgreSQL full-text search + ILIKE fallback."""
+    #     try:
+    #         return fulltext_search(
+    #             terms=intent.extracted_terms,
+    #             n_results=settings.KEYWORD_CANDIDATES,
+    #             allowed_file_ids=allowed_file_ids,
+    #             owner_id=owner_id,
+    #         )
+    #     except Exception as exc:
+    #         logger.warning("Keyword search channel failed: %s", exc)
+    #         return []
+
+    # def _run_metadata():
+    #     """Channel 4: metadata filter search (vendor/product/domain)."""
+    #     if not settings.ENABLE_METADATA_FILTER or not intent.metadata_hints:
+    #         return []
+    #     try:
+    #         return metadata_filter_search(
+    #             metadata_hints=intent.metadata_hints,
+    #             n_results=settings.METADATA_FILTER_CANDIDATES,
+    #             allowed_file_ids=allowed_file_ids,
+    #             owner_id=owner_id,
+    #         )
+    #     except Exception as exc:
+    #         logger.warning("Metadata filter channel failed: %s", exc)
+    #         return []
+
     def _run_vector():
         """Channel 1: pgvector cosine similarity search."""
         if vector_search_fn is None:
@@ -131,12 +206,10 @@ def retrieve(
                 n_results=settings.VECTOR_CANDIDATES,
                 allowed_file_ids=allowed_ids_list,
             )
-            # Filter by owner and allowed files
+            # Files are shared — only filter by allowed_file_ids, not owner_id
             filtered = []
             for hit in hits:
                 meta = hit.get("metadata", {})
-                if meta.get("owner_id", "anonymous") != owner_id:
-                    continue
                 if allowed_file_ids and meta.get("file_id") not in allowed_file_ids:
                     continue
                 filtered.append(hit)
@@ -144,7 +217,8 @@ def retrieve(
         except Exception as exc:
             logger.warning("Vector search channel failed: %s", exc)
             return []
-
+        
+     
     def _run_bm25():
         """Channel 2: in-memory BM25 term frequency search."""
         if bm25_search_fn is None:
@@ -155,11 +229,9 @@ def retrieve(
                 n_results=settings.BM25_CANDIDATES,
                 file_type=file_type,
             )
-            # Filter by owner and allowed files
+            # Files are shared — only filter by allowed_file_ids, not owner_id
             filtered = []
             for doc_id, text_val, meta, score in raw_hits:
-                if meta.get("owner_id", "anonymous") != owner_id:
-                    continue
                 if allowed_file_ids and meta.get("file_id") not in allowed_file_ids:
                     continue
                 filtered.append((doc_id, text_val, meta, score))
@@ -167,7 +239,8 @@ def retrieve(
         except Exception as exc:
             logger.warning("BM25 search channel failed: %s", exc)
             return []
-
+        
+        
     def _run_keyword():
         """Channel 3: PostgreSQL full-text search + ILIKE fallback."""
         try:
@@ -175,7 +248,7 @@ def retrieve(
                 terms=intent.extracted_terms,
                 n_results=settings.KEYWORD_CANDIDATES,
                 allowed_file_ids=allowed_file_ids,
-                owner_id=owner_id,
+                owner_id=None,  # ← shared files, no owner filter
             )
         except Exception as exc:
             logger.warning("Keyword search channel failed: %s", exc)
@@ -190,11 +263,13 @@ def retrieve(
                 metadata_hints=intent.metadata_hints,
                 n_results=settings.METADATA_FILTER_CANDIDATES,
                 allowed_file_ids=allowed_file_ids,
-                owner_id=owner_id,
+                owner_id=None,  # ← shared files, no owner filter
             )
         except Exception as exc:
             logger.warning("Metadata filter channel failed: %s", exc)
-            return []
+            return []       
+
+
 
     # --- Execute channels concurrently ---
     # Strategy-aware: skip channels that won't contribute much

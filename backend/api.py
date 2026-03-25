@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path 
-from typing import Dict, List, Optional, Tuple, TypedDict, Set
+from typing import Any, Dict, List, Optional, Tuple, TypedDict, Set
 
 import boto3
 from botocore.config import Config as BotoConfig
@@ -37,6 +37,7 @@ from backend.vector_store import (
     get_ingestion_job,
     insert_document_and_chunks,
     list_active_files,
+    list_active_files_all,
     list_chat_sessions,
     pgvector_search,
     purge_orphan_chunks_db,
@@ -45,6 +46,8 @@ from backend.vector_store import (
     save_message_to_session,
     update_ingestion_job,
     update_message_feedback,
+    upsert_user,
+    get_user_by_clerk_id,
 )
 from backend.services.contextual_ingestion_service import process_document
 from backend.vector_store import find_duplicate_by_hash, find_version_candidates
@@ -53,7 +56,14 @@ from backend.routing.model_router import route_and_generate
 from backend.vector_store import get_recent_session_messages
 from backend.agents.orchestrator import should_escalate_to_agents, run_agent_pipeline
 from backend.validation.validator import validate_answer
-
+from backend.retrieval.query_expansion import (
+    expand_query,
+    extract_glossary_from_chunks,
+    get_glossary_store,
+    has_sufficient_document_support_v2,
+    rebuild_glossary_from_postgres,
+)
+import time as _time
 
 
 if sys.version_info < (3, 11):
@@ -71,8 +81,8 @@ CHARS_PER_TOKEN = 3
 
 TOKEN_BUDGET = {
     "MODEL_MAX_TOKENS": 32_768,
-    "MAX_LOG_CONTEXT_CHARS": 24_000,
-    "MAX_KB_CONTEXT_CHARS": 24_000,
+    "MAX_LOG_CONTEXT_CHARS": 30_000,
+    "MAX_KB_CONTEXT_CHARS": 30_000,
     "MAX_GENERATION_TOKENS": 2_048,
     "MAX_SINGLE_CHUNK_CHARS": 6_000,
     "PROMPT_OVERHEAD_CHARS": 1_500,
@@ -184,7 +194,31 @@ def send_feedback_email(subject: str, body_text: str, body_html: str) -> bool:
         return False
 
 
+# def _resolve_user_display(user_id: Optional[str]) -> dict:
+#     return get_clerk_user_display(user_id)
+
 def _resolve_user_display(user_id: Optional[str]) -> dict:
+    """
+    Resolve user display name and email.
+    First checks the local users table (populated by useAutoRegister),
+    then falls back to Clerk API if not found locally.
+    """
+    if not user_id:
+        return {"email": "anonymous", "name": "Anonymous", "user_id": "anonymous"}
+
+    # Try local DB first (fast, no API call)
+    try:
+        local_user = get_user_by_clerk_id(user_id)
+        if local_user and local_user.get("email"):
+            return {
+                "email": local_user["email"],
+                "name": local_user.get("full_name") or local_user["email"].split("@")[0],
+                "user_id": user_id,
+            }
+    except Exception:
+        pass
+
+    # Fall back to Clerk API
     return get_clerk_user_display(user_id)
 
 
@@ -193,17 +227,35 @@ def _normalize_owner_id(user_id: Optional[str]) -> str:
 
 
 def _get_active_indexed_file_ids(user_id: Optional[str]) -> Set[str]:
-    owner_id = _normalize_owner_id(user_id)
-    return {f["id"] for f in list_active_files(owner_id) if f.get("status") == "indexed"}
+    """Get ALL indexed files across all users (files are shared)."""
+    return {f["id"] for f in list_active_files_all() if f.get("status") == "indexed"}
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global bm25
     logger.info("Starting API...")
+
+    # ── Log auth configuration on startup ──
+    clerk_on = is_clerk_enabled()
+    logger.info("=== AUTH CONFIG ===")
+    logger.info("  CLERK_ENABLED setting: %s", getattr(settings, 'CLERK_ENABLED', 'NOT SET'))
+    logger.info("  CLERK_SECRET_KEY set: %s", bool(getattr(settings, 'CLERK_SECRET_KEY', '')))
+    logger.info("  CLERK_PUBLISHABLE_KEY set: %s", bool(getattr(settings, 'CLERK_PUBLISHABLE_KEY', '')))
+    logger.info("  is_clerk_enabled() = %s", clerk_on)
+    if not clerk_on:
+        logger.warning("  ⚠️  Clerk is NOT enabled — all requests will be 'anonymous'!")
+        logger.warning("  ⚠️  Set CLERK_ENABLED=true, CLERK_SECRET_KEY, and CLERK_PUBLISHABLE_KEY in .env")
+    logger.info("===================")
+
     bm25 = get_bm25_index()
     doc_count = rebuild_bm25_from_postgres()
     logger.info("BM25 ready from PostgreSQL: %d docs", doc_count)
+
+    # Rebuild glossary from document content (learns abbreviations automatically)
+    glossary_count = rebuild_glossary_from_postgres()
+    logger.info("Glossary store ready: %d acronyms learned from documents", glossary_count)
+
     yield
     logger.info("Shutting down...")
 
@@ -211,7 +263,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Acadia's Log IQ API",
     description="AI log analysis — Hybrid Search + Re-ranking",
-    version="2.2.0",
+    version="2.3.0",
     lifespan=lifespan,
 )
 
@@ -251,9 +303,30 @@ async def auth_dependency(
     request: Request,
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
 ) -> Optional[str]:
+    """
+    Returns the authenticated user's Clerk ID, or raises 401.
+
+    When Clerk is enabled:
+      - Valid JWT → returns user_id (e.g., "user_2xABC123")
+      - Missing/invalid JWT → clerk_auth_dependency raises 401
+    When Clerk is disabled:
+      - API key mode or open mode → returns None (becomes "anonymous")
+    """
     if is_clerk_enabled():
-        return await clerk_auth_dependency(request)
+        user_id = await clerk_auth_dependency(request)
+        # Extra safety: if clerk_auth_dependency somehow returns None
+        # without raising, reject anyway
+        if not user_id:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Authentication required. Please sign in.",
+            )
+        logger.debug("Auth: clerk user_id=%s", user_id)
+        return user_id
+
+    # Clerk not enabled — fall back to API key or open mode
     verify_api_key(x_api_key)
+    logger.debug("Auth: Clerk disabled, using anonymous")
     return None
 
 
@@ -387,7 +460,6 @@ def safe_generate(prompt: str, max_tokens: int = None) -> str:
 
         resp = bedrock.invoke_model(
             modelId=settings.BEDROCK_LLM_MODEL, 
-            # modelId=settings.BEDROCK_SONNET_MODEL,
             body=body,
             accept="application/json",
             contentType="application/json",
@@ -433,12 +505,10 @@ def hybrid_search(
             doc_id = hit["id"]
             meta = hit["metadata"]
             meta_file_id = meta.get("file_id")
-            meta_owner_id = meta.get("owner_id", "anonymous")
 
             if allowed_file_ids is not None and meta_file_id not in allowed_file_ids:
                 continue
-            if meta_owner_id != owner_id:
-                continue
+            # NOTE: owner_id filtering removed — files are shared across all users
 
             rank += 1
             vector_results[doc_id] = {
@@ -462,12 +532,10 @@ def hybrid_search(
             rank = 0
             for doc_id, text_value, meta, score in raw_bm25:
                 meta_file_id = meta.get("file_id")
-                meta_owner_id = meta.get("owner_id", "anonymous")
 
                 if allowed_file_ids is not None and meta_file_id not in allowed_file_ids:
                     continue
-                if meta_owner_id != owner_id:
-                    continue
+                # NOTE: owner_id filtering removed — files are shared across all users
 
                 rank += 1
                 bm25_results[doc_id] = {
@@ -614,44 +682,22 @@ def assemble_context(
 def has_sufficient_document_support(
     question: str,
     ranked: List[Tuple[str, str, Dict, float]],
-    min_score: float = 0.18,
+    min_score: float = 0.12,
     min_keyword_hits: int = 1,
+    expanded_keywords: Optional[Set[str]] = None,
 ) -> bool:
     """
-    Hard gate:
-    only answer when retrieval shows actual document support.
-
-    Rules:
-    - require at least one reranked chunk
-    - require top score above threshold
-    - require at least one meaningful keyword overlap between question and retrieved text
+    Document-aware support check. Uses glossary-expanded keywords so that
+    a query for "DHCP" also matches chunks containing "Dynamic Host Configuration Protocol"
+    (if the document's glossary defined that mapping).
     """
-    if not ranked:
-        return False
-
-    top_score = float(ranked[0][3] or 0.0)
-    if top_score < min_score:
-        return False
-
-    import re
-
-    stop_words = {
-        "the", "a", "an", "is", "are", "to", "for", "of", "in", "on", "how",
-        "what", "when", "where", "why", "do", "does", "can", "i", "me", "my",
-        "you", "your", "please", "tell", "about"
-    }
-
-    q_terms = {
-        t for t in re.findall(r"\w+", (question or "").lower())
-        if len(t) > 2 and t not in stop_words
-    }
-    if not q_terms:
-        return True
-
-    combined_text = " ".join((item[1] or "") for item in ranked[:3]).lower()
-    hit_count = sum(1 for term in q_terms if term in combined_text)
-
-    return hit_count >= min_keyword_hits
+    return has_sufficient_document_support_v2(
+        question=question,
+        ranked=ranked,
+        min_score=min_score,
+        min_keyword_hits=min_keyword_hits,
+        expanded_keywords=expanded_keywords,
+    )
 
 
 def calculate_file_hash_bytes(content: bytes) -> str:
@@ -753,6 +799,145 @@ def iter_line_chunks(fp: Path, lines_per=None):
             yield c
 
 
+# async def index_file_job(
+#     job_id: str,
+#     storage_uri: str,
+#     filename: str,
+#     file_type: str,
+#     file_id: str,
+#     owner_id: Optional[str],
+#     file_size_mb: float,
+# ):
+#     owner_id = _normalize_owner_id(owner_id)
+#     update_ingestion_job(job_id, status="running")
+
+#     try:
+#         local_path = storage.resolve_local_path(storage_uri)
+#         if not local_path or not local_path.exists():
+#             raise RuntimeError(f"Stored file path is not readable: {storage_uri}")
+
+#         job = get_ingestion_job(job_id)
+#         file_hash = job["file_hash"] if job else ""
+
+#         processed = process_document(
+#             local_path=local_path,
+#             filename=filename,
+#             file_type=file_type,
+#             owner_id=owner_id,
+#             fingerprint=file_hash,
+#             exact_duplicate_lookup=find_duplicate_by_hash,
+#             version_candidate_lookup=find_version_candidates,
+#         )
+
+#         if processed["status"] == "exact_duplicate":
+#             update_ingestion_job(
+#                 job_id,
+#                 status="done",
+#                 processed_chunks="0",
+#                 total_chunks="0",
+#                 successful_chunks="0",
+#                 error=None,
+#                 completed_at=datetime.now(timezone.utc),
+#             )
+#             return
+
+#         chunk_rows = []
+#         bm25_ids, bm25_docs, bm25_metas = [], [], []
+
+#         total_chunks = len(processed["chunk_rows"])
+
+#         embed_inputs: List[Tuple[int, Dict[str, Any], str]] = []
+#         for idx, row in enumerate(processed["chunk_rows"]):
+#             embed_text = row.get("contextualized_content") or row["content"]
+#             embed_inputs.append((idx, row, embed_text))
+
+#         embeddings_map: Dict[int, List[float]] = {}
+#         embed_workers = min(settings.EMBED_CONCURRENCY, max(1, total_chunks))
+
+#         with ThreadPoolExecutor(max_workers=embed_workers) as executor:
+#             future_to_idx = {
+#                 executor.submit(safe_embed, text): idx
+#                 for idx, _row, text in embed_inputs
+#             }
+#             for future in as_completed(future_to_idx):
+#                 idx = future_to_idx[future]
+#                 try:
+#                     emb = future.result()
+#                     if emb:
+#                         embeddings_map[idx] = emb
+#                 except Exception:
+#                     pass
+
+#         for idx, row, embed_text in embed_inputs:
+#             emb = embeddings_map.get(idx)
+#             if not emb:
+#                 continue
+
+#             chunk_id = f"{file_id}:{job_id}:{idx}"
+#             row["id"] = chunk_id
+#             row["embedding"] = emb
+#             chunk_rows.append(row)
+
+#             bm25_ids.append(chunk_id)
+#             bm25_docs.append(embed_text)
+#             bm25_metas.append(
+#                 {
+#                     "file_id": file_id,
+#                     "owner_id": owner_id,
+#                     "source": filename,
+#                     "file_type": file_type,
+#                     "section_heading": row.get("section_heading"),
+#                     "chunk_type": row.get("chunk_type"),
+#                     "summary": row.get("summary"),
+#                     "labels_json": row.get("labels_json", {}),
+#                     "metadata_json": row.get("metadata_json", {}),
+#                 }
+#             )
+
+#             if (len(chunk_rows)) % settings.BATCH_SIZE == 0:
+#                 update_ingestion_job(
+#                     job_id,
+#                     processed_chunks=str(len(chunk_rows)),
+#                     total_chunks=str(total_chunks),
+#                     successful_chunks=str(len(chunk_rows)),
+#                 )
+
+#         inserted = insert_document_and_chunks(
+#             document_id=file_id,
+#             filename=filename,
+#             fingerprint=file_hash,
+#             chunk_rows=chunk_rows,
+#             owner_id=owner_id,
+#             file_type=file_type,
+#             storage_uri=storage_uri,
+#             file_size_mb=file_size_mb,
+#             metadata=processed["document_metadata"],
+#             version_decision=processed["version_decision"],
+#         )
+
+#         if bm25 and inserted["status"] == "inserted" and bm25_ids:
+#             bm25.remove_documents_by_file_id(file_id)
+#             bm25.add_documents_batch(bm25_ids, bm25_docs, bm25_metas)
+
+#         update_ingestion_job(
+#             job_id,
+#             status="done",
+#             processed_chunks=str(total_chunks),
+#             total_chunks=str(total_chunks),
+#             successful_chunks=str(len(chunk_rows)),
+#             error=None,
+#             completed_at=datetime.now(timezone.utc),
+#         )
+
+#     except Exception as exc:
+#         logger.exception("Indexing failed for %s: %s", filename, exc)
+#         update_ingestion_job(
+#             job_id,
+#             status="error",
+#             error=str(exc),
+#             completed_at=datetime.now(timezone.utc),
+#         )   
+
 async def index_file_job(
     job_id: str,
     storage_uri: str,
@@ -764,6 +949,7 @@ async def index_file_job(
 ):
     owner_id = _normalize_owner_id(owner_id)
     update_ingestion_job(job_id, status="running")
+    t_total_start = _time.perf_counter()
 
     try:
         local_path = storage.resolve_local_path(storage_uri)
@@ -773,6 +959,9 @@ async def index_file_job(
         job = get_ingestion_job(job_id)
         file_hash = job["file_hash"] if job else ""
 
+        # ── Phase 1: Parse + contextual enrichment (Haiku LLM calls) ──
+        t_parse_start = _time.perf_counter()
+
         processed = process_document(
             local_path=local_path,
             filename=filename,
@@ -781,6 +970,12 @@ async def index_file_job(
             fingerprint=file_hash,
             exact_duplicate_lookup=find_duplicate_by_hash,
             version_candidate_lookup=find_version_candidates,
+        )
+
+        t_parse_end = _time.perf_counter()
+        logger.info(
+            "[PERF] %s — Parse + metadata: %.1fs (%d chunks)",
+            filename, t_parse_end - t_parse_start, len(processed.get("chunk_rows", []))
         )
 
         if processed["status"] == "exact_duplicate":
@@ -793,6 +988,8 @@ async def index_file_job(
                 error=None,
                 completed_at=datetime.now(timezone.utc),
             )
+            logger.info("[PERF] %s — Exact duplicate, skipped in %.1fs",
+                        filename, _time.perf_counter() - t_total_start)
             return
 
         chunk_rows = []
@@ -800,7 +997,9 @@ async def index_file_job(
 
         total_chunks = len(processed["chunk_rows"])
 
-        # --- Concurrent embedding ---
+        # ── Phase 2: Concurrent embedding (Bedrock API calls) ──
+        t_embed_start = _time.perf_counter()
+
         embed_inputs: List[Tuple[int, Dict[str, Any], str]] = []
         for idx, row in enumerate(processed["chunk_rows"]):
             embed_text = row.get("contextualized_content") or row["content"]
@@ -823,6 +1022,14 @@ async def index_file_job(
                 except Exception:
                     pass
 
+        t_embed_end = _time.perf_counter()
+        logger.info(
+            "[PERF] %s — Embedding: %.1fs (%d/%d succeeded, %d workers)",
+            filename, t_embed_end - t_embed_start,
+            len(embeddings_map), total_chunks, embed_workers
+        )
+
+        # ── Phase 3: Build chunk rows + BM25 entries ──
         for idx, row, embed_text in embed_inputs:
             emb = embeddings_map.get(idx)
             if not emb:
@@ -849,13 +1056,16 @@ async def index_file_job(
                 }
             )
 
-            if (len(chunk_rows)) % settings.BATCH_SIZE == 0:
-                update_ingestion_job(
-                    job_id,
-                    processed_chunks=str(len(chunk_rows)),
-                    total_chunks=str(total_chunks),
-                    successful_chunks=str(len(chunk_rows)),
-                )
+        # Single progress update after embedding (not per-batch)
+        update_ingestion_job(
+            job_id,
+            processed_chunks=str(len(chunk_rows)),
+            total_chunks=str(total_chunks),
+            successful_chunks=str(len(chunk_rows)),
+        )
+
+        # ── Phase 4: DB insert ──
+        t_db_start = _time.perf_counter()
 
         inserted = insert_document_and_chunks(
             document_id=file_id,
@@ -870,9 +1080,33 @@ async def index_file_job(
             version_decision=processed["version_decision"],
         )
 
+        t_db_end = _time.perf_counter()
+        logger.info(
+            "[PERF] %s — DB insert: %.1fs (%d chunks)",
+            filename, t_db_end - t_db_start, len(chunk_rows)
+        )
+
+        # ── Phase 5: BM25 index update ──
+        t_bm25_start = _time.perf_counter()
+
         if bm25 and inserted["status"] == "inserted" and bm25_ids:
             bm25.remove_documents_by_file_id(file_id)
             bm25.add_documents_batch(bm25_ids, bm25_docs, bm25_metas)
+
+        t_bm25_end = _time.perf_counter()
+
+        # ── Phase 5b: Learn glossary/abbreviations from this document ──
+        try:
+            doc_glossary = extract_glossary_from_chunks(chunk_rows)
+            if doc_glossary:
+                get_glossary_store().add_document_glossary(file_id, doc_glossary)
+                # Also store in metadata_json for persistence across restarts
+                logger.info(
+                    "Learned %d abbreviations from %s (e.g. %s)",
+                    len(doc_glossary), filename, list(doc_glossary.keys())[:5],
+                )
+        except Exception as e:
+            logger.warning("Glossary extraction failed (non-fatal): %s", e)
 
         update_ingestion_job(
             job_id,
@@ -884,6 +1118,18 @@ async def index_file_job(
             completed_at=datetime.now(timezone.utc),
         )
 
+        t_total_end = _time.perf_counter()
+        logger.info(
+            "[PERF] %s — TOTAL: %.1fs | parse=%.1fs embed=%.1fs db=%.1fs bm25=%.1fs | %d chunks",
+            filename,
+            t_total_end - t_total_start,
+            t_parse_end - t_parse_start,
+            t_embed_end - t_embed_start,
+            t_db_end - t_db_start,
+            t_bm25_end - t_bm25_start,
+            len(chunk_rows),
+        )
+
     except Exception as exc:
         logger.exception("Indexing failed for %s: %s", filename, exc)
         update_ingestion_job(
@@ -891,7 +1137,7 @@ async def index_file_job(
             status="error",
             error=str(exc),
             completed_at=datetime.now(timezone.utc),
-        )   
+        )
 
 
 @app.middleware("http")
@@ -918,15 +1164,58 @@ async def health_check():
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "model": settings.BEDROCK_LLM_MODEL, 
-        #"model": settings.BEDROCK_SONNET_MODEL, 
         "services": {
             "vector_store": f"{chunk_count} chunks" if chunk_count >= 0 else "uninitialized",
             "bm25_index": f"{bm25.size} docs" if bm25 else "uninitialized",
+            "glossary_store": f"{get_glossary_store().size} acronyms (learned from docs)",
             "bedrock": "available",
         },
-        "search_mode": "hybrid (pgvector + BM25 + re-ranking)",
+        "search_mode": "hybrid (pgvector + BM25 + re-ranking + doc-aware query expansion)",
         "auth_mode": "clerk" if is_clerk_enabled() else ("api_key" if settings.API_KEY else "open"),
     }
+
+
+# =========================================================
+# Auth Debug — call this to diagnose config issues
+# =========================================================
+@app.get("/auth/debug")
+async def auth_debug(request: Request):
+    """
+    Diagnostic endpoint — shows auth configuration and whether
+    the current request has a valid JWT. No auth required.
+    """
+    clerk_enabled = is_clerk_enabled()
+    has_bearer = bool(request.headers.get("Authorization", "").startswith("Bearer "))
+    
+    result = {
+        "clerk_enabled": clerk_enabled,
+        "clerk_enabled_setting": getattr(settings, 'CLERK_ENABLED', 'NOT SET'),
+        "clerk_secret_key_set": bool(getattr(settings, 'CLERK_SECRET_KEY', '')),
+        "clerk_publishable_key_set": bool(getattr(settings, 'CLERK_PUBLISHABLE_KEY', '')),
+        "request_has_bearer_token": has_bearer,
+        "auth_mode": "clerk" if clerk_enabled else ("api_key" if settings.API_KEY else "open"),
+    }
+    
+    # If there's a Bearer token and Clerk is enabled, try to decode it
+    if clerk_enabled and has_bearer:
+        try:
+            from backend.clerk_auth import extract_bearer_token, verify_clerk_token
+            token = extract_bearer_token(request)
+            if token:
+                payload = verify_clerk_token(token)
+                result["jwt_valid"] = True
+                result["jwt_user_id"] = payload.get("sub")
+                result["jwt_issuer"] = payload.get("iss")
+            else:
+                result["jwt_valid"] = False
+                result["jwt_error"] = "No token extracted"
+        except Exception as e:
+            result["jwt_valid"] = False
+            result["jwt_error"] = str(e)
+    elif has_bearer and not clerk_enabled:
+        result["warning"] = "Bearer token present but Clerk is NOT enabled — token is being IGNORED"
+    
+    return result
 
 
 @app.get("/me")
@@ -943,6 +1232,90 @@ async def get_current_user(request: Request, user_id: Optional[str] = Depends(au
         "authenticated": False,
         "user_id": None,
         "auth_mode": "api_key" if settings.API_KEY else "open",
+    }
+
+
+# =========================================================
+# Multi-User: Registration & Account Management
+# =========================================================
+
+class RegisterRequest(BaseModel):
+    email: Optional[str] = None
+    full_name: Optional[str] = None
+    avatar_url: Optional[str] = None
+    model_config = ConfigDict(extra="ignore")
+
+
+@app.post("/auth/register-or-login")
+async def register_or_login(
+    req: RegisterRequest,
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    if not user_id:
+        raise HTTPException(401, "Authentication required")
+
+    user = upsert_user(
+        clerk_id=user_id,
+        email=req.email,
+        full_name=req.full_name,
+        avatar_url=req.avatar_url,
+    )
+    return {
+        "status": "ok",
+        "user_id": user["clerk_id"],
+        "email": user.get("email"),
+        "full_name": user.get("full_name"),
+        "created_at": str(user["created_at"]),
+        "is_new": user["is_new"],
+    }
+
+
+@app.get("/auth/profile")
+async def get_profile(
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    if not user_id:
+        raise HTTPException(401, "Authentication required")
+
+    user = get_user_by_clerk_id(user_id)
+    if not user:
+        raise HTTPException(404, "User not found. Please sign in again.")
+
+    return {
+        "user_id": user["clerk_id"],
+        "email": user.get("email"),
+        "full_name": user.get("full_name"),
+        "avatar_url": user.get("avatar_url"),
+        "created_at": str(user["created_at"]),
+        "last_login_at": str(user["last_login_at"]) if user.get("last_login_at") else None,
+    }
+
+
+@app.delete("/auth/delete-account")
+async def delete_account(
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    if not user_id:
+        raise HTTPException(401, "Authentication required")
+
+    from backend.db.connection import SessionLocal
+    from sqlalchemy import text as sa_text
+
+    with SessionLocal() as db:
+        result = db.execute(
+            sa_text("SELECT * FROM delete_user_data(:oid)"),
+            {"oid": user_id},
+        ).mappings().first()
+        db.commit()
+
+    if bm25:
+        rebuild_bm25_from_postgres()
+
+    return {
+        "status": "deleted",
+        "user_id": user_id,
+        "details": dict(result) if result else {},
+        "timestamp": datetime.now(timezone.utc).isoformat(),
     }
 
 
@@ -1043,15 +1416,14 @@ async def upload_status(job_id: str, user_id: Optional[str] = Depends(auth_depen
 
 @app.get("/files")
 async def list_files(user_id: Optional[str] = Depends(auth_dependency)):
-    owner_id = _normalize_owner_id(user_id)
-    files = list_active_files(owner_id)
+    """List ALL active files across all users (files are shared)."""
+    files = list_active_files_all()
     return {"files": files, "total": len(files)}
 
 
 @app.delete("/files/{file_id}")
 async def delete_file(file_id: str, user_id: Optional[str] = Depends(auth_dependency)):
-    owner_id = _normalize_owner_id(user_id)
-    files = {f["id"]: f for f in list_active_files(owner_id)}
+    files = {f["id"]: f for f in list_active_files_all()}
     if file_id not in files:
         raise HTTPException(404, "File not found")
 
@@ -1102,14 +1474,6 @@ async def delete_all_sessions(user_id: Optional[str] = Depends(auth_dependency))
 @app.post("/ask", response_model=AnswerResponse)
 @limiter.limit("30/minute")
 async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(auth_dependency)):
-    """
-    /ask endpoint — Phases 3-6 integrated pipeline.
-    Phase 3: hybrid retrieval (vector + BM25 + keyword + metadata) → fusion → rerank
-    Phase 4: complexity-based model routing (Mistral / Haiku / Sonnet)
-    Phase 5: selective multi-agent escalation for complex queries
-    Phase 6: answer validation guardrails, confidence scoring, version awareness
-    UI contract unchanged: same request/response shapes.
-    """
     import time
 
     start = time.perf_counter()
@@ -1119,7 +1483,6 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
 
     owner_id = _normalize_owner_id(user_id)
 
-    # --- Save user message to session ---
     session_id = save_message_to_session(
         session_id=req.session_id,
         role="user",
@@ -1127,7 +1490,6 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         owner_id=owner_id,
     )
 
-    # --- Check for active indexed files ---
     active_file_ids = _get_active_indexed_file_ids(user_id)
     if not active_file_ids:
         answer = "No indexed files are currently available. Please upload a document first."
@@ -1146,17 +1508,45 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             session_id=session_id,
            )
 
-    # --- Embed the query ---
-    q_emb = safe_embed(req.q)
+    # q_emb = safe_embed(req.q)
+    # if not q_emb:
+    #     raise HTTPException(500, "Embedding failed")
+
+    # # ── Query Expansion: resolve abbreviations learned from documents ──
+    # expanded = expand_query(req.q)
+    # if expanded.acronyms_found:
+    #     logger.info(
+    #         "Query expansion: '%s' → acronyms=%s",
+    #         req.q, list(expanded.acronyms_found.keys()),
+    #     )
+    #     # Re-embed with expanded text for better semantic match
+    #     expanded_emb = safe_embed(expanded.expanded_text)
+    #     if expanded_emb:
+    #         q_emb = expanded_emb
+    
+    # ── Query Expansion: normalize + resolve abbreviations ──
+    expanded = expand_query(req.q)
+    if expanded.acronyms_found:
+        logger.info(
+            "Query expansion: '%s' → acronyms=%s",
+            req.q, list(expanded.acronyms_found.keys()),
+        )
+
+    # Always embed the expanded/normalized text (not raw query)
+    # This handles: "toDC" → "to DC", underscores → spaces, acronym expansion
+    embed_text = expanded.expanded_text
+    if embed_text.lower() != req.q.lower():
+        logger.info("Embedding normalized query: '%s' (original: '%s')", embed_text, req.q)
+
+    q_emb = safe_embed(embed_text)
+    if not q_emb:
+        # Fallback: try raw query if expanded text fails
+        q_emb = safe_embed(req.q)
     if not q_emb:
         raise HTTPException(500, "Embedding failed")
 
-    # ==================================================================
-    # Phase 3: Run the retrieval orchestrator
-    # Coordinates: classify → search (vector+BM25+keyword+metadata) → fuse → rerank
-    # ==================================================================
     retrieval = orchestrator_retrieve(
-        query=req.q,
+        query=expanded.expanded_text,
         query_embedding=q_emb,
         owner_id=owner_id,
         allowed_file_ids=active_file_ids,
@@ -1166,14 +1556,79 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         vector_search_fn=pgvector_search,
     )
 
+    # ── Fallback: try variant queries if primary retrieval found nothing ──
+    # if not retrieval.ranked and len(expanded.variants) > 1:
+    #     logger.info("Primary retrieval empty — trying %d variant queries", len(expanded.variants) - 1)
+    #     for variant in expanded.variants[1:]:
+    #         v_emb = safe_embed(variant)
+    #         if not v_emb:
+    #             continue
+    #         variant_retrieval = orchestrator_retrieve(
+    #             query=variant,
+    #             query_embedding=v_emb,
+    #             owner_id=owner_id,
+    #             allowed_file_ids=active_file_ids,
+    #             file_type="kb",
+    #             generate_fn=safe_generate,
+    #             bm25_search_fn=bm25.search if bm25 and bm25.size > 0 else None,
+    #             vector_search_fn=pgvector_search,
+    #         )
+    #         if variant_retrieval.ranked:
+    #             retrieval = variant_retrieval
+    #             logger.info("Variant query succeeded: '%s'", variant[:80])
+    #             break
+    # ── Fallback: try variant queries if primary retrieval is empty OR weak ──
+    # "Weak" = retrieval returned results but document support check fails,
+    # meaning the chunks don't actually contain the query's key terms.
+    # This catches cases like "toDC" where normalization ("to DC") would
+    # retrieve from the correct document.
+    should_try_variants = (
+        len(expanded.variants) > 1
+        and (
+            not retrieval.ranked
+            or not has_sufficient_document_support(
+                req.q, retrieval.ranked,
+                expanded_keywords=expanded.expanded_keywords,
+            )
+        )
+    )
+    if should_try_variants:
+        logger.info(
+            "Trying %d variant queries (primary %s)",
+            len(expanded.variants) - 1,
+            "empty" if not retrieval.ranked else "weak support",
+        )
+        for variant in expanded.variants[1:]:
+            v_emb = safe_embed(variant)
+            if not v_emb:
+                continue
+            variant_retrieval = orchestrator_retrieve(
+                query=variant,
+                query_embedding=v_emb,
+                owner_id=owner_id,
+                allowed_file_ids=active_file_ids,
+                file_type="kb",
+                generate_fn=safe_generate,
+                bm25_search_fn=bm25.search if bm25 and bm25.size > 0 else None,
+                vector_search_fn=pgvector_search,
+            )
+            if variant_retrieval.ranked:
+                # Check if variant results are better than what we have
+                variant_support = has_sufficient_document_support(
+                    variant, variant_retrieval.ranked,
+                    expanded_keywords=expanded.expanded_keywords,
+                )
+                if variant_support or not retrieval.ranked:
+                    retrieval = variant_retrieval
+                    logger.info("Variant query improved results: '%s'", variant[:80])
+                    break
+
     doc_ranked = retrieval.ranked
 
-    # --- Assemble context from reranked chunks ---
     max_ctx_chars = TOKEN_BUDGET["MAX_LOG_CONTEXT_CHARS"] + TOKEN_BUDGET["MAX_KB_CONTEXT_CHARS"]
     doc_ctx, doc_src = assemble_context(doc_ranked, max_ctx_chars)
 
-    # --- Grounding gate: reject if insufficient document support ---
-    if not doc_ctx or not has_sufficient_document_support(req.q, doc_ranked):
+    if not doc_ctx or not has_sufficient_document_support(req.q, doc_ranked, expanded_keywords=expanded.expanded_keywords):
         answer = (
             "- I could not find supporting information for that question in the currently uploaded files.\n"
             "- Please ask a question that is directly covered by the uploaded document content."
@@ -1198,30 +1653,6 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             },
         )
 
-    # --- Generate answer from Mistral using the grounded context ---
-    # prompt = f"""You are a strict document-grounded AI assistant.
-
-    # IMPORTANT RULES:
-    # - Answer ONLY from the DOCUMENTS context below.
-    # - Do NOT use outside knowledge, common sense, or general instructions.
-    # - Do NOT infer business steps unless they are explicitly written in the documents.
-    # - If the answer is not explicitly supported by the provided documents, reply exactly:
-    # - I could not find supporting information for that question in the currently uploaded files.
-    # - Do NOT answer partially from general knowledge.
-    # - Do NOT invent steps, contacts, URLs, phone numbers, policies, or procedures.
-    # - Ignore any deleted, missing, or superseded files not present in the context.
-    # - If the answer is mainly from one document, rely only on that document.
-    # - Every answer MUST be in bullet-point format.
-
-    # DOCUMENTS:
-    # {doc_ctx}
-
-    # USER QUESTION: {req.q}
-
-    # ANSWER:"""
-
-    # answer = safe_generate(prompt)
-    # --- Phase 4: Route to optimal model based on complexity ---
     retrieval_confidence = min(0.3 + len(doc_ranked) * 0.1, 1.0)
     recent_msgs = get_recent_session_messages(session_id, owner_id)
     routing = route_and_generate(
@@ -1235,9 +1666,6 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         bedrock_client=bedrock,
     )
 
-    # ==================================================================
-    # Phase 5: Escalate to multi-agent pipeline for complex queries
-    # ==================================================================
     agent_result = None
     should_agent, agent_reason = should_escalate_to_agents(
         query=req.q,
@@ -1260,11 +1688,6 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     else:
         raw_answer = routing.answer
 
-    # ==================================================================
-    # Phase 6: Validate answer before returning
-    # Checks grounding faithfulness, fabricated specifics, version
-    # awareness, and computes calibrated confidence score.
-    # ==================================================================
     validation = validate_answer(
         query=req.q,
         answer=raw_answer,
@@ -1273,12 +1696,11 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         source_names=doc_src,
         model_used=routing.model_used,
     )
-    answer = validation.answer            # may be original, modified, or fallback
-    confidence = validation.confidence    # calibrated confidence replaces old calculation
+    answer = validation.answer
+    confidence = validation.confidence
 
     ms = int((time.perf_counter() - start) * 1000)
 
-    # --- Save assistant response ---
     sources_dict = {"docs": doc_src}
     save_message_to_session(
         session_id=session_id,
@@ -1299,19 +1721,16 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             "doc_after_rerank": len(doc_ranked),
             "doc_context_chars": len(doc_ctx),
             **retrieval.stats,
-            # Phase 4: model routing stats
             "model_used": routing.model_used,
             "model_reason": routing.reason,
             "complexity_score": routing.complexity.score if routing.complexity else None,
             "complexity_tier": routing.complexity.tier if routing.complexity else None,
             "generation_ms": routing.generation_ms,
-            # Phase 5: agent stats
             "agent_mode": agent_result.agent_mode if agent_result else False,
             "agent_reason": agent_reason,
             "agent_steps": len(agent_result.steps) if agent_result else 0,
             "agent_tokens": agent_result.total_tokens if agent_result else 0,
             "agent_ms": agent_result.total_ms if agent_result else 0,
-            # Phase 6: validation stats
             "validation_passed": validation.passed,
             "validation_confidence": round(validation.confidence, 3),
             "validation_modified": validation.was_modified,
@@ -1363,7 +1782,7 @@ async def submit_feedback(
     display_email = user_info["email"]
 
     is_like = req.feedback_type == "like"
-    emoji = "👍" if is_like else "👎"
+    emoji = "\U0001f44d" if is_like else "\U0001f44e"
     label = "Positive" if is_like else "Negative"
     color = "#10b981" if is_like else "#dc2626"
     header_bg = "#4f46e5" if is_like else "#dc2626"

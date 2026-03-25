@@ -11,6 +11,7 @@ const initialState = {
   isUploading: false,
   sidebarOpen: true,
   sidebarTab: "chat",
+  userRole: "admin",  // "admin" | "user" — controls upload visibility
 };
 
 function reducer(state, action) {
@@ -122,8 +123,12 @@ function reducer(state, action) {
     case "SET_SIDEBAR_TAB":
       return { ...state, sidebarTab: action.payload };
 
+    // ── Admin / User role toggle ─────────────────────────
+    case "SET_USER_ROLE":
+      return { ...state, userRole: action.payload };
+
     case "RESET_ALL":
-      return { ...initialState, sidebarOpen: state.sidebarOpen };
+      return { ...initialState, sidebarOpen: state.sidebarOpen, userRole: state.userRole };
 
     default:
       return state;

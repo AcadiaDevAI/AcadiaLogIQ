@@ -1,8 +1,8 @@
 """
-Configuration — Phases 2-6 Complete + Accuracy Fixes.
+Configuration — Phases 2-6 Complete + Accuracy Fixes + Performance Tuning.
 Includes: contextual ingestion, hybrid retrieval, model routing,
 multi-agent troubleshooting, answer validation guardrails,
-and accuracy fixes (scenario-aware chunking, Haiku default).
+accuracy fixes, and performance optimizations.
 """
 
 import sys
@@ -23,13 +23,6 @@ BASE_DIR = Path(__file__).resolve().parent
 class Settings(BaseSettings):
     """
     Global application configuration.
-
-    Phase 2: contextual ingestion, duplicate/version detection, Haiku metadata
-    Phase 3: hybrid retrieval orchestration, query classification, fusion, reranking
-    Phase 4: complexity classification, cost-optimized model routing, context builder
-    Phase 5: selective multi-agent troubleshooting for complex queries only
-    Phase 6: answer validation guardrails, confidence scoring, version-aware checks
-    Accuracy fix: scenario-aware chunking, Haiku as default generation model
     """
 
     # ----------------------------------------------------------------
@@ -79,11 +72,10 @@ class Settings(BaseSettings):
     CHUNK_MAX_CHARS: int = 6000
     CHUNK_MIN_CHARS: int = 200
     CHUNK_OVERLAP_CHARS: int = 0
-    CHUNK_BATCH_SIZE: int = 6
+    CHUNK_BATCH_SIZE: int = 10          # ← was 6, now 10 chunks per Haiku call (fewer API calls)
 
-    # LLM-based section discovery fallback (for unstructured documents)
-    ENABLE_LLM_CHUNK_FALLBACK: bool = True    # False = skip LLM, use char-based chunking
-    LLM_CHUNK_FALLBACK_PREVIEW_CHARS: int = 8000  # how much text to send to Haiku
+    LLM_CHUNK_FALLBACK_PREVIEW_CHARS: int = 8000
+    ENABLE_LLM_CHUNK_FALLBACK: bool = True
 
     MAX_METADATA_INPUT_CHARS: int = 1800
     MAX_CONTEXT_SUMMARY_CHARS: int = 120
@@ -94,11 +86,11 @@ class Settings(BaseSettings):
     HAIKU_MAX_TOKENS: int = 4096
 
     # ----------------------------------------------------------------
-    # Concurrency (Phase 2)
+    # Concurrency — PERFORMANCE TUNED
     # ----------------------------------------------------------------
 
-    METADATA_CONCURRENCY: int = 4
-    EMBED_CONCURRENCY: int = 8
+    METADATA_CONCURRENCY: int = 6       # ← was 4, now 6 parallel Haiku calls
+    EMBED_CONCURRENCY: int = 12         # ← was 8, now 12 parallel embed calls
 
     # ----------------------------------------------------------------
     # Phase-3: Hybrid Retrieval Orchestration
@@ -117,8 +109,8 @@ class Settings(BaseSettings):
     RRF_K: int = 60
 
     RERANKER_BACKEND: str = "llm"
-    RERANK_TOP_K: int = 6
-    RERANK_CANDIDATES: int = 15
+    RERANK_TOP_K: int = 10
+    RERANK_CANDIDATES: int = 20
     RERANK_SCORE_WEIGHT: float = 0.70
     RERANK_FUSION_WEIGHT: float = 0.30
 
@@ -133,7 +125,7 @@ class Settings(BaseSettings):
     MIN_KEYWORD_OVERLAP: int = 1
 
     # ----------------------------------------------------------------
-    # Phase-4: Model Routing (accuracy fix: Haiku default, not Mistral)
+    # Phase-4: Model Routing
     # ----------------------------------------------------------------
 
     ENABLE_MODEL_ROUTING: bool = True
@@ -184,21 +176,17 @@ class Settings(BaseSettings):
     # Phase-6: Validation Guardrails & Confidence Scoring
     # ----------------------------------------------------------------
 
-    # --- Master switch ---
     ENABLE_ANSWER_VALIDATION: bool = True
 
-    # --- Confidence scoring weights ---
     CONF_WEIGHT_RETRIEVAL: float = 0.30
     CONF_WEIGHT_COVERAGE: float = 0.25
     CONF_WEIGHT_GROUNDING: float = 0.25
     CONF_WEIGHT_CONSISTENCY: float = 0.20
 
-    # --- Validation thresholds ---
     VALIDATION_MIN_CONFIDENCE: float = 0.35
     VALIDATION_MIN_GROUNDING: float = 0.25
     VALIDATION_MIN_COVERAGE: float = 0.20
 
-    # --- Hallucination detection ---
     VALIDATION_HALLUCINATION_PHRASES: List[str] = [
         "as an AI",
         "I don't have access",
@@ -210,15 +198,12 @@ class Settings(BaseSettings):
         "as of my last update",
     ]
 
-    # --- Version awareness ---
     VALIDATION_WARN_SUPERSEDED: bool = True
     VALIDATION_SUPERSEDED_PENALTY: float = 0.20
 
-    # --- Retry policy ---
     VALIDATION_MAX_RETRIES: int = 1
     VALIDATION_RETRY_EXPAND_K: int = 3
 
-    # --- Evaluation hooks ---
     ENABLE_EVAL_LOGGING: bool = True
     EVAL_LOG_FILE: Optional[str] = None
 
@@ -285,4 +270,4 @@ AWS_REGION = settings.AWS_REGION
 BEDROCK_EMBED_MODEL = settings.BEDROCK_EMBED_MODEL
 BEDROCK_LLM_MODEL = settings.BEDROCK_LLM_MODEL
 
-settings.UPLOAD_DIR.mkdir(exist_ok=True, parents=True) 
+settings.UPLOAD_DIR.mkdir(exist_ok=True, parents=True)

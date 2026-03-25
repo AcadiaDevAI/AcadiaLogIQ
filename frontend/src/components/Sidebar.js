@@ -11,6 +11,8 @@ import {
   HistoryOutlined,
   ClearOutlined,
   BulbOutlined,
+  SettingOutlined,
+  UserOutlined,
 } from "@ant-design/icons";
 import { useChat } from "../hooks/ChatContext";
 import { useTheme } from "../hooks/ThemeContext";
@@ -29,6 +31,8 @@ export default function Sidebar() {
   const { state, dispatch } = useChat();
   const { isDark, toggleTheme } = useTheme();
   const [loading, setLoading] = useState(false);
+
+  const isAdmin = state.userRole === "admin";
 
   useEffect(() => {
     fetchSessions();
@@ -93,7 +97,13 @@ export default function Sidebar() {
     }
   };
 
+  const handleRoleToggle = (checked) => {
+    dispatch({ type: "SET_USER_ROLE", payload: checked ? "admin" : "user" });
+  };
+
+  // ── Build tabs based on role ──
   const tabItems = [
+    // History tab — always visible
     {
       key: "chat",
       label: <span className="flex items-center gap-1.5 text-xs"><HistoryOutlined /> History</span>,
@@ -133,11 +143,19 @@ export default function Sidebar() {
         </div>
       ),
     },
-    {
-      key: "upload",
-      label: <span className="flex items-center gap-1.5 text-xs"><CloudUploadOutlined /> Upload</span>,
-      children: <UploadPanel onUploadComplete={fetchFiles} />,
-    },
+
+    // Upload tab — Admin only
+    ...(isAdmin
+      ? [
+          {
+            key: "upload",
+            label: <span className="flex items-center gap-1.5 text-xs"><CloudUploadOutlined /> Upload</span>,
+            children: <UploadPanel onUploadComplete={fetchFiles} />,
+          },
+        ]
+      : []),
+
+    // Files tab — always visible, but delete button is Admin only
     {
       key: "files",
       label: (
@@ -165,25 +183,28 @@ export default function Sidebar() {
                     </p>
                   </div>
                 </div>
-                <Popconfirm
-                  title={`Delete "${f.name}"?`}
-                  description="This will remove the file and all its indexed data."
-                  onConfirm={() => handleDeleteFile(f.id, f.name)}
-                  okText="Delete"
-                  cancelText="Cancel"
-                  okButtonProps={{ danger: true }}
-                >
-                  <Tooltip title="Delete file">
-                    <Button
-                      type="text"
-                      size="small"
-                      icon={<DeleteOutlined />}
-                      className="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
-                      style={{ color: "var(--text-muted)" }}
-                      danger
-                    />
-                  </Tooltip>
-                </Popconfirm>
+                {/* Delete button — Admin only */}
+                {isAdmin && (
+                  <Popconfirm
+                    title={`Delete "${f.name}"?`}
+                    description="This will remove the file and all its indexed data."
+                    onConfirm={() => handleDeleteFile(f.id, f.name)}
+                    okText="Delete"
+                    cancelText="Cancel"
+                    okButtonProps={{ danger: true }}
+                  >
+                    <Tooltip title="Delete file">
+                      <Button
+                        type="text"
+                        size="small"
+                        icon={<DeleteOutlined />}
+                        className="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                        style={{ color: "var(--text-muted)" }}
+                        danger
+                      />
+                    </Tooltip>
+                  </Popconfirm>
+                )}
               </div>
             ))
           )}
@@ -192,7 +213,7 @@ export default function Sidebar() {
     },
   ];
 
-  // Collapsed sidebar
+  // ── Collapsed sidebar ──
   if (!state.sidebarOpen) {
     return (
       <div className="flex flex-col items-center py-4 px-1 t-bg-secondary border-r w-14 h-screen" style={{ borderColor: "var(--border-color)" }}>
@@ -211,47 +232,44 @@ export default function Sidebar() {
   return (
     <div className="flex flex-col t-bg-secondary border-r w-[280px] h-screen lg:w-[300px]" style={{ borderColor: "var(--border-color)" }}>
       {/* Header */}
-    <div
-  className="flex items-center px-4 py-3 border-b"
-  style={{ borderColor: "var(--border-color)" }}
->
-  <div className="flex items-center">
-    <div className="h-12 w-[160px] flex items-center overflow-hidden">
-      <img
-        src="/logo.png"
-        alt="Acadia Logo"
-        className="h-full w-auto object-contain"
-      />
-    </div>
-  </div>
+      <div
+        className="flex items-center px-4 py-3 border-b"
+        style={{ borderColor: "var(--border-color)" }}
+      >
+        <div className="flex items-center">
+          <div className="h-12 w-[160px] flex items-center overflow-hidden">
+            <img
+              src="/logo.png"
+              alt="Acadia Logo"
+              className="h-full w-auto object-contain"
+            />
+          </div>
+        </div>
 
-  <Button
-    type="text"
-    icon={<MenuFoldOutlined style={{ color: "var(--text-muted)" }} />}
-    onClick={() => dispatch({ type: "TOGGLE_SIDEBAR" })}
-    size="small"
-    className="ml-auto"
-  />
-</div>
+        <Button
+          type="text"
+          icon={<MenuFoldOutlined style={{ color: "var(--text-muted)" }} />}
+          onClick={() => dispatch({ type: "TOGGLE_SIDEBAR" })}
+          size="small"
+          className="ml-auto"
+        />
+      </div>
 
       {/* New Chat + Theme Toggle */}
       <div className="px-3 pt-3 flex items-center gap-2">
-        {/* <Button type="primary" icon={<PlusOutlined />} onClick={() => dispatch({ type: "NEW_CHAT" })} block className="rounded-lg h-9 font-medium text-sm flex-1">
-          New Chat
-        </Button> */}
         <Button
-  icon={<PlusOutlined />}
-  onClick={() => dispatch({ type: "NEW_CHAT" })}
-  block
-  className="rounded-lg h-9 font-medium text-sm flex-1"
-  style={{
-    backgroundColor: "#0A3F63",
-    borderColor: "#0A3F63",
-    color: "#fff"
-  }}
->
-  New Chat
-</Button>
+          icon={<PlusOutlined />}
+          onClick={() => dispatch({ type: "NEW_CHAT" })}
+          block
+          className="rounded-lg h-9 font-medium text-sm flex-1"
+          style={{
+            backgroundColor: "#0A3F63",
+            borderColor: "#0A3F63",
+            color: "#fff"
+          }}
+        >
+          New Chat
+        </Button>
         <Tooltip title={isDark ? "Switch to Light" : "Switch to Dark"}>
           <Button
             type="text"
@@ -265,6 +283,31 @@ export default function Sidebar() {
       {/* Tabs */}
       <div className="flex-1 overflow-hidden px-3 pt-2">
         <Tabs defaultActiveKey="chat" items={tabItems} size="small" className="sidebar-tabs" />
+      </div>
+
+      {/* ── Role Toggle (Admin / User) ── */}
+      <div
+        className="flex items-center justify-between px-4 py-2.5 border-t"
+        style={{ borderColor: "var(--border-color)" }}
+      >
+        <div className="flex items-center gap-2">
+          {isAdmin ? (
+            <SettingOutlined style={{ color: "#0A3F63", fontSize: 14 }} />
+          ) : (
+            <UserOutlined style={{ color: "var(--text-muted)", fontSize: 14 }} />
+          )}
+          <span className="text-xs font-medium" style={{ color: isAdmin ? "#0A3F63" : "var(--text-muted)" }}>
+            {isAdmin ? "Admin" : "User"}
+          </span>
+        </div>
+        <Switch
+          checked={isAdmin}
+          onChange={handleRoleToggle}
+          size="small"
+          style={{
+            backgroundColor: isAdmin ? "#0A3F63" : undefined,
+          }}
+        />
       </div>
 
       {/* User Profile (Clerk) */}

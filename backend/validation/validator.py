@@ -32,8 +32,14 @@ _FALLBACK_INSUFFICIENT = (
 )
 
 _FALLBACK_GROUNDING_FAIL = (
-    "- The generated answer could not be adequately verified against the source documents.\n"
+    "- The generated answer could not be fully verified against the source documents.\n"
     "- Please try a more specific question that is directly covered by the uploaded content."
+)
+
+# Soft caveat appended when grounding is low but no fabrications found
+_GROUNDING_CAVEAT = (
+    "\n\n⚠️ *Note: This answer may not be fully verifiable against the source documents. "
+    "Please cross-check with the original document for accuracy.*"
 )
 
 
@@ -160,6 +166,38 @@ def validate_answer(
     result = ValidationResult(answer=answer)
 
     # ==================================================================
+    # Step 0: False-refusal detection
+    # ==================================================================
+    # If the model says "could not find" but retrieval returned strong
+    # chunks, the model is incorrectly refusing. Mark it so we can
+    # override later.
+    _NOT_FOUND_PHRASES = [
+        "could not find supporting information",
+        "could not find sufficiently supported",
+        "could not be adequately verified",
+        "could not be fully verified",
+        "do not contain specific",
+        "does not contain specific",
+        "do not contain explicit",
+        "does not contain explicit",
+        "not contain the answer",
+    ]
+    answer_lower = answer.lower()
+    is_model_refusal = any(phrase in answer_lower for phrase in _NOT_FOUND_PHRASES)
+    retrieval_is_strong = (
+        len(ranked_chunks) >= 3
+        and float(ranked_chunks[0][3] or 0) >= 0.4
+    )
+    is_false_refusal = is_model_refusal and retrieval_is_strong
+
+    if is_false_refusal:
+        logger.warning(
+            "FALSE REFUSAL detected: model said 'not found' but retrieval "
+            "top_score=%.3f with %d chunks. Lowering confidence to trigger re-evaluation.",
+            float(ranked_chunks[0][3] or 0), len(ranked_chunks),
+        )
+
+    # ==================================================================
     # Step 1: Confidence scoring
     # ==================================================================
     conf = score_confidence(
@@ -221,17 +259,63 @@ def validate_answer(
         )
         logger.warning("Validation FAILED (low confidence): %.3f", conf.score)
 
-    # Case D: Grounding failed (low grounding score but no fabrications) → fallback
+    # Case D: Grounding failed (low grounding score but no fabrications)
+    # KEY FIX: If confidence passed, the answer is likely correct but the
+    # grounding checker couldn't fully verify it (common for short queries
+    # like "QoS Trust Boundaries?" where the answer spans a small section).
+    # Instead of replacing the entire answer, append a soft caveat.
+    # Only use full fallback if grounding is extremely low.
     elif not grounding.passed:
+        if conf.passed and grounding.grounding_score >= 0.15:
+            # Confidence is OK, grounding is just below threshold — keep answer + caveat
+            result.passed = True
+            result.was_modified = True
+            result.answer = answer.rstrip() + _GROUNDING_CAVEAT
+            result.confidence = max(0.0, conf.score * 0.8)
+            result.issues.append(
+                f"Grounding score {grounding.grounding_score:.3f} below threshold "
+                f"{settings.VALIDATION_MIN_GROUNDING} — appended caveat"
+            )
+            logger.info(
+                "Validation SOFT PASS (low grounding but confidence OK): grounding=%.3f, confidence=%.3f",
+                grounding.grounding_score, conf.score,
+            )
+        else:
+            # Grounding is very low — full fallback
+            result.passed = False
+            result.was_modified = True
+            result.answer = _FALLBACK_GROUNDING_FAIL
+            result.confidence = max(0.0, conf.score * 0.7)
+            result.issues.append(
+                f"Grounding score {grounding.grounding_score:.3f} below threshold "
+                f"{settings.VALIDATION_MIN_GROUNDING}"
+            )
+            logger.warning("Validation FAILED (low grounding): %.3f", grounding.grounding_score)
+
+    # ==================================================================
+    # Step 3b: False-refusal safety net
+    # ==================================================================
+    # If the model said "not found" but retrieval was strong, the model
+    # incorrectly refused. Mark confidence as LOW so the caller knows
+    # this answer is unreliable. The prompt fixes (system prompt +
+    # grounding rules) should prevent this, but this catches edge cases.
+    if is_false_refusal and result.passed:
         result.passed = False
         result.was_modified = True
-        result.answer = _FALLBACK_GROUNDING_FAIL
-        result.confidence = max(0.0, conf.score * 0.7)
-        result.issues.append(
-            f"Grounding score {grounding.grounding_score:.3f} below threshold "
-            f"{settings.VALIDATION_MIN_GROUNDING}"
+        result.confidence = 0.1  # Signal to caller: answer is bad
+        result.answer = (
+            "I found relevant documents but was unable to extract the answer. "
+            "This is a known issue being addressed. Please try asking again."
         )
-        logger.warning("Validation FAILED (low grounding): %.3f", grounding.grounding_score)
+        result.issues.append(
+            f"False refusal: model said 'not found' but retrieval top_score="
+            f"{float(ranked_chunks[0][3] or 0):.3f} with {len(ranked_chunks)} chunks"
+        )
+        logger.error(
+            "FALSE REFUSAL: model refused despite strong retrieval "
+            "(top_score=%.3f, %d chunks). Prompt tuning needed.",
+            float(ranked_chunks[0][3] or 0), len(ranked_chunks),
+        )
 
     result.validation_ms = int((time.perf_counter() - t_start) * 1000)
 

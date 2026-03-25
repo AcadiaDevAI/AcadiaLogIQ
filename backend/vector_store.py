@@ -24,6 +24,10 @@ from sqlalchemy import bindparam, text
 from backend.db.connection import SessionLocal
 from difflib import SequenceMatcher
 from backend.config import settings
+from sqlalchemy import text
+from backend.db.connection import SessionLocal
+from sqlalchemy import text
+from backend.db.connection import SessionLocal
 
 logger = logging.getLogger("acadia-log-iq")
 
@@ -728,55 +732,118 @@ def insert_document_and_chunks(
                 },
             )
 
-            inserted = 0
-            for row in chunk_rows:
-                db.execute(
-                    text(
-                        """
-                        INSERT INTO chunks(
-                            id, document_id, document_version_id, chunk_index, content, created_at,
-                            chunk_type, section_heading, page_number, token_estimate,
-                            summary, contextualized_content, labels_json, metadata_json, source_order
-                        )
-                        VALUES (
-                            :chunk_id, :document_id, :version_id, :chunk_index, :content, CURRENT_TIMESTAMP,
-                            :chunk_type, :section_heading, :page_number, :token_estimate,
-                            :summary, :contextualized_content, CAST(:labels_json AS JSONB),
-                            CAST(:metadata_json AS JSONB), :source_order
-                        )
-                        """
-                    ),
-                    {
-                        "chunk_id": row["id"],
-                        "document_id": document_id,
-                        "version_id": version_id,
-                        "chunk_index": row["chunk_index"],
-                        "content": row["content"],
-                        "chunk_type": row.get("chunk_type"),
-                        "section_heading": row.get("section_heading"),
-                        "page_number": row.get("page_number"),
-                        "token_estimate": row.get("token_estimate"),
-                        "summary": row.get("summary"),
-                        "contextualized_content": row.get("contextualized_content"),
-                        "labels_json": json.dumps(row.get("labels_json", {})),
-                        "metadata_json": json.dumps(row.get("metadata_json", {})),
-                        "source_order": row.get("source_order"),
-                    },
-                )
+            # inserted = 0
+            # for row in chunk_rows:
+            #     db.execute(
+            #         text(
+            #             """
+            #             INSERT INTO chunks(
+            #                 id, document_id, document_version_id, chunk_index, content, created_at,
+            #                 chunk_type, section_heading, page_number, token_estimate,
+            #                 summary, contextualized_content, labels_json, metadata_json, source_order
+            #             )
+            #             VALUES (
+            #                 :chunk_id, :document_id, :version_id, :chunk_index, :content, CURRENT_TIMESTAMP,
+            #                 :chunk_type, :section_heading, :page_number, :token_estimate,
+            #                 :summary, :contextualized_content, CAST(:labels_json AS JSONB),
+            #                 CAST(:metadata_json AS JSONB), :source_order
+            #             )
+            #             """
+            #         ),
+            #         {
+            #             "chunk_id": row["id"],
+            #             "document_id": document_id,
+            #             "version_id": version_id,
+            #             "chunk_index": row["chunk_index"],
+            #             "content": row["content"],
+            #             "chunk_type": row.get("chunk_type"),
+            #             "section_heading": row.get("section_heading"),
+            #             "page_number": row.get("page_number"),
+            #             "token_estimate": row.get("token_estimate"),
+            #             "summary": row.get("summary"),
+            #             "contextualized_content": row.get("contextualized_content"),
+            #             "labels_json": json.dumps(row.get("labels_json", {})),
+            #             "metadata_json": json.dumps(row.get("metadata_json", {})),
+            #             "source_order": row.get("source_order"),
+            #         },
+            #     )
 
-                db.execute(
-                    text(
-                        """
-                        INSERT INTO embeddings(chunk_id, embedding, created_at)
-                        VALUES (:chunk_id, CAST(:embedding AS vector), CURRENT_TIMESTAMP)
-                        """
-                    ),
-                    {
-                        "chunk_id": row["id"],
-                        "embedding": _vector_literal(row["embedding"]),
-                    },
-                )
-                inserted += 1
+            #     db.execute(
+            #         text(
+            #             """
+            #             INSERT INTO embeddings(chunk_id, embedding, created_at)
+            #             VALUES (:chunk_id, CAST(:embedding AS vector), CURRENT_TIMESTAMP)
+            #             """
+            #         ),
+            #         {
+            #             "chunk_id": row["id"],
+            #             "embedding": _vector_literal(row["embedding"]),
+            #         },
+            #     )
+            #     inserted += 1
+            
+            # ── Batched chunk + embedding insert ──────────────────
+            BATCH_SIZE = 50
+            inserted = 0
+
+            for batch_start in range(0, len(chunk_rows), BATCH_SIZE):
+                batch = chunk_rows[batch_start : batch_start + BATCH_SIZE]
+
+                # Insert chunks batch
+                for row in batch:
+                    db.execute(
+                        text(
+                            """
+                            INSERT INTO chunks(
+                                id, document_id, document_version_id, chunk_index, content, created_at,
+                                chunk_type, section_heading, page_number, token_estimate,
+                                summary, contextualized_content, labels_json, metadata_json, source_order
+                            )
+                            VALUES (
+                                :chunk_id, :document_id, :version_id, :chunk_index, :content, CURRENT_TIMESTAMP,
+                                :chunk_type, :section_heading, :page_number, :token_estimate,
+                                :summary, :contextualized_content, CAST(:labels_json AS JSONB),
+                                CAST(:metadata_json AS JSONB), :source_order
+                            )
+                            """
+                        ),
+                        {
+                            "chunk_id": row["id"],
+                            "document_id": document_id,
+                            "version_id": version_id,
+                            "chunk_index": row["chunk_index"],
+                            "content": row["content"],
+                            "chunk_type": row.get("chunk_type"),
+                            "section_heading": row.get("section_heading"),
+                            "page_number": row.get("page_number"),
+                            "token_estimate": row.get("token_estimate"),
+                            "summary": row.get("summary"),
+                            "contextualized_content": row.get("contextualized_content"),
+                            "labels_json": json.dumps(row.get("labels_json", {})),
+                            "metadata_json": json.dumps(row.get("metadata_json", {})),
+                            "source_order": row.get("source_order"),
+                        },
+                    )
+
+                # Insert embeddings batch
+                for row in batch:
+                    db.execute(
+                        text(
+                            """
+                            INSERT INTO embeddings(chunk_id, embedding, created_at)
+                            VALUES (:chunk_id, CAST(:embedding AS vector), CURRENT_TIMESTAMP)
+                            """
+                        ),
+                        {
+                            "chunk_id": row["id"],
+                            "embedding": _vector_literal(row["embedding"]),
+                        },
+                    )
+
+                inserted += len(batch)
+
+                # Flush batch to DB without committing (stays in same transaction)
+                db.flush()
 
             if version_decision.get("decision") == "new_version" and matched_document_id:
                 db.execute(
@@ -1386,3 +1453,129 @@ def update_message_feedback(
         )
         db.commit()
     return True
+
+def upsert_user(clerk_id: str, email: str = None, full_name: str = None, avatar_url: str = None) -> dict:
+    """
+    Insert user on first login, update last_login_at on return visits.
+    
+    Called by POST /auth/register-or-login after Clerk authentication.
+    Returns a dict with all user columns plus an 'is_new' boolean.
+    """
+    with SessionLocal() as db:
+        # Check if user already exists
+        existing = db.execute(
+            text("SELECT * FROM users WHERE clerk_id = :cid"),
+            {"cid": clerk_id},
+        ).mappings().first()
+
+        if existing:
+            # Returning user — update last_login_at and refresh profile fields
+            db.execute(
+                text(
+                    "UPDATE users SET "
+                    "  last_login_at = NOW(), "
+                    "  email = COALESCE(:email, email), "
+                    "  full_name = COALESCE(:name, full_name), "
+                    "  avatar_url = COALESCE(:avatar, avatar_url), "
+                    "  updated_at = NOW() "
+                    "WHERE clerk_id = :cid"
+                ),
+                {"cid": clerk_id, "email": email, "name": full_name, "avatar": avatar_url},
+            )
+            db.commit()
+
+            row = db.execute(
+                text("SELECT * FROM users WHERE clerk_id = :cid"),
+                {"cid": clerk_id},
+            ).mappings().first()
+            return {**dict(row), "is_new": False}
+
+        # New user — insert
+        db.execute(
+            text(
+                "INSERT INTO users (clerk_id, email, full_name, avatar_url, last_login_at) "
+                "VALUES (:cid, :email, :name, :avatar, NOW())"
+            ),
+            {"cid": clerk_id, "email": email, "name": full_name, "avatar": avatar_url},
+        )
+        db.commit()
+
+        row = db.execute(
+            text("SELECT * FROM users WHERE clerk_id = :cid"),
+            {"cid": clerk_id},
+        ).mappings().first()
+        return {**dict(row), "is_new": True}
+
+
+def get_user_by_clerk_id(clerk_id: str) -> dict | None:
+    """
+    Look up a user by their Clerk ID.
+    Returns dict of user columns or None if not found.
+    """
+    with SessionLocal() as db:
+        row = db.execute(
+            text("SELECT * FROM users WHERE clerk_id = :cid AND is_active = TRUE"),
+            {"cid": clerk_id},
+        ).mappings().first()
+        return dict(row) if row else None
+    
+def list_active_files_all() -> list:
+    """
+    List ALL active files across ALL users.
+    Uses the same LATERAL JOIN pattern as list_active_files() which already works.
+    """
+    with SessionLocal() as db:
+        rows = db.execute(
+            text(
+                """
+                SELECT
+                    d.id::text AS id,
+                    d.name,
+                    d.file_type,
+                    d.status,
+                    d.owner_id,
+                    d.created_at,
+                    dv.id::text AS version_id,
+                    COALESCE(dv.file_size_mb, '0') AS file_size_mb,
+                    ij.job_id,
+                    COALESCE(ij.status, 'indexed') AS job_status
+                FROM documents d
+                LEFT JOIN document_versions dv ON dv.id = d.current_version_id
+                LEFT JOIN LATERAL (
+                    SELECT job_id, status
+                    FROM ingestion_jobs
+                    WHERE file_id = d.id
+                    ORDER BY created_at DESC
+                    LIMIT 1
+                ) ij ON TRUE
+                WHERE d.status = 'active'
+                ORDER BY d.created_at DESC
+                """
+            )
+        ).mappings().all()
+
+    results = []
+    for row in rows:
+        size_value = 0.0
+        try:
+            size_value = float(row["file_size_mb"] or 0)
+        except Exception:
+            size_value = 0.0
+
+        results.append(
+            {
+                "id": row["id"],
+                "name": row["name"],
+                "file_type": row["file_type"],
+                "size_mb": round(size_value, 2),
+                "status": "indexed"
+                if row["job_status"] in ("done", "indexed", None)
+                else row["job_status"],
+                "job_id": row["job_id"],
+                "uploaded_at": row["created_at"].isoformat()
+                if row["created_at"]
+                else None,
+                "owner_id": row["owner_id"],
+            }
+        )
+    return results

@@ -1,7 +1,6 @@
 import React, { useRef, useEffect, useCallback } from "react";
 import { message } from "antd";
 import { useChat } from "../hooks/ChatContext";
-import useAuthInterceptor from "../hooks/useAuthInterceptor";
 import { askQuestion, listSessions } from "../services/api";
 import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
@@ -41,9 +40,8 @@ export default function ChatArea() {
   const { state, dispatch } = useChat();
   const scrollRef = useRef(null);
 
-  useAuthInterceptor();
+  // Auth interceptor is now in AuthGate.js — not needed here anymore.
 
-  // Auto-scroll on new messages
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTo({
@@ -73,7 +71,6 @@ export default function ChatArea() {
           },
         });
 
-        // Refresh chat history sidebar
         try {
           const sessRes = await listSessions();
           dispatch({ type: "SET_SESSIONS", payload: sessRes.data.sessions || [] });
@@ -95,12 +92,10 @@ export default function ChatArea() {
 
   return (
     <div className="flex flex-col h-screen flex-1 t-bg-primary relative">
-      {/* Watermark */}
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ zIndex: 0, opacity: 0.05 }}>
         <img src="/logo.png" alt="Acadia Watermark" className="w-[350px] md:w-[420px] lg:w-[500px] object-contain select-none" />
       </div>
 
-      {/* Messages */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto relative" style={{ zIndex: 10 }}>
         {state.messages.length === 0 ? (
           <EmptyState />

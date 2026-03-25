@@ -19,16 +19,15 @@ logger = logging.getLogger("acadia-log-iq")
 # Grounding rules shared across all models
 # ---------------------------------------------------------------------------
 _GROUNDING_RULES = """IMPORTANT RULES:
-- Answer ONLY from the DOCUMENTS context below.
-- Do NOT use outside knowledge, common sense, or general instructions.
+- The DOCUMENTS below have been pre-selected as relevant to the user's question. Extract and present the answer from them.
+- Look for EXACT matches first: the user's query terms (including underscore_separated_names, alert signatures, and technical abbreviations) often appear verbatim in the documents as headings, scenario names, or alert signature fields.
+- Answer ONLY from the DOCUMENTS context below. Do NOT use outside knowledge.
 - Do NOT infer business steps unless they are explicitly written in the documents.
-- If the answer is not explicitly supported by the provided documents, reply exactly:
-  "I could not find supporting information for that question in the currently uploaded files."
-- Do NOT answer partially from general knowledge.
 - Do NOT invent steps, contacts, URLs, phone numbers, policies, or procedures.
-- Ignore any deleted, missing, or superseded files not present in the context.
+- If the documents contain relevant information, provide ALL of it — probable causes, corrective actions, severity, incident summary — everything the document says about the topic.
 - If the answer is mainly from one document, rely only on that document.
-- Every answer MUST be in bullet-point format."""
+- Every answer MUST be in bullet-point format.
+- ONLY if the documents contain absolutely NO relevant information at all, reply: "I could not find supporting information for that question in the currently uploaded files." This should be rare since the documents were pre-selected for relevance."""
 
 
 # ---------------------------------------------------------------------------

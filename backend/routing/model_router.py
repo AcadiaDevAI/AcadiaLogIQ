@@ -85,10 +85,14 @@ def _invoke_claude(
     body = {
         "anthropic_version": "bedrock-2023-05-31",
         "system": (
-            "You are a strict document-grounded technical assistant. "
-            "Answer ONLY from the provided documents. "
-            "If the documents do not contain the answer, say so explicitly. "
-            "Use bullet-point format. Be precise and specific."
+            "You are a document-grounded technical assistant. "
+            "The DOCUMENTS section in the user message contains pre-retrieved, "
+            "highly relevant content from uploaded files. "
+            "Your job is to extract and present the answer from these documents. "
+            "The documents ARE the source of truth — if information appears in them, use it. "
+            "Alert signature names (e.g., Consistent_High_Interface_Errors) are exact "
+            "identifiers from the documents — match them to their scenarios. "
+            "Use bullet-point format. Be precise and thorough."
         ),
         "max_tokens": max_tokens,
         "temperature": temperature,

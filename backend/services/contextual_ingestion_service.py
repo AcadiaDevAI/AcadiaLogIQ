@@ -19,6 +19,7 @@ from backend.ingestion.prompt_templates import (
 from backend.ingestion.structured_parser import ParsedChunk, build_chunks, parse_file
 from backend.metadata.structure_config import match_operational_section
 from backend.services.bedrock_haiku import haiku_client
+from backend.retrieval.query_expansion import extract_glossary_from_text
 
 logger = logging.getLogger("acadia-log-iq")
 
@@ -524,6 +525,19 @@ def process_document(
             }
         )
 
+    # ── Extract glossary/abbreviations from document content ──
+    doc_glossary = {}
+    try:
+        full_text = "\n".join(chunk.text for chunk in chunks)
+        doc_glossary = extract_glossary_from_text(full_text)
+        if doc_glossary:
+            logger.info(
+                "Extracted %d glossary entries from %s (e.g. %s)",
+                len(doc_glossary), filename, list(doc_glossary.keys())[:5],
+            )
+    except Exception as e:
+        logger.warning("Glossary extraction during ingestion failed (non-fatal): %s", e)
+
     doc_metadata = {
         "title": doc_title,
         "document_type": doc_type,
@@ -548,6 +562,7 @@ def process_document(
             "document_date": document_date,
             "effective_date": effective_date,
             "created_date": created_date,
+            "glossary": doc_glossary,  # ← stored for persistence across restarts
         },
     }
 
