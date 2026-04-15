@@ -98,6 +98,7 @@ def run_agent_pipeline(
     source_names: List[str],
     generate_fn: Callable,
     bedrock_client: Any,
+    step_retriever_fn: Optional[Callable[[str], Any]] = None,
 ) -> AgentPipelineResult:
     """
     Run the full multi-agent pipeline: Planner → Analyst → Composer.
@@ -168,6 +169,7 @@ def run_agent_pipeline(
                 budget=budget,
                 generate_fn=generate_fn,
                 bedrock_client=bedrock_client,
+                step_retriever_fn=step_retriever_fn,
             )
 
             result.steps.extend(analysis_results)

@@ -55,6 +55,22 @@ from backend.retrieval.orchestrator import retrieve as orchestrator_retrieve
 from backend.routing.model_router import route_and_generate
 from backend.vector_store import get_recent_session_messages
 from backend.agents.orchestrator import should_escalate_to_agents, run_agent_pipeline
+from backend.agents.mode_selector import resolve_mode, MODE_AUTO, MODE_HYBRID, MODE_MULTI_AGENT
+from backend.agents.step_retriever import build_step_retriever
+from backend.routing.complexity_classifier import classify_complexity
+from backend.routing.intent_detector import detect_intent, INTENT_GENERAL
+from backend.routing.trivial_detector import detect_trivial
+from backend.routing.answer_cache import ANSWER_CACHE
+from backend.routing.chunk_limiter import limit_chunks, DEFAULT_MAX_CHUNKS
+from backend.routing.input_guard import check_input, GUARD_REASON_OK
+from backend.routing.stage_enforcer import (
+    enforce_stage,
+    normalize_stage,
+    STAGE_GENERAL,
+    STAGE_TICKETS,
+    STAGE_DOCS,
+)
+from backend.routing.evidence_checker import check_evidence
 from backend.validation.validator import validate_answer
 from backend.retrieval.query_expansion import (
     expand_query,
@@ -352,6 +368,14 @@ async def auth_dependency(
 class Question(BaseModel):
     q: str = Field(min_length=1, max_length=1000)
     session_id: Optional[str] = None
+    mode: Optional[str] = Field(
+        default=MODE_AUTO,
+        description="Routing mode: 'auto' (default, 5-gate escalation), 'hybrid' (force standard RAG), or 'multi_agent' (force agent pipeline)",
+    )
+    stage: Optional[str] = Field(
+        default=STAGE_GENERAL,
+        description="Conversation stage: 'general' (default), 'tickets' (ticket-only retrieval), or 'docs' (docs flow w/ unresolved escalation)",
+    )
     model_config = ConfigDict(extra="ignore")
 
     @field_validator("q")
@@ -1509,7 +1533,88 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         owner_id=owner_id,
     )
 
+    # ── Trivial input short-circuit (greetings / thanks / ack / bye) ──
+    trivial = detect_trivial(req.q)
+    if trivial.matched:
+        save_message_to_session(
+            session_id=session_id,
+            role="assistant",
+            content=trivial.canned_response,
+            owner_id=owner_id,
+            sources={"docs": []},
+        )
+        return AnswerResponse(
+            answer=trivial.canned_response,
+            sources=[],
+            confidence=1.0,
+            processing_time_ms=int((time.perf_counter() - start) * 1000),
+            session_id=session_id,
+            context_stats={
+                "trivial_short_circuit": True,
+                "trivial_kind": trivial.kind,
+                "cache_hit": False,
+            },
+        )
+
+    # ── Input guard (safety / prompt-injection / size) ──
+    try:
+        guard_result = check_input(req.q)
+    except Exception as _guard_exc:
+        logger.warning("Input guard wrapper raised (%s) — failing open", _guard_exc)
+        guard_result = None
+
+    if guard_result is not None and guard_result.flagged:
+        save_message_to_session(
+            session_id=session_id,
+            role="assistant",
+            content=guard_result.canned_response,
+            owner_id=owner_id,
+            sources={"docs": []},
+        )
+        return AnswerResponse(
+            answer=guard_result.canned_response,
+            sources=[],
+            confidence=0.0,
+            processing_time_ms=int((time.perf_counter() - start) * 1000),
+            session_id=session_id,
+            context_stats={
+                "trivial_short_circuit": False,
+                "input_guard_flagged": True,
+                "input_guard_reason": guard_result.reason,
+                "input_guard_phrase": guard_result.matched_phrase,
+                "cache_hit": False,
+            },
+        )
+
     active_file_ids = _get_active_indexed_file_ids(user_id)
+
+    # ── Answer cache lookup (fail-safe: any error returns miss) ──
+    cache_lookup = ANSWER_CACHE.get(
+        query=req.q,
+        owner_id=owner_id,
+        active_file_ids=active_file_ids or [],
+    )
+    if cache_lookup.hit and cache_lookup.payload:
+        cached = cache_lookup.payload
+        save_message_to_session(
+            session_id=session_id,
+            role="assistant",
+            content=cached.get("answer", ""),
+            owner_id=owner_id,
+            sources={"docs": cached.get("sources", [])},
+        )
+        stats = dict(cached.get("context_stats") or {})
+        stats["cache_hit"] = True
+        stats["cache_key"] = cache_lookup.key[:12]
+        return AnswerResponse(
+            answer=cached.get("answer", ""),
+            sources=cached.get("sources", []),
+            confidence=float(cached.get("confidence", 0.0)),
+            processing_time_ms=int((time.perf_counter() - start) * 1000),
+            session_id=session_id,
+            context_stats=stats,
+        )
+
     if not active_file_ids:
         answer = "No indexed files are currently available. Please upload a document first."
         save_message_to_session(
@@ -1642,7 +1747,36 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
                     logger.info("Variant query improved results: '%s'", variant[:80])
                     break
 
-    doc_ranked = retrieval.ranked
+    doc_ranked_original = retrieval.ranked
+    # ── Chunk limiter: cap chunks before context/LLM/agents ──
+    _limit = limit_chunks(doc_ranked_original, max_chunks=DEFAULT_MAX_CHUNKS)
+    doc_ranked = _limit.limited
+    chunk_original_count = _limit.original_count
+    chunk_limited_count = _limit.limited_count
+    chunk_limit_applied = _limit.applied
+
+    # ── Stage enforcement (filter by stage + track unresolved follow-ups) ──
+    # Intent detected on the raw query; stage filter runs against limited chunks.
+    _pre_intent = detect_intent(req.q)
+    stage_norm = normalize_stage(req.stage)
+    try:
+        stage_result = enforce_stage(
+            stage=stage_norm,
+            session_id=session_id,
+            ranked_chunks=doc_ranked,
+            intent_name=_pre_intent.intent,
+        )
+    except Exception as _stage_exc:
+        logger.warning("Stage enforcer wrapper raised (%s) — passing through", _stage_exc)
+        from backend.routing.stage_enforcer import StageResult as _SR
+        stage_result = _SR(
+            stage=stage_norm,
+            filtered_chunks=doc_ranked,
+            original_chunk_count=len(doc_ranked),
+            filtered_chunk_count=len(doc_ranked),
+            notes=[f"stage_wrapper_error: {_stage_exc}"],
+        )
+    doc_ranked = stage_result.filtered_chunks
 
     max_ctx_chars = TOKEN_BUDGET["MAX_LOG_CONTEXT_CHARS"] + TOKEN_BUDGET["MAX_KB_CONTEXT_CHARS"]
     doc_ctx, doc_src = assemble_context(doc_ranked, max_ctx_chars)
@@ -1674,27 +1808,77 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
 
     retrieval_confidence = min(0.3 + len(doc_ranked) * 0.1, 1.0)
     recent_msgs = get_recent_session_messages(session_id, owner_id)
-    routing = route_and_generate(
+
+    # ── Complexity classification (always cheap; no LLM call) ──
+    complexity = classify_complexity(
         query=req.q,
-        doc_context=doc_ctx,
         ranked_chunks=doc_ranked,
-        source_names=doc_src,
         retrieval_confidence=retrieval_confidence,
-        recent_messages=recent_msgs,
-        generate_fn=safe_generate,
-        bedrock_client=bedrock,
+        source_count=len(set(doc_src)),
+        context_chars=len(doc_ctx),
     )
 
+    # Placeholder routing slot filled either by hybrid call or agent path
+    routing = None
     agent_result = None
-    should_agent, agent_reason = should_escalate_to_agents(
+    requested_mode = req.mode or MODE_AUTO
+
+    # ── Intent detection (additive; never overrides an explicit mode) ──
+    intent_result = detect_intent(req.q)
+    effective_mode = requested_mode
+    intent_upgrade = False
+    if (
+        requested_mode == MODE_AUTO
+        and intent_result.matched
+        and intent_result.suggested_mode
+    ):
+        effective_mode = intent_result.suggested_mode
+        intent_upgrade = True
+        logger.info(
+            "Intent '%s' upgrading auto → %s",
+            intent_result.intent, intent_result.suggested_mode,
+        )
+
+    # Stage escalation wins over auto + intent (but not over explicit hybrid)
+    stage_enforced_mode = stage_result.enforced_mode
+    if stage_enforced_mode and requested_mode != MODE_HYBRID:
+        effective_mode = stage_enforced_mode
+
+    should_agent, agent_reason = resolve_mode(
+        mode=effective_mode,
         query=req.q,
-        complexity_score=routing.complexity.score if routing.complexity else 0.0,
-        complexity_tier=routing.complexity.tier if routing.complexity else "simple",
+        complexity_score=complexity.score,
+        complexity_tier=complexity.tier,
         source_count=len(set(doc_src)),
     )
+    if intent_upgrade:
+        agent_reason = f"{agent_reason} [intent={intent_result.intent}]"
+    if stage_enforced_mode and requested_mode != MODE_HYBRID:
+        agent_reason = f"{agent_reason} [stage={stage_result.stage}:{stage_result.escalate_reason}]"
 
     if should_agent:
         logger.info("Escalating to agent pipeline: %s", agent_reason)
+
+        # ── Build the per-step hybrid retriever the Analyst will use ──
+        try:
+            step_retriever_fn = build_step_retriever(
+                owner_id=owner_id,
+                allowed_file_ids=active_file_ids,
+                file_type="kb",
+                embed_fn=safe_embed,
+                bm25_search_fn=(bm25.search if bm25 and bm25.size > 0 else None),
+                vector_search_fn=pgvector_search,
+                generate_fn=safe_generate,
+                retrieve_fn=orchestrator_retrieve,
+                expand_query_fn=expand_query,
+                assemble_context_fn=assemble_context,
+                max_chunks=DEFAULT_MAX_CHUNKS,
+                max_context_chars=TOKEN_BUDGET["MAX_KB_CONTEXT_CHARS"],
+            )
+        except Exception as _sr_exc:
+            logger.warning("build_step_retriever failed (%s) — agents will use global context", _sr_exc)
+            step_retriever_fn = None
+
         agent_result = run_agent_pipeline(
             query=req.q,
             doc_context=doc_ctx,
@@ -1702,21 +1886,66 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             source_names=doc_src,
             generate_fn=safe_generate,
             bedrock_client=bedrock,
+            step_retriever_fn=step_retriever_fn,
         )
         raw_answer = agent_result.answer
+
+        # If the agent answer is empty (pipeline hard-failed), fall back to hybrid
+        if not (raw_answer or "").strip():
+            logger.warning("Agent pipeline produced empty answer — falling back to hybrid")
+            routing = route_and_generate(
+                query=req.q,
+                doc_context=doc_ctx,
+                ranked_chunks=doc_ranked,
+                source_names=doc_src,
+                retrieval_confidence=retrieval_confidence,
+                recent_messages=recent_msgs,
+                generate_fn=safe_generate,
+                bedrock_client=bedrock,
+            )
+            raw_answer = routing.answer
     else:
+        routing = route_and_generate(
+            query=req.q,
+            doc_context=doc_ctx,
+            ranked_chunks=doc_ranked,
+            source_names=doc_src,
+            retrieval_confidence=retrieval_confidence,
+            recent_messages=recent_msgs,
+            generate_fn=safe_generate,
+            bedrock_client=bedrock,
+        )
         raw_answer = routing.answer
 
+    # Choose a model-used label for the validator: routing.model_used when hybrid ran,
+    # else reflect the agent pipeline (agents internally use Sonnet + Haiku).
+    _model_used_label = (
+        routing.model_used if routing is not None
+        else ("agents (sonnet+haiku)" if agent_result is not None else "unknown")
+    )
     validation = validate_answer(
         query=req.q,
         answer=raw_answer,
         doc_context=doc_ctx,
         ranked_chunks=doc_ranked,
         source_names=doc_src,
-        model_used=routing.model_used,
+        model_used=_model_used_label,
     )
     answer = validation.answer
     confidence = validation.confidence
+
+    # ── Evidence check (metadata only; never mutates the answer) ──
+    try:
+        evidence = check_evidence(
+            answer=answer,
+            doc_context=doc_ctx,
+            source_names=doc_src,
+            confidence=confidence,
+        )
+    except Exception as _ev_exc:
+        logger.warning("Evidence checker wrapper raised (%s)", _ev_exc)
+        from backend.routing.evidence_checker import EvidenceResult as _ER
+        evidence = _ER(weak=False, reasons=[f"wrapper_error: {_ev_exc}"])
 
     ms = int((time.perf_counter() - start) * 1000)
 
@@ -1729,34 +1958,90 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         sources=sources_dict,
     )
 
+    context_stats = {
+        "active_file_count": len(active_file_ids),
+        "doc_after_rerank": len(doc_ranked),
+        "doc_context_chars": len(doc_ctx),
+        **retrieval.stats,
+        "model_used": _model_used_label,
+        "model_reason": (routing.reason if routing is not None else "agent pipeline (agent-first auto)"),
+        "complexity_score": complexity.score,
+        "complexity_tier": complexity.tier,
+        "generation_ms": (routing.generation_ms if routing is not None else 0),
+        "hybrid_path_used": routing is not None,
+        "step_retrieval_applied_count": (
+            sum(1 for m in getattr(agent_result.steps[0], "step_retrieval_meta", []) if m.get("applied"))
+            if (agent_result is not None and agent_result.steps) else 0
+        ),
+        "step_retrieval_total_steps": (
+            len(getattr(agent_result.steps[0], "step_retrieval_meta", []))
+            if (agent_result is not None and agent_result.steps) else 0
+        ),
+        "mode_requested": requested_mode,
+        "mode_effective": effective_mode,
+        "intent": intent_result.intent,
+        "intent_matched": intent_result.matched,
+        "intent_phrase": intent_result.matched_phrase,
+        "intent_upgraded_mode": intent_upgrade,
+        "agent_mode": agent_result.agent_mode if agent_result else False,
+        "agent_reason": agent_reason,
+        "agent_steps": len(agent_result.steps) if agent_result else 0,
+        "agent_tokens": agent_result.total_tokens if agent_result else 0,
+        "agent_ms": agent_result.total_ms if agent_result else 0,
+        "validation_passed": validation.passed,
+        "validation_confidence": round(validation.confidence, 3),
+        "validation_modified": validation.was_modified,
+        "validation_issues": len(validation.issues),
+        "validation_ms": validation.validation_ms,
+        "version_warning": bool(validation.version_warning),
+        "trivial_short_circuit": False,
+        "chunk_original_count": chunk_original_count,
+        "chunk_limited_count": chunk_limited_count,
+        "chunk_limit_applied": chunk_limit_applied,
+        "chunk_max_allowed": DEFAULT_MAX_CHUNKS,
+        "cache_hit": False,
+        "cache_stored": False,
+        "input_guard_flagged": False,
+        "input_guard_reason": GUARD_REASON_OK,
+        "stage": stage_result.stage,
+        "stage_filter_applied": stage_result.filter_applied,
+        "stage_original_chunks": stage_result.original_chunk_count,
+        "stage_filtered_chunks": stage_result.filtered_chunk_count,
+        "stage_enforced_mode": stage_result.enforced_mode,
+        "stage_escalate_reason": stage_result.escalate_reason,
+        "unresolved_count": stage_result.unresolved_count,
+        "weak_evidence": evidence.weak,
+        "weak_reasons": evidence.reasons,
+        "evidence_answer_chars": evidence.answer_chars,
+        "evidence_overlap_tokens": evidence.overlap_tokens,
+        "evidence_source_count": evidence.source_count,
+    }
+
+    # ── Store in answer cache (fail-safe; never blocks response) ──
+    try:
+        stored = ANSWER_CACHE.put(
+            query=req.q,
+            owner_id=owner_id,
+            active_file_ids=active_file_ids,
+            payload={
+                "answer": answer,
+                "sources": doc_src,
+                "confidence": confidence,
+                "context_stats": context_stats,
+            },
+        )
+        context_stats["cache_stored"] = bool(stored)
+    except Exception as _cache_exc:
+        logger.warning("Answer cache put wrapper failed: %s", _cache_exc)
+        context_stats["cache_stored"] = False
+
     return AnswerResponse(
         answer=answer,
         sources=doc_src,
         confidence=confidence,
         processing_time_ms=ms,
         session_id=session_id,
-        context_stats={
-            "active_file_count": len(active_file_ids),
-            "doc_after_rerank": len(doc_ranked),
-            "doc_context_chars": len(doc_ctx),
-            **retrieval.stats,
-            "model_used": routing.model_used,
-            "model_reason": routing.reason,
-            "complexity_score": routing.complexity.score if routing.complexity else None,
-            "complexity_tier": routing.complexity.tier if routing.complexity else None,
-            "generation_ms": routing.generation_ms,
-            "agent_mode": agent_result.agent_mode if agent_result else False,
-            "agent_reason": agent_reason,
-            "agent_steps": len(agent_result.steps) if agent_result else 0,
-            "agent_tokens": agent_result.total_tokens if agent_result else 0,
-            "agent_ms": agent_result.total_ms if agent_result else 0,
-            "validation_passed": validation.passed,
-            "validation_confidence": round(validation.confidence, 3),
-            "validation_modified": validation.was_modified,
-            "validation_issues": len(validation.issues),
-            "validation_ms": validation.validation_ms,
-            "version_warning": bool(validation.version_warning),
-        },
+        context_stats=context_stats,
     )
 
 
