@@ -172,6 +172,12 @@ class Settings(BaseSettings):
     AGENT_MAX_TOTAL_TOKENS: int = 8000
     AGENT_TIMEOUT_SECONDS: int = 45
 
+    ENABLE_CLARIFIER: bool = True
+    AGENT_CLARIFIER_MODEL: str = "haiku"
+    AGENT_CLARIFIER_MAX_TOKENS: int = 400
+    CLARIFIER_MIN_QUERY_LEN: int = 3
+    CLARIFIER_MAX_QUESTIONS: int = 2
+
     # ----------------------------------------------------------------
     # Phase-6: Validation Guardrails & Confidence Scoring
     # ----------------------------------------------------------------

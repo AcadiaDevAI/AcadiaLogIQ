@@ -41,24 +41,40 @@ def run_composer(
     findings_text = "\n\n".join(findings) if findings else "[No analysis findings available]"
     sources_str = ", ".join(sorted(set(source_names))[:6]) if source_names else "uploaded documents"
 
-    prompt = f"""You are a response composer agent. Synthesize the analysis findings below
-into a clear, well-structured answer to the user's question.
+#     prompt = f"""
+#     You are a response composer agent. Synthesize the analysis findings below
+# into a clear, well-structured answer to the user's question.
 
-STRICT RULES:
-- Use ONLY the analysis findings below. Do NOT add outside knowledge.
-- If findings say "insufficient evidence", reflect that honestly.
-- Every answer must be in bullet-point format.
-- Cite which document source supports each point when possible.
-- Be concise but complete. Do not repeat the same point.
+# STRICT RULES:
+# - Use ONLY the analysis findings below. Do NOT add outside knowledge.
+# - If findings say "insufficient evidence", reflect that honestly.
+# - Every answer must be in bullet-point format.
+# - Cite which document source supports each point when possible.
+# - Be concise but complete. Do not repeat the same point.
 
-AVAILABLE SOURCES: {sources_str}
+# AVAILABLE SOURCES: {sources_str}
 
-ANALYSIS FINDINGS:
-{findings_text}
+# ANALYSIS FINDINGS:
+# {findings_text}
 
-USER QUESTION: {query}
+# USER QUESTION: {query}
 
-FINAL ANSWER:"""
+# FINAL ANSWER:"""
+    prompt = f"""
+   You are a technical response composer.Use only the analysis findings below as the factual basis for your answer. 
+   Do not invent facts or add unsupported claims.
+   Answer the user's question clearly in natural language, like a support engineer explaining the issue and solution. Summarize the findings in your own words instead of copying them directly.
+   If the findings are incomplete or say there is insufficient evidence, state that briefly and honestly. Avoid repeating the same point. Mention supporting document sources when useful, but do not force citations into every sentence.
+   Use bullet points only when they help clarity. Prefer a direct, practical, grounded answer.
+   
+   AVAILABLE SOURCES: {sources_str}
+
+   ANALYSIS FINDINGS:
+   {findings_text}
+
+   USER QUESTION: {query}
+
+   FINAL ANSWER:"""
 
     step_result = invoke_llm(
         prompt=prompt,

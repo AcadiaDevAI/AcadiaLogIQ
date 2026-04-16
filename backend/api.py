@@ -1782,10 +1782,18 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     doc_ctx, doc_src = assemble_context(doc_ranked, max_ctx_chars)
 
     if not doc_ctx or not has_sufficient_document_support(req.q, doc_ranked, expanded_keywords=expanded.expanded_keywords):
-        answer = (
-            "- I could not find supporting information for that question in the currently uploaded files.\n"
-            "- Please ask a question that is directly covered by the uploaded document content."
+        # No supporting docs — run the conversational fallback (Clarifier +
+        # support-engineer-style reply). Never raises; legacy text on failure.
+        from backend.agents.fallback_responder import run_conversational_fallback
+        _fallback_prior = get_recent_session_messages(session_id, owner_id)
+        fb = run_conversational_fallback(
+            query=req.q,
+            source_names=list(retrieval.stats.get("doc_sources", []) or []),
+            generate_fn=safe_generate,
+            bedrock_client=bedrock,
+            prior_messages=_fallback_prior,
         )
+        answer = fb.answer
         save_message_to_session(
             session_id=session_id,
             role="assistant",
@@ -1802,6 +1810,8 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             context_stats={
                 "active_file_count": len(active_file_ids),
                 "grounded_answer": False,
+                "fallback_mode": fb.mode,
+                "clarifying": fb.clarifying,
                 **retrieval.stats,
             },
         )
@@ -1887,6 +1897,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             generate_fn=safe_generate,
             bedrock_client=bedrock,
             step_retriever_fn=step_retriever_fn,
+            prior_messages=recent_msgs,
         )
         raw_answer = agent_result.answer
 

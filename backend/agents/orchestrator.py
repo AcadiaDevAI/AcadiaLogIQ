@@ -14,6 +14,7 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from backend.config import settings
 from backend.agents.base import AgentPipelineResult, TokenBudget
+from backend.agents.clarifier import run_clarifier
 from backend.agents.planner import run_planner
 from backend.agents.analyst import run_analysis
 from backend.agents.composer import run_composer
@@ -99,6 +100,7 @@ def run_agent_pipeline(
     generate_fn: Callable,
     bedrock_client: Any,
     step_retriever_fn: Optional[Callable[[str], Any]] = None,
+    prior_messages: Optional[List[Dict[str, str]]] = None,
 ) -> AgentPipelineResult:
     """
     Run the full multi-agent pipeline: Planner → Analyst → Composer.
@@ -130,6 +132,46 @@ def run_agent_pipeline(
     reasoning_log: List[str] = []
 
     try:
+        # ==================================================================
+        # Step 0: CLARIFIER — ask for clarification if the query is ambiguous
+        # Fails safely: on any error, continue to Planner.
+        # ==================================================================
+        try:
+            clar = run_clarifier(
+                query=query,
+                doc_context_preview=doc_context[:1200],
+                source_names=source_names,
+                budget=budget,
+                generate_fn=generate_fn,
+                bedrock_client=bedrock_client,
+                prior_messages=prior_messages,
+            )
+            if clar.step is not None:
+                result.steps.append(clar.step)
+            reasoning_log.append(f"[Clarifier] {clar.reason}")
+
+            if clar.needs_clarification and clar.questions:
+                # Short-circuit: return clarifying questions as the answer.
+                # Response structure unchanged — only the `answer` text differs.
+                result.answer = clar.to_answer_text()
+                result.plan = []
+                result.total_ms = int((time.perf_counter() - t_start) * 1000)
+                result.total_tokens = budget.used
+                reasoning_log.append(
+                    f"[Clarifier] Emitting {len(clar.questions)} question(s); "
+                    "skipping Planner/Analyst/Composer this turn."
+                )
+                result.reasoning_summary = " | ".join(reasoning_log)
+                logger.info(
+                    "Agent pipeline short-circuited by Clarifier: %d question(s), %d tokens, %dms",
+                    len(clar.questions), result.total_tokens, result.total_ms,
+                )
+                return result
+        except Exception as clar_exc:
+            # Never let a Clarifier bug break the pipeline.
+            logger.warning("Clarifier raised, continuing to Planner: %s", clar_exc)
+            reasoning_log.append(f"[Clarifier] error — continuing: {clar_exc}")
+
         # ==================================================================
         # Step 1: PLANNER — decompose the query
         # ==================================================================
