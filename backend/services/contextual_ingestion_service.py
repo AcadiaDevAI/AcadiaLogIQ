@@ -228,6 +228,48 @@ def _normalize_chunk_metadata(
 
 
 
+def _estimate_output_tokens_per_chunk(chunk: ParsedChunk) -> int:
+    """Rough per-chunk JSON output size (tokens).
+
+    Haiku's chunk-metadata JSON scales with text length (summary,
+    operational_context, entities, keywords). The envelope below was
+    calibrated against observed outputs on verbose PDFs.
+    """
+    text_chars = len(chunk.text or "")
+    # ~0.08 output tokens per input char + 180-token base envelope
+    estimate = int(text_chars * 0.08) + 180
+    return max(200, min(estimate, 800))
+
+
+def _compute_adaptive_batch_size(chunks: List[ParsedChunk]) -> int:
+    """Size Haiku batches so their aggregate output fits under the
+    adaptive token budget. Keeps batches inside [min, max] clamps.
+    """
+    if not settings.ADAPTIVE_INGESTION_BATCHING_ENABLED or not chunks:
+        return settings.CHUNK_BATCH_SIZE
+
+    target = max(1, int(settings.ADAPTIVE_TARGET_OUTPUT_TOKENS))
+    avg_per_chunk = sum(_estimate_output_tokens_per_chunk(c) for c in chunks) // max(1, len(chunks))
+    avg_per_chunk = max(1, avg_per_chunk)
+
+    raw = target // avg_per_chunk
+    clamped = max(settings.ADAPTIVE_BATCH_SIZE_MIN, min(raw, settings.ADAPTIVE_BATCH_SIZE_MAX))
+    return clamped
+
+
+def _compute_adaptive_max_tokens(chunks: List[ParsedChunk]) -> int:
+    """Size the Haiku max_tokens ceiling to fit this batch's estimated
+    output plus a safety buffer, clamped to [min, max].
+    """
+    if not settings.ADAPTIVE_INGESTION_BATCHING_ENABLED or not chunks:
+        return settings.HAIKU_MAX_TOKENS
+
+    estimated = sum(_estimate_output_tokens_per_chunk(c) for c in chunks)
+    buffered = int(estimated * float(settings.ADAPTIVE_MAX_TOKENS_BUFFER))
+    clamped = max(settings.ADAPTIVE_MAX_TOKENS_MIN, min(buffered, settings.ADAPTIVE_MAX_TOKENS_MAX))
+    return clamped
+
+
 def _extract_chunk_metadata_once(
     *,
     document_name: str,
@@ -251,7 +293,12 @@ def _extract_chunk_metadata_once(
         source_type=source_type,
         chunk_batch_json=_safe_json(payload),
     )
-    result = haiku_client.invoke_json(system=CHUNK_METADATA_SYSTEM, prompt=prompt)
+    adaptive_max_tokens = _compute_adaptive_max_tokens(chunks)
+    result = haiku_client.invoke_json(
+        system=CHUNK_METADATA_SYSTEM,
+        prompt=prompt,
+        max_tokens=adaptive_max_tokens,
+    )
 
     if not result or "chunks" not in result or not isinstance(result.get("chunks"), list):
         return None
@@ -296,7 +343,41 @@ def batch_extract_chunk_metadata(
         chunks=chunks,
     )
 
-    if result is not None:
+    # Self-correcting halved-batch retry: if Haiku either returned nothing
+    # or filled in fewer than half the chunks (typical symptom of JSON
+    # truncation), split the batch in half and retry each half before
+    # falling back to per-chunk. This recovers the majority of
+    # "Haiku returned invalid JSON" cases without losing throughput.
+    def _coverage_ok(res: Optional[Dict[int, Dict[str, Any]]]) -> bool:
+        if res is None:
+            return False
+        threshold = max(1, len(chunks) // 2)
+        return len(res) >= threshold
+
+    if not _coverage_ok(result) and len(chunks) > 1:
+        logger.info(
+            "[adaptive_batch] retry halved doc=%s chunks=%d got=%d",
+            document_name,
+            len(chunks),
+            0 if result is None else len(result),
+        )
+        mid = len(chunks) // 2
+        halves = [chunks[:mid], chunks[mid:]]
+        merged_half: Dict[int, Dict[str, Any]] = {}
+        for half in halves:
+            if not half:
+                continue
+            half_result = _extract_chunk_metadata_once(
+                document_name=document_name,
+                source_type=source_type,
+                chunks=half,
+            )
+            if half_result:
+                merged_half.update(half_result)
+        if merged_half:
+            result = merged_half
+
+    if result is not None and _coverage_ok(result):
         for chunk in chunks:
             if chunk.chunk_index not in result:
                 result[chunk.chunk_index] = _fallback_chunk_metadata(chunk, document_name, source_type)
@@ -304,7 +385,11 @@ def batch_extract_chunk_metadata(
 
     if len(chunks) > 1:
         merged: Dict[int, Dict[str, Any]] = {}
+        if result:
+            merged.update(result)
         for chunk in chunks:
+            if chunk.chunk_index in merged:
+                continue
             one = _extract_chunk_metadata_once(
                 document_name=document_name,
                 source_type=source_type,
@@ -379,6 +464,734 @@ def decide_version(
     return result
 
 
+# ---------------------------------------------------------------------------
+# Fix 1 — Gold-ticket JSON fast-path
+# ---------------------------------------------------------------------------
+# Why: When the uploaded file is our structured gold-ticket JSON, every field
+# we'd ask Haiku to guess (incident number, customer, priority, component,
+# SLA, resolution quality) is already present in the source. Routing to a
+# deterministic path skips N Haiku calls per upload and produces strictly
+# correct metadata the retrieval layer (Fix 2 / Fix 6) can rely on.
+
+def _is_gold_ticket_json(file_bytes: bytes) -> bool:
+    """Return True only when `file_bytes` is our gold-ticket list format.
+
+    Why these two markers: Metadata.Incident_Number is load-bearing for the
+    ticket-ID exact-match path (Fix 2); Executive_Sharable_RCA OR ITIL_5_Why
+    distinguishes gold tickets from arbitrary list-of-dict JSON we must not
+    misroute. Any parse or shape mismatch → False (falls back to normal flow).
+    """
+    try:
+        data = json.loads(file_bytes.decode("utf-8", errors="replace"))
+    except Exception:
+        return False
+    if not isinstance(data, list) or not data:
+        return False
+    first = data[0]
+    if not isinstance(first, dict):
+        return False
+    metadata = first.get("Metadata")
+    if not isinstance(metadata, dict) or not metadata.get("Incident_Number"):
+        return False
+    return bool(first.get("Executive_Sharable_RCA")) or bool(first.get("ITIL_5_Why"))
+
+
+def _is_empty(value: Any) -> bool:
+    """True if the value carries no signal (None, blank string, empty dict/list)."""
+    if value is None:
+        return True
+    if isinstance(value, str):
+        return not value.strip()
+    if isinstance(value, (dict, list, tuple, set)):
+        return len(value) == 0
+    return False
+
+
+def _as_text(value: Any) -> str:
+    """Coerce scalar/str to a trimmed string. Complex types fall back to JSON."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    return json.dumps(value, ensure_ascii=False, default=str)
+
+
+def _render_gold_ticket_body(ticket: Dict[str, Any]) -> str:
+    """Flatten a ticket dict into LABELED PROSE for embedding/BM25/LLM context.
+
+    Why this shape (not raw json.dumps per section): the LLM needs clear
+    structural cues — "ROOT CAUSE:" is a much stronger signal than a nested
+    JSON key buried in a 30k-char dump. Empty sections (None / "" / [] / {})
+    are skipped so the chunk stays lean and the embedding isn't diluted.
+    """
+    incident_summary = ticket.get("Incident_Summary") if isinstance(ticket.get("Incident_Summary"), dict) else {}
+    exec_rca = ticket.get("Executive_Sharable_RCA") if isinstance(ticket.get("Executive_Sharable_RCA"), dict) else {}
+    itil = ticket.get("ITIL_5_Why") if isinstance(ticket.get("ITIL_5_Why"), dict) else {}
+    sop = ticket.get("Operational_SOP") if isinstance(ticket.get("Operational_SOP"), dict) else {}
+    qa = ticket.get("QA_Auditor_Feedback") if isinstance(ticket.get("QA_Auditor_Feedback"), dict) else {}
+    forensic = ticket.get("Forensic_Performance_Audit") if isinstance(ticket.get("Forensic_Performance_Audit"), list) else []
+    metadata = ticket.get("Metadata") if isinstance(ticket.get("Metadata"), dict) else {}
+
+    blocks: List[str] = []
+
+    def _append_block(header: str, body: str) -> None:
+        body = body.strip() if body else ""
+        if not body:
+            return
+        blocks.append(f"{header}\n{body}")
+
+    def _append_kv(line: str) -> None:
+        if line and line.strip():
+            blocks.append(line.strip())
+
+    # INCIDENT SUMMARY ← Incident_Summary.INCIDENT
+    _append_block("INCIDENT SUMMARY:", _as_text(incident_summary.get("INCIDENT")))
+
+    # ROOT CAUSE ← Executive_Sharable_RCA.Root_Cause_Technical_High_Level
+    _append_block("ROOT CAUSE:", _as_text(exec_rca.get("Root_Cause_Technical_High_Level")))
+
+    # EXECUTIVE SUMMARY ← Executive_Sharable_RCA.Executive_Summary
+    _append_block("EXECUTIVE SUMMARY:", _as_text(exec_rca.get("Executive_Summary")))
+
+    # RESOLUTION STEPS ← Executive_Sharable_RCA.Resolution_Steps (list → bullets)
+    steps = exec_rca.get("Resolution_Steps")
+    if isinstance(steps, list):
+        bullets = [f"- {_as_text(s)}" for s in steps if not _is_empty(s)]
+        if bullets:
+            _append_block("RESOLUTION STEPS:", "\n".join(bullets))
+
+    # RESOLUTION DETAIL ← Incident_Summary.RESOLUTION
+    # (This is where the Ribbon/SBC/license narrative lives in INC-10000.)
+    _append_block("RESOLUTION DETAIL:", _as_text(incident_summary.get("RESOLUTION")))
+
+    # ITIL 5-WHY ROOT CAUSE ← ITIL_5_Why.Root_Cause
+    _append_block("ITIL 5-WHY ROOT CAUSE:", _as_text(itil.get("Root_Cause")))
+
+    # ITIL 5-WHY CHAIN ← paired Q1/A1..Qn/An. Skip pairs where either side is empty.
+    chain_lines: List[str] = []
+    for i in range(1, 10):  # accommodate future schemas beyond 5 whys
+        q = itil.get(f"Q{i}")
+        a = itil.get(f"A{i}")
+        if _is_empty(q) and _is_empty(a):
+            continue
+        if not _is_empty(q):
+            chain_lines.append(f"Q{i}: {_as_text(q)}")
+        if not _is_empty(a):
+            chain_lines.append(f"A{i}: {_as_text(a)}")
+    if chain_lines:
+        _append_block("ITIL 5-WHY CHAIN:", "\n".join(chain_lines))
+
+    # TROUBLESHOOTING ← Incident_Summary.TROUBLESHOOTING
+    _append_block("TROUBLESHOOTING:", _as_text(incident_summary.get("TROUBLESHOOTING")))
+
+    # SOP DOMAIN + SOP EXECUTION STEPS
+    sop_domain = _as_text(sop.get("domain"))
+    if sop_domain:
+        _append_kv(f"SOP DOMAIN: {sop_domain}")
+    exec_steps = sop.get("execution_steps")
+    if isinstance(exec_steps, list):
+        bullets: List[str] = []
+        for step in exec_steps:
+            if isinstance(step, dict):
+                action = _as_text(step.get("action"))
+                if action:
+                    bullets.append(f"- {action}")
+            elif not _is_empty(step):
+                bullets.append(f"- {_as_text(step)}")
+        if bullets:
+            _append_block("SOP EXECUTION STEPS:", "\n".join(bullets))
+
+    # QA AUDITOR GAPS + rework + process improvement
+    _append_block("QA AUDITOR GAPS:", _as_text(qa.get("Gaps_Identified")))
+    rework = qa.get("Rework_Detected")
+    if not _is_empty(rework):
+        _append_kv(f"QA REWORK DETECTED: {_as_text(rework)}")
+    proc_improve = qa.get("Process_Improvement_Action")
+    if not _is_empty(proc_improve):
+        _append_kv(f"QA PROCESS IMPROVEMENT: {_as_text(proc_improve)}")
+
+    # FORENSIC AUDIT CRITICAL INTERVENTIONS — pull only the one load-bearing
+    # field per contributor; full dump is too noisy.
+    if isinstance(forensic, list):
+        interventions: List[str] = []
+        for item in forensic:
+            if not isinstance(item, dict):
+                continue
+            ci = _as_text(item.get("Critical_Intervention"))
+            if ci:
+                interventions.append(f"- {ci}")
+        if interventions:
+            _append_block("FORENSIC AUDIT CRITICAL INTERVENTIONS:", "\n".join(interventions))
+
+    # RESOLUTION GROUPS / SLA / quality score — flat key:value lines at the tail
+    rgroups = metadata.get("Resolution_Groups")
+    if isinstance(rgroups, list):
+        cleaned = [_as_text(g) for g in rgroups if not _is_empty(g)]
+        if cleaned:
+            _append_kv("RESOLUTION GROUPS: " + ", ".join(cleaned))
+    elif not _is_empty(rgroups):
+        _append_kv(f"RESOLUTION GROUPS: {_as_text(rgroups)}")
+
+    sla = exec_rca.get("SLA_Target_Met")
+    if sla is not None:
+        _append_kv(f"SLA TARGET MET: {_as_text(sla)}")
+    rq_score = exec_rca.get("Resolution_Quality_Score")
+    if rq_score is not None:
+        _append_kv(f"RESOLUTION QUALITY SCORE: {_as_text(rq_score)}")
+
+    # Blank line between blocks keeps the prose structurally legible for the LLM.
+    return "\n\n".join(blocks).rstrip()
+
+
+def _ingest_gold_ticket_json(
+    *,
+    file_bytes: bytes,
+    filename: str,
+    file_type: str,
+    owner_id: str,
+    fingerprint: str,
+    exact_duplicate_lookup,
+    version_candidate_lookup,
+) -> Dict[str, Any]:
+    """One-chunk-per-ticket ingestion — no Haiku metadata calls.
+
+    Returns the same dict shape as the generic path so api.py Phase 2/3
+    (embedding, BM25, insert) works unchanged.
+    """
+    # Duplicate check still applies — the fingerprint matches whatever was
+    # uploaded before regardless of format.
+    exact = None
+    if settings.ENABLE_DUPLICATE_CHECK:
+        exact = exact_duplicate_lookup(owner_id=owner_id, fingerprint=fingerprint)
+    if exact:
+        return {
+            "status": "exact_duplicate",
+            "document_metadata": {},
+            "version_decision": {
+                "decision": "exact_duplicate",
+                "matched_document_id": exact["document_id"],
+                "reason": "same fingerprint already exists",
+                "confidence": 1.0,
+                "normalized_name": exact.get("normalized_name") or normalize_filename(filename),
+                "version_family_key": exact.get("version_family_key") or normalize_filename(filename),
+                "version_label": exact.get("version_label"),
+                "version_rank": float(exact.get("version_rank") or 0.0),
+                "document_date": exact.get("document_date"),
+                "effective_date": exact.get("effective_date"),
+                "created_date": exact.get("created_date"),
+            },
+            "chunk_rows": [],
+        }
+
+    try:
+        tickets = json.loads(file_bytes.decode("utf-8", errors="replace"))
+    except Exception as exc:
+        # Detector already parsed once, so this should not happen. Fail safe
+        # by raising so the caller sees a real error rather than silent drop.
+        raise RuntimeError(f"Gold-ticket JSON re-parse failed: {exc}")
+
+    enriched_rows: List[Dict[str, Any]] = []
+    latest_resolved: Optional[str] = None
+
+    for idx, ticket in enumerate(tickets):
+        if not isinstance(ticket, dict):
+            continue
+        metadata = ticket.get("Metadata") if isinstance(ticket.get("Metadata"), dict) else {}
+        exec_rca = ticket.get("Executive_Sharable_RCA") if isinstance(ticket.get("Executive_Sharable_RCA"), dict) else {}
+        qa = ticket.get("QA_Auditor_Feedback") if isinstance(ticket.get("QA_Auditor_Feedback"), dict) else {}
+
+        incident_number = _safe_str(metadata.get("Incident_Number"), max_len=80)
+        customer_name = _safe_str(metadata.get("customer_name"), max_len=160)
+        priority = _safe_str(metadata.get("priority"), max_len=40)
+        component_category = _safe_str(metadata.get("component_category"), max_len=80)
+
+        # Header line — deterministic BM25 / exact-match target. Missing fields
+        # render as '?' rather than being dropped so the layout stays uniform.
+        header = (
+            f"TICKET: {incident_number or '?'} | "
+            f"CUSTOMER: {customer_name or '?'} | "
+            f"PRIORITY: {priority or '?'} | "
+            f"COMPONENT: {component_category or '?'}"
+        )
+        body = _render_gold_ticket_body(ticket)
+        content = f"{header}\n\n{body}" if body else header
+
+        resolved_date = _safe_date(metadata.get("resolved_date"))
+        if resolved_date and (latest_resolved is None or resolved_date > latest_resolved):
+            latest_resolved = resolved_date
+
+        section_heading = f"Ticket {incident_number}" if incident_number else f"Ticket #{idx + 1}"
+
+        row_metadata_json = {
+            # Universal identifier fields — schema-agnostic retrieval (Goal 1/2).
+            # `primary_id` is what identifier_exact_search matches against;
+            # `id_type` lets the orchestrator log the schema family and future
+            # callers route by type. `incident_number` is preserved as a ticket-
+            # specific alias so legacy readers keep working.
+            "primary_id": incident_number,
+            "id_type": "ticket_number",
+            # Ticket-native fields — these are what Fix 2 and Fix 6 read.
+            "doc_kind": "ticket",
+            "incident_number": incident_number,
+            "customer_name": customer_name,
+            "priority": priority,
+            "component_category": component_category,
+            "ticket_status": _safe_str(metadata.get("ticket_status"), max_len=40),
+            "resolved_date": resolved_date,
+            "resolution_groups": metadata.get("Resolution_Groups"),
+            "sla_target_met": exec_rca.get("SLA_Target_Met"),
+            "resolution_quality_score": exec_rca.get("Resolution_Quality_Score"),
+            # FINAL_CLEANUP Bug 1 — rework filter SQL reads metadata_json->>'rework_detected'.
+            # Populate from QA_Auditor_Feedback so `_build_ticket_scope_clauses` rework clause
+            # actually matches rows. bool() coerces Python-native False so the JSON-encoded
+            # value is 'false' (not 'null') — the SQL clause accepts true/false/yes/no/1/0.
+            "rework_detected": (
+                bool(qa.get("Rework_Detected", False))
+                if getattr(settings, "INGEST_REWORK_METADATA_ENABLED", True)
+                else None
+            ),
+            "llm_enrichment_status": ticket.get("llm_enrichment_status"),
+            # Generic fields downstream code still reads.
+            "title": filename,
+            "source_type": file_type,
+            "document_type": "Ticket",
+            "vendor": None,
+            "product": None,
+            "domain": None,
+            "version": None,
+            "document_date": resolved_date,
+            "effective_date": None,
+            "created_date": None,
+            "purpose_description": None,
+            "operational_context": "ticket",
+        }
+
+        enriched_rows.append(
+            {
+                "chunk_index": idx,
+                "content": content,
+                "contextualized_content": content,
+                "summary": None,
+                "section_heading": section_heading,
+                "chunk_type": "ticket",
+                "page_number": None,
+                "token_estimate": max(1, len(content) // 4),
+                "source_order": idx,
+                "labels_json": {
+                    "tags": [],
+                    "entities": [],
+                    "keywords": [],
+                    "operational_context": "ticket",
+                },
+                "metadata_json": row_metadata_json,
+            }
+        )
+
+    logger.info(
+        "[ingest] structured fast-path: %d records, schema=GoldTicketSchema",
+        len(enriched_rows),
+    )
+
+    # The upload pipeline sets file_type from the upload classifier (usually
+    # 'kb'). For gold-ticket JSON the document IS a ticket collection, so
+    # override here — this is what downstream aggregation scope filters
+    # ('ticket', 'tickets', 'incident') key off of.
+    if file_type != "ticket":
+        logger.info(
+            "[ingest] gold-ticket fast-path: document file_type set to 'ticket' (was '%s')",
+            file_type,
+        )
+
+    doc_metadata = {
+        "title": filename,
+        "document_type": "Ticket",
+        "file_type": "ticket",
+        "vendor": None,
+        "product": None,
+        "domain": None,
+        "version_label": None,
+        "document_date": latest_resolved,
+        "effective_date": None,
+        "created_date": None,
+        "section_count": len(enriched_rows),
+        "chunk_count": len(enriched_rows),
+        "metadata_version": "gold-ticket-v1",
+        "extracted_at": datetime.now(timezone.utc).isoformat(),
+        "metadata_json": {
+            "title": filename,
+            "document_type": "Ticket",
+            "vendor": None,
+            "product": None,
+            "domain": None,
+            "version": None,
+            "document_date": latest_resolved,
+            "effective_date": None,
+            "created_date": None,
+            "glossary": {},
+            "doc_kind": "ticket",
+        },
+    }
+
+    candidates = version_candidate_lookup(
+        owner_id=owner_id,
+        normalized_name=normalize_filename(filename),
+        title=filename,
+    )
+    version_decision = decide_version(
+        filename=filename,
+        owner_id=owner_id,
+        preliminary_doc_metadata={
+            "title": filename,
+            "version": None,
+            "document_date": latest_resolved,
+            "effective_date": None,
+            "created_date": None,
+        },
+        candidates=candidates,
+    )
+
+    return {
+        "status": "ready",
+        "document_metadata": doc_metadata,
+        "version_decision": version_decision,
+        "chunk_rows": enriched_rows,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Goal 1 — Schema-agnostic structured ingestion
+# ---------------------------------------------------------------------------
+# A schema is any structured document shape we can deterministically unpack
+# into one-chunk-per-record with a known primary_id. Today we ship two:
+#   - GoldTicketSchema: the original gold-ticket JSON (INC-\d+).
+#   - GenericArraySchema: list-of-dicts (or {records|items|data|tickets: [...]})
+#     where records carry an ID-like field (id, uuid, key, issue_key, ...).
+# Adding a new schema = adding a new class to STRUCTURED_SCHEMAS. No caller
+# changes: process_document iterates the registry and falls through to the
+# legacy parse + chunk + Haiku pipeline if nothing detects.
+
+_GENERIC_ID_FIELDS = (
+    "id",
+    "uuid",
+    "primary_id",
+    "key",
+    "number",
+    "incident_number",
+    "ticket_number",
+    "ticket_id",
+    "case_number",
+    "case_id",
+    "issue_key",
+    "kb_id",
+    "article_id",
+    "doc_id",
+    "record_id",
+)
+
+# Permissive fallback: any bare key that looks identifier-shaped. Prevents
+# the candidate list from becoming a schema-catalog bottleneck.
+_GENERIC_ID_FIELD_RE = re.compile(r"^[A-Za-z]*(?:id|key|number|no)$", re.IGNORECASE)
+
+
+def _find_generic_id_field(record: Dict[str, Any]) -> Optional[tuple]:
+    """Pick the best (field_name, value) identifier from a record.
+
+    Returns (id_type, primary_id) or None. Priority: known candidates in
+    the order listed (stable preference — id > uuid > issue_key ...) before
+    falling back to the regex heuristic.
+    """
+    if not isinstance(record, dict):
+        return None
+    lowered = {str(k).lower(): (k, v) for k, v in record.items() if isinstance(k, str)}
+    for candidate in _GENERIC_ID_FIELDS:
+        if candidate in lowered:
+            _, raw_value = lowered[candidate]
+            value = _safe_str(raw_value, max_len=120)
+            if value:
+                return candidate, value
+    # Regex fallback — first matching key wins.
+    for raw_key, raw_value in record.items():
+        if not isinstance(raw_key, str):
+            continue
+        if _GENERIC_ID_FIELD_RE.fullmatch(raw_key):
+            value = _safe_str(raw_value, max_len=120)
+            if value:
+                return raw_key.lower(), value
+    return None
+
+
+def _render_generic_record_body(record: Dict[str, Any]) -> str:
+    """Flatten an arbitrary record dict into labeled prose.
+
+    Same shape as _render_gold_ticket_body: KEY: value lines + list-bullet
+    and nested-dict blocks, so the LLM gets strong structural cues and BM25
+    gets literal field names.
+    """
+    blocks: List[str] = []
+    for key, value in record.items():
+        if _is_empty(value):
+            continue
+        label = str(key).upper().replace("_", " ")
+        if isinstance(value, list):
+            bullets: List[str] = []
+            for item in value:
+                if _is_empty(item):
+                    continue
+                if isinstance(item, (str, int, float, bool)):
+                    bullets.append(f"- {_as_text(item)}")
+                elif isinstance(item, dict):
+                    inner_parts = [
+                        f"{ik}: {_as_text(iv)}"
+                        for ik, iv in item.items()
+                        if not _is_empty(iv)
+                    ]
+                    if inner_parts:
+                        bullets.append("- " + "; ".join(inner_parts))
+                else:
+                    bullets.append(f"- {_as_text(item)}")
+            if bullets:
+                blocks.append(f"{label}:\n" + "\n".join(bullets))
+        elif isinstance(value, dict):
+            inner_lines = [
+                f"  {ik}: {_as_text(iv)}"
+                for ik, iv in value.items()
+                if not _is_empty(iv)
+            ]
+            if inner_lines:
+                blocks.append(f"{label}:\n" + "\n".join(inner_lines))
+        else:
+            blocks.append(f"{label}: {_as_text(value)}")
+    return "\n\n".join(blocks).rstrip()
+
+
+def _extract_generic_array(data: Any) -> List[Dict[str, Any]]:
+    """Extract a list-of-dicts from a root array or a wrapper object with a
+    known records-style key. Returns [] when no list can be found.
+    """
+    if isinstance(data, list):
+        return [d for d in data if isinstance(d, dict)]
+    if isinstance(data, dict):
+        for wrapper in ("records", "items", "data", "tickets", "entries", "results"):
+            val = data.get(wrapper)
+            if isinstance(val, list):
+                return [d for d in val if isinstance(d, dict)]
+    return []
+
+
+def _ingest_generic_array(
+    *,
+    file_bytes: bytes,
+    filename: str,
+    file_type: str,
+    owner_id: str,
+    fingerprint: str,
+    exact_duplicate_lookup,
+    version_candidate_lookup,
+) -> Dict[str, Any]:
+    """One-chunk-per-record ingestion for schema-less list-of-dicts JSON.
+
+    Mirrors _ingest_gold_ticket_json's return shape so the upload pipeline
+    (embedding → BM25 → insert) works unchanged.
+    """
+    exact = None
+    if settings.ENABLE_DUPLICATE_CHECK:
+        exact = exact_duplicate_lookup(owner_id=owner_id, fingerprint=fingerprint)
+    if exact:
+        return {
+            "status": "exact_duplicate",
+            "document_metadata": {},
+            "version_decision": {
+                "decision": "exact_duplicate",
+                "matched_document_id": exact["document_id"],
+                "reason": "same fingerprint already exists",
+                "confidence": 1.0,
+                "normalized_name": exact.get("normalized_name") or normalize_filename(filename),
+                "version_family_key": exact.get("version_family_key") or normalize_filename(filename),
+                "version_label": exact.get("version_label"),
+                "version_rank": float(exact.get("version_rank") or 0.0),
+                "document_date": exact.get("document_date"),
+                "effective_date": exact.get("effective_date"),
+                "created_date": exact.get("created_date"),
+            },
+            "chunk_rows": [],
+        }
+
+    try:
+        data = json.loads(file_bytes.decode("utf-8", errors="replace"))
+    except Exception as exc:
+        raise RuntimeError(f"Generic-array JSON re-parse failed: {exc}")
+
+    records = _extract_generic_array(data)
+    enriched_rows: List[Dict[str, Any]] = []
+
+    for idx, record in enumerate(records):
+        id_pair = _find_generic_id_field(record)
+        if id_pair is None:
+            # Records without an identifier are unroutable for exact match.
+            # Skip rather than emit a chunk with primary_id=None, which would
+            # break the SQL short-circuit's assumptions downstream.
+            continue
+        id_type, primary_id = id_pair
+
+        header = f"RECORD: {primary_id} | TYPE: {id_type}"
+        body = _render_generic_record_body(record)
+        content = f"{header}\n\n{body}" if body else header
+        section_heading = f"Record {primary_id}"
+
+        row_metadata_json = {
+            # Universal identifier fields — the whole point of this schema.
+            "primary_id": primary_id,
+            "id_type": id_type,
+            "doc_kind": "generic_record",
+            # Generic descriptor fields expected by downstream code.
+            "title": filename,
+            "source_type": file_type,
+            "document_type": "Structured Record",
+            "vendor": None,
+            "product": None,
+            "domain": None,
+            "version": None,
+            "document_date": None,
+            "effective_date": None,
+            "created_date": None,
+            "purpose_description": None,
+            "operational_context": "structured_record",
+        }
+
+        enriched_rows.append(
+            {
+                "chunk_index": idx,
+                "content": content,
+                "contextualized_content": content,
+                "summary": None,
+                "section_heading": section_heading,
+                "chunk_type": "record",
+                "page_number": None,
+                "token_estimate": max(1, len(content) // 4),
+                "source_order": idx,
+                "labels_json": {
+                    "tags": [],
+                    "entities": [],
+                    "keywords": [],
+                    "operational_context": "structured_record",
+                },
+                "metadata_json": row_metadata_json,
+            }
+        )
+
+    logger.info(
+        "[ingest] structured fast-path: %d records, schema=GenericArraySchema",
+        len(enriched_rows),
+    )
+
+    doc_metadata = {
+        "title": filename,
+        "document_type": "Structured Records",
+        "file_type": "structured_record",
+        "vendor": None,
+        "product": None,
+        "domain": None,
+        "version_label": None,
+        "document_date": None,
+        "effective_date": None,
+        "created_date": None,
+        "section_count": len(enriched_rows),
+        "chunk_count": len(enriched_rows),
+        "metadata_version": "generic-array-v1",
+        "extracted_at": datetime.now(timezone.utc).isoformat(),
+        "metadata_json": {
+            "title": filename,
+            "document_type": "Structured Records",
+            "vendor": None,
+            "product": None,
+            "domain": None,
+            "version": None,
+            "document_date": None,
+            "effective_date": None,
+            "created_date": None,
+            "glossary": {},
+            "doc_kind": "generic_record",
+        },
+    }
+
+    candidates = version_candidate_lookup(
+        owner_id=owner_id,
+        normalized_name=normalize_filename(filename),
+        title=filename,
+    )
+    version_decision = decide_version(
+        filename=filename,
+        owner_id=owner_id,
+        preliminary_doc_metadata={
+            "title": filename,
+            "version": None,
+            "document_date": None,
+            "effective_date": None,
+            "created_date": None,
+        },
+        candidates=candidates,
+    )
+
+    return {
+        "status": "ready",
+        "document_metadata": doc_metadata,
+        "version_decision": version_decision,
+        "chunk_rows": enriched_rows,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Schema registry — ordered; first match wins. Each class is a pure
+# dispatcher: detect() decides, ingest() emits the same dict shape as the
+# legacy path.
+# ---------------------------------------------------------------------------
+
+class GoldTicketSchema:
+    """Gold-ticket JSON: Metadata.Incident_Number + (Executive_Sharable_RCA | ITIL_5_Why)."""
+
+    name = "GoldTicketSchema"
+
+    @staticmethod
+    def detect(file_bytes: bytes) -> bool:
+        return _is_gold_ticket_json(file_bytes)
+
+    @staticmethod
+    def ingest(**kwargs) -> Dict[str, Any]:
+        return _ingest_gold_ticket_json(**kwargs)
+
+
+class GenericArraySchema:
+    """Any list-of-dicts (or {records|items|data|...: [...]}) with ID-like fields."""
+
+    name = "GenericArraySchema"
+
+    @staticmethod
+    def detect(file_bytes: bytes) -> bool:
+        try:
+            data = json.loads(file_bytes.decode("utf-8", errors="replace"))
+        except Exception:
+            return False
+        records = _extract_generic_array(data)
+        if not records:
+            return False
+        # Require a detectable ID on the first record and on at least 60% of
+        # records overall. Prevents arbitrary JSON objects from being
+        # misrouted into the structured fast-path.
+        if _find_generic_id_field(records[0]) is None:
+            return False
+        hits = sum(1 for r in records if _find_generic_id_field(r) is not None)
+        return hits / len(records) >= 0.6
+
+    @staticmethod
+    def ingest(**kwargs) -> Dict[str, Any]:
+        return _ingest_generic_array(**kwargs)
+
+
+STRUCTURED_SCHEMAS = [GoldTicketSchema, GenericArraySchema]
+
+
 def process_document(
     *,
     local_path: Path,
@@ -389,6 +1202,43 @@ def process_document(
     exact_duplicate_lookup,
     version_candidate_lookup,
 ) -> Dict[str, Any]:
+    # Structured-schema detection runs BEFORE generic parse so we never burn
+    # Haiku calls re-guessing fields already present in the source JSON.
+    # Every schema that fails detection falls through to the legacy pipeline.
+    try:
+        file_bytes = local_path.read_bytes()
+    except Exception as exc:
+        logger.warning("Could not read bytes for structured-schema detection: %s", exc)
+        file_bytes = b""
+
+    if file_bytes:
+        for schema_cls in STRUCTURED_SCHEMAS:
+            try:
+                if not schema_cls.detect(file_bytes):
+                    continue
+            except Exception as exc:
+                logger.warning(
+                    "Schema %s.detect raised (%s) — trying next schema",
+                    schema_cls.name, exc,
+                )
+                continue
+            try:
+                return schema_cls.ingest(
+                    file_bytes=file_bytes,
+                    filename=filename,
+                    file_type=file_type,
+                    owner_id=owner_id,
+                    fingerprint=fingerprint,
+                    exact_duplicate_lookup=exact_duplicate_lookup,
+                    version_candidate_lookup=version_candidate_lookup,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Schema %s.ingest raised (%s) — falling through to generic pipeline",
+                    schema_cls.name, exc,
+                )
+                break
+
     blocks = parse_file(local_path)
     chunks = build_chunks(blocks)
     if not chunks:
@@ -420,10 +1270,26 @@ def process_document(
 
     all_chunk_meta: Dict[int, Dict[str, Any]] = {}
 
-    # Build batches
+    # Build batches — adaptive sizing when enabled, fixed stride otherwise
     batches: List[List[ParsedChunk]] = []
-    for start in range(0, len(chunks), settings.CHUNK_BATCH_SIZE):
-        batches.append(chunks[start : start + settings.CHUNK_BATCH_SIZE])
+    if settings.ADAPTIVE_INGESTION_BATCHING_ENABLED and chunks:
+        adaptive_size = _compute_adaptive_batch_size(chunks)
+        avg_out = sum(_estimate_output_tokens_per_chunk(c) for c in chunks) // max(1, len(chunks))
+        logger.info(
+            "[adaptive_batch] doc=%s chunks=%d avg_out_tok/chunk=%d batch_size=%d (min=%d max=%d target=%d)",
+            filename,
+            len(chunks),
+            avg_out,
+            adaptive_size,
+            settings.ADAPTIVE_BATCH_SIZE_MIN,
+            settings.ADAPTIVE_BATCH_SIZE_MAX,
+            settings.ADAPTIVE_TARGET_OUTPUT_TOKENS,
+        )
+        stride = adaptive_size
+    else:
+        stride = settings.CHUNK_BATCH_SIZE
+    for start in range(0, len(chunks), stride):
+        batches.append(chunks[start : start + stride])
 
     # Extract metadata concurrently across batches
     max_workers = min(settings.METADATA_CONCURRENCY, len(batches))

@@ -621,7 +621,10 @@ def insert_document_and_chunks(
                     "owner_id": owner_id,
                     "filename": filename,
                     "normalized_name": version_decision.get("normalized_name"),
-                    "file_type": file_type,
+                    # Gold-ticket fast-path returns file_type='ticket' in
+                    # metadata; honor that override so the parent Document
+                    # row is correctly classified for aggregation queries.
+                    "file_type": (metadata or {}).get("file_type") or file_type,
                     "version_family_key": version_decision.get("version_family_key"),
                     "latest_effective_at": _safe_date(
                         version_decision.get("effective_date")

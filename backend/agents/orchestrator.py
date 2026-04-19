@@ -18,6 +18,7 @@ from backend.agents.clarifier import run_clarifier
 from backend.agents.planner import run_planner
 from backend.agents.analyst import run_analysis
 from backend.agents.composer import run_composer
+from backend.routing.stage_enforcer import STAGE_DOCS, UNRESOLVED_ESCALATE_THRESHOLD
 
 logger = logging.getLogger("acadia-log-iq")
 
@@ -101,6 +102,8 @@ def run_agent_pipeline(
     bedrock_client: Any,
     step_retriever_fn: Optional[Callable[[str], Any]] = None,
     prior_messages: Optional[List[Dict[str, str]]] = None,
+    stage: Optional[str] = None,
+    unresolved_count: int = 0,
 ) -> AgentPipelineResult:
     """
     Run the full multi-agent pipeline: Planner → Analyst → Composer.
@@ -186,9 +189,53 @@ def run_agent_pipeline(
             bedrock_client=bedrock_client,
         )
 
+        # ── Fix 7 (b): tiered escalation. When the user has signalled
+        # "still not resolved" enough times during the docs stage, the
+        # ticket pool has been exhausted — we route the Analyst's first
+        # step across runbook/KB chunks by prepending a synthetic step.
+        # step_retriever already honours file_type filters keyed on the
+        # words "runbook" / "KB" in the step text, so no retriever change
+        # is needed here.
+        if (
+            plan_steps
+            and stage == STAGE_DOCS
+            and unresolved_count >= UNRESOLVED_ESCALATE_THRESHOLD
+        ):
+            synthetic = (
+                "Step 1: Search runbooks and KBs for the originally-reported "
+                "issue and identify the next troubleshooting action not "
+                "already attempted."
+            )
+            plan_steps = [synthetic, *plan_steps]
+            reasoning_log.append(
+                f"[Planner] Escalation prepend: unresolved={unresolved_count} "
+                f">= {UNRESOLVED_ESCALATE_THRESHOLD} — routing to runbooks/KBs first."
+            )
+
         result.steps.append(plan_result)
         result.plan = plan_steps
         reasoning_log.append(f"[Planner] Produced {len(plan_steps)} steps: {[s[:50] for s in plan_steps]}")
+
+        # ── Goal 4: dynamic budget sizing now that we know the plan ──
+        # The static AGENT_MAX_TOTAL_TOKENS cap was regularly blowing up on
+        # 4-step plans. Compute a plan-aware budget (Clarifier + Planner +
+        # N*PerStep + Composer), clamped by AGENT_BUDGET_HARD_CAP_TOKENS so
+        # a runaway planner with 50 steps can't explode cost. max() with the
+        # existing budget ensures we never shrink what's already in flight.
+        if settings.ENABLE_DYNAMIC_AGENT_BUDGET:
+            step_count = len(plan_steps or [])
+            computed = (
+                settings.AGENT_BUDGET_CLARIFIER_TOKENS
+                + settings.AGENT_BUDGET_PLANNER_TOKENS
+                + step_count * settings.AGENT_BUDGET_PER_STEP_TOKENS
+                + settings.AGENT_BUDGET_COMPOSER_TOKENS
+            )
+            dynamic_max = min(computed, settings.AGENT_BUDGET_HARD_CAP_TOKENS)
+            budget.max_total = max(budget.max_total, dynamic_max)
+            logger.info(
+                "[agents] dynamic budget: steps=%d computed=%d applied=%d",
+                step_count, computed, dynamic_max,
+            )
 
         # Check timeout
         elapsed = time.perf_counter() - t_start

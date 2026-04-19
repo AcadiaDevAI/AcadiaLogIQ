@@ -38,6 +38,8 @@ function reducer(state, action) {
             sources: sources || [],
             // Preserve feedback state from backend ("like", "dislike", or undefined)
             feedback: msg.feedback || null,
+            semanticCacheId:
+              msg.context_stats?.semantic_cache_id || msg.semanticCacheId || null,
           };
         }),
       };
@@ -59,6 +61,14 @@ function reducer(state, action) {
       };
 
     case "ADD_ASSISTANT_MESSAGE":
+      // Guard: never append a phantom assistant bubble. A valid assistant
+      // message has either a non-empty answer OR a clarification payload.
+      if (
+        !action.payload ||
+        (!action.payload.answer && !action.payload.needs_clarification)
+      ) {
+        return state;
+      }
       return {
         ...state,
         sessionId: action.payload.sessionId || state.sessionId,
@@ -66,14 +76,36 @@ function reducer(state, action) {
           ...state.messages,
           {
             role: "assistant",
-            content: action.payload.answer,
+            content: action.payload.answer || "",
             sources: action.payload.sources || [],
             confidence: action.payload.confidence,
             processingTime: action.payload.processing_time_ms,
             timestamp: new Date().toISOString(),
             feedback: null, // no feedback yet on new messages
+            // Brief 5 / Part 1 — carry semantic cache id forward so dislike can
+            // invalidate the specific cached row that produced this answer.
+            semanticCacheId:
+              action.payload.context_stats?.semantic_cache_id || null,
+
+            // Interactive clarification fields (Brief 6)
+            needsClarification: action.payload.needs_clarification === true,
+            clarificationId: action.payload.clarification_id || null,
+            clarificationOptions: action.payload.clarification_options || null,
+            clarificationContext: action.payload.clarification_context || null,
+            clarificationSelectedId: null,
           },
         ],
+      };
+
+    // Mark a clarification option as selected (prevents re-click + dims others)
+    case "SET_CLARIFICATION_SELECTED":
+      return {
+        ...state,
+        messages: state.messages.map((msg, i) =>
+          i === action.payload.index
+            ? { ...msg, clarificationSelectedId: action.payload.optionId }
+            : msg
+        ),
       };
 
     // ── Persist like/dislike on a specific message ───────

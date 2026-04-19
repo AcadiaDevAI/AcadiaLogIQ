@@ -1,8 +1,8 @@
 """
 Mode Selector — resolves the /ask `mode` parameter into a pipeline decision.
-'auto' now routes to the agent pipeline by default (agent-first); 'hybrid'
-still forces the standard path as an override; 'multi_agent' unchanged.
-The old should_escalate_to_agents gate is kept for telemetry / reason strings.
+'auto' is hybrid-first: it routes to standard RAG unless a specific agent
+signal fires (agent-eligible pattern OR complex-tier + high score). 'hybrid'
+forces standard RAG; 'multi_agent' forces the agent pipeline.
 """
 
 from __future__ import annotations
@@ -10,7 +10,13 @@ from __future__ import annotations
 import logging
 from typing import Tuple
 
-from backend.agents.orchestrator import should_escalate_to_agents
+from backend.config import settings
+# Import the pattern list from the agent orchestrator so the two sides
+# agree on what counts as "agent-eligible" — avoids drift from duplication.
+from backend.agents.orchestrator import (
+    should_escalate_to_agents,
+    _AGENT_ELIGIBLE_PATTERNS,
+)
 
 logger = logging.getLogger("acadia-log-iq")
 
@@ -40,6 +46,17 @@ def _normalize_mode(mode: str) -> str:
     return MODE_AUTO
 
 
+def _matched_agent_pattern(query: str) -> str:
+    """Return the first agent-eligible pattern the query matches, else ''."""
+    if not query:
+        return ""
+    for pat in _AGENT_ELIGIBLE_PATTERNS:
+        m = pat.search(query)
+        if m:
+            return m.group(0)
+    return ""
+
+
 def resolve_mode(
     *,
     mode: str,
@@ -52,10 +69,11 @@ def resolve_mode(
     Decide whether the agent pipeline should run.
 
     Modes:
-        'auto'        → route to agents by default (agent-first).
-                        If no sources are available, fall back to hybrid.
-                        For telemetry the reason string also includes the
-                        classical 5-gate outcome.
+        'auto'        → hybrid-first. Escalate to agents only when the
+                        query matches an agent-eligible pattern, OR when
+                        the classifier marks it complex with a score at
+                        or above AGENT_COMPLEXITY_THRESHOLD. Otherwise
+                        answer with standard hybrid RAG.
         'hybrid'      → never use agents (explicit override).
         'multi_agent' → always use agents (requires ≥1 source).
 
@@ -74,19 +92,30 @@ def resolve_mode(
             return False, "mode=multi_agent but no sources available (fallback to standard)"
         return True, "mode=multi_agent (forced agent pipeline)"
 
-    # MODE_AUTO — agent-first default
+    # MODE_AUTO — hybrid-first default
+    # Gate 1: no sources → nothing to ground against, stay on hybrid.
     if source_count < 1:
-        # Nothing to ground against — fall back to the standard path
-        return False, "mode=auto: no sources → fallback to standard RAG"
+        return False, "mode=auto → hybrid (no sources available)"
 
-    # Call the classical gate only to surface its reason in telemetry
-    classical_use, classical_reason = should_escalate_to_agents(
-        query=query,
-        complexity_score=complexity_score,
-        complexity_tier=complexity_tier,
-        source_count=source_count,
-    )
-    return True, (
-        f"mode=auto (agent-first default) [classical_gate="
-        f"{'escalate' if classical_use else 'skip'}: {classical_reason}]"
+    # Gate 2: agent-eligible pattern is the strongest positive signal —
+    # queries like "compare X and Y" or "walk me through" intrinsically
+    # need multi-step reasoning even at low complexity scores.
+    matched = _matched_agent_pattern(query)
+    if matched:
+        return True, f"mode=auto → agents (pattern matched: '{matched}')"
+
+    # Gate 3: complexity classifier fallback — complex-tier queries with
+    # a high score still escalate even without a pattern hit.
+    if (
+        complexity_tier == "complex"
+        and complexity_score >= settings.AGENT_COMPLEXITY_THRESHOLD
+    ):
+        return True, (
+            f"mode=auto → agents (complex tier, score="
+            f"{complexity_score:.3f} >= {settings.AGENT_COMPLEXITY_THRESHOLD})"
+        )
+
+    # Default — standard hybrid RAG handles the query.
+    return False, (
+        f"mode=auto → hybrid (no agent-eligible pattern, tier={complexity_tier})"
     )

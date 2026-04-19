@@ -7,6 +7,7 @@ Called by the /ask endpoint in api.py. Returns ranked chunks ready for context a
 from __future__ import annotations
 
 import logging
+import re
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
@@ -14,11 +15,77 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from backend.config import settings
 from backend.retrieval.query_classifier import QueryIntent, classify_query
-from backend.retrieval.keyword_search import fulltext_search, metadata_filter_search
+from backend.retrieval.keyword_search import (
+    fulltext_search,
+    metadata_filter_search,
+    identifier_exact_search,
+    ticket_id_exact_search,  # legacy alias — kept for import stability
+)
 from backend.retrieval.fusion import fuse_results, FusedResult
 from backend.retrieval.reranker import BaseReranker, create_reranker
 
 logger = logging.getLogger("acadia-log-iq")
+
+
+# ---------------------------------------------------------------------------
+# Goal 2 — Schema-agnostic identifier extractor
+# ---------------------------------------------------------------------------
+# Regexes and canonical formats live in settings.IDENTIFIER_PATTERNS /
+# IDENTIFIER_CANONICAL_FORMAT so new schemas can be added with no code
+# changes. Patterns are evaluated in declaration order; earlier matches
+# own their span so 'INC-10005' cannot be re-tagged as an issue_key.
+
+
+def _extract_identifiers(query: str) -> List[Tuple[str, str]]:
+    """
+    Extract all (canonical_id, id_type) pairs from `query`.
+
+    Returns a list of (canonical_id, id_type) tuples where id_type matches
+    the keys in settings.IDENTIFIER_PATTERNS (and by contract matches
+    chunks.metadata_json->>'id_type' written by the ingestion schema).
+
+    Handles hyphen-stripped queries (query_expansion normalizes 'INC-10001'
+    → 'INC 10001') via the pattern's optional [-\\s]? separator and always
+    returns the canonical hyphenated form for SQL comparison.
+    """
+    if not query:
+        return []
+    out: List[Tuple[str, str]] = []
+    seen: Set[Tuple[str, str]] = set()
+    covered: List[Tuple[int, int]] = []
+
+    for id_type, pattern in settings.IDENTIFIER_PATTERNS.items():
+        try:
+            regex = re.compile(pattern, re.IGNORECASE)
+        except re.error as exc:
+            logger.warning(
+                "[retrieve] IDENTIFIER_PATTERNS[%s] invalid regex (%s) — skipping",
+                id_type, exc,
+            )
+            continue
+        fmt = settings.IDENTIFIER_CANONICAL_FORMAT.get(id_type, "{0}")
+        for m in regex.finditer(query):
+            span = m.span()
+            # Skip if this span overlaps a previously matched identifier.
+            if any(s <= span[0] < e or s < span[1] <= e for s, e in covered):
+                continue
+            raw = m.group(1) if m.groups() else m.group(0)
+            try:
+                canonical = fmt.format(raw)
+            except Exception:
+                canonical = raw
+            key = (canonical.upper(), id_type)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append((canonical, id_type))
+            covered.append(span)
+    return out
+
+
+def _extract_ticket_ids(query: str) -> List[str]:
+    """Back-compat shim: return only ticket_number canonical IDs."""
+    return [cid for cid, itype in _extract_identifiers(query) if itype == "ticket_number"]
 
 
 # ---------------------------------------------------------------------------
@@ -96,6 +163,129 @@ def retrieve(
     """
     t_start = time.perf_counter()
     result = RetrievalResult()
+
+    logger.info("[retrieve] entry — query=%r", query[:200])
+
+    # =====================================================================
+    # Step 0 (Goal 2): Identifier exact-match short-circuit
+    # =====================================================================
+    # When the query names one or more identifiers matching any pattern in
+    # settings.IDENTIFIER_PATTERNS, answer from an exact JSONB lookup on
+    # primary_id and skip the four parallel channels entirely. Deterministic,
+    # ~1ms, schema-agnostic (tickets, Jira issue keys, KB articles, ...).
+    requested_identifiers = _extract_identifiers(query)
+    logger.info("[retrieve] extracted identifiers=%s", requested_identifiers)
+    # Legacy alias for any downstream reader still expecting ticket IDs.
+    requested_ticket_ids = [
+        cid for cid, itype in requested_identifiers if itype == "ticket_number"
+    ]
+    if requested_identifiers:
+        logger.info("[retrieve] short-circuit firing via identifier_exact_search")
+        try:
+            exact_rows = identifier_exact_search(
+                identifiers=requested_identifiers,
+                allowed_file_ids=allowed_file_ids,
+                n_results=max(settings.RERANK_TOP_K, 20),
+            )
+        except Exception as exc:
+            # Fail safe: if the exact lookup crashes we fall through to
+            # the generic pipeline rather than surfacing an error.
+            logger.warning("Identifier exact lookup raised (%s) — falling through", exc)
+            exact_rows = None
+
+        if exact_rows is not None:
+            # Diagnostics for the identifier-exact short-circuit. Exposes
+            # whether the rendered chunk actually contains the expected
+            # labeled sections — if it doesn't, the schema's ingest() has a
+            # shape-specific bug we need to chase.
+            top_meta = (exact_rows[0].get("metadata", {}) or {}) if exact_rows else {}
+            top_primary = (
+                (top_meta.get("metadata_json") or {}).get("primary_id")
+                or top_meta.get("incident_number")
+            ) if exact_rows else None
+            logger.info(
+                "[identifier_exact] ids=%s rows_returned=%d top_chunk_primary_id=%s",
+                requested_identifiers, len(exact_rows), top_primary,
+            )
+            if exact_rows:
+                top_content = (
+                    exact_rows[0].get("text")
+                    or exact_rows[0].get("content")
+                    or exact_rows[0].get("contextualized_content")
+                    or ""
+                )
+                expected_labels = [
+                    "ROOT CAUSE:",
+                    "RESOLUTION DETAIL:",
+                    "ITIL 5-WHY ROOT CAUSE:",
+                    "SOP EXECUTION STEPS:",
+                    "QA AUDITOR GAPS:",
+                ]
+                sections_present = [lbl for lbl in expected_labels if lbl in top_content]
+                logger.info(
+                    "[identifier_exact] top_chunk_length=%d sections_present=%s",
+                    len(top_content), sections_present,
+                )
+
+            if exact_rows:
+                ranked: List[FusedResult] = []
+                for row in exact_rows:
+                    meta = row.get("metadata", {}) or {}
+                    ranked.append(
+                        (
+                            row["id"],
+                            row["text"],
+                            meta,
+                            float(row.get("rank") or 1.0),
+                        )
+                    )
+                result.intent = QueryIntent(
+                    strategy="keyword",
+                    reason=f"identifier exact match: {requested_identifiers}",
+                )
+                result.ranked = ranked[: settings.RERANK_TOP_K]
+                elapsed_ms = int((time.perf_counter() - t_start) * 1000)
+                result.stats = {
+                    "search_mode": "identifier_exact",
+                    "requested_identifiers": requested_identifiers,
+                    # Legacy alias — consumers that still key off
+                    # requested_ticket_ids / search_mode=="ticket_id_exact"
+                    # keep working.
+                    "requested_ticket_ids": requested_ticket_ids,
+                    "matched_count": len(ranked),
+                    "timing_total_ms": elapsed_ms,
+                }
+                logger.info(
+                    "Retrieval short-circuit: identifier_exact for %s → %d chunks (%dms)",
+                    requested_identifiers, len(ranked), elapsed_ms,
+                )
+                return result
+            else:
+                # Zero rows = identifier(s) genuinely not indexed. Do NOT
+                # fall through — return a clean signal so the caller can
+                # say "not found" rather than hallucinating.
+                result.intent = QueryIntent(
+                    strategy="keyword",
+                    reason=f"identifier not found: {requested_identifiers}",
+                )
+                result.ranked = []
+                elapsed_ms = int((time.perf_counter() - t_start) * 1000)
+                first_canonical = (
+                    requested_identifiers[0][0] if requested_identifiers else None
+                )
+                result.stats = {
+                    "search_mode": "identifier_not_found",
+                    "requested_identifiers": requested_identifiers,
+                    "requested_ticket_ids": requested_ticket_ids,
+                    "ticket_id": first_canonical,
+                    "matched_count": 0,
+                    "timing_total_ms": elapsed_ms,
+                }
+                logger.info(
+                    "Retrieval short-circuit: identifier_not_found for %s (%dms)",
+                    requested_identifiers, elapsed_ms,
+                )
+                return result
 
     # =====================================================================
     # Step 1: Classify the query to determine search strategy
@@ -326,7 +516,20 @@ def retrieve(
     # =====================================================================
     # Step 4: Rerank the fused candidates
     # =====================================================================
-    if fused and generate_fn:
+    # Brief 4 / Opt 4: skip the Mistral reranker when the fused list is
+    # smaller than RERANK_MIN_CHUNKS — nothing meaningful to re-order, and
+    # the Bedrock call adds ~2s of pure overhead.
+    _skip_rerank_tiny = (
+        bool(getattr(settings, "SKIP_RERANK_ON_TINY_RESULTS_ENABLED", False))
+        and len(fused) < int(getattr(settings, "RERANK_MIN_CHUNKS", 3))
+    )
+    if _skip_rerank_tiny:
+        logger.info(
+            "[rerank] skipped — only %d chunks retrieved (threshold=%d)",
+            len(fused), int(settings.RERANK_MIN_CHUNKS),
+        )
+        ranked = fused[: settings.RERANK_TOP_K]
+    elif fused and generate_fn:
         reranker = _get_reranker(generate_fn)
         ranked = reranker.rerank(query, fused, top_k=settings.RERANK_TOP_K)
     else:

@@ -1,8 +1,11 @@
+import asyncio
 import json
 import logging
 import hashlib
+import re
 import sys
 import uuid
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
@@ -51,7 +54,15 @@ from backend.vector_store import (
 )
 from backend.services.contextual_ingestion_service import process_document
 from backend.vector_store import find_duplicate_by_hash, find_version_candidates
-from backend.retrieval.orchestrator import retrieve as orchestrator_retrieve
+from backend.retrieval.orchestrator import (
+    retrieve as orchestrator_retrieve,
+    _extract_identifiers,
+)
+from backend.retrieval.metadata_sql import (
+    detect_aggregation_intent,
+    detect_aggregation_intent_v2,
+    run_aggregation,
+)
 from backend.routing.model_router import route_and_generate
 from backend.vector_store import get_recent_session_messages
 from backend.agents.orchestrator import should_escalate_to_agents, run_agent_pipeline
@@ -59,7 +70,9 @@ from backend.agents.mode_selector import resolve_mode, MODE_AUTO, MODE_HYBRID, M
 from backend.agents.step_retriever import build_step_retriever
 from backend.routing.complexity_classifier import classify_complexity
 from backend.routing.intent_detector import detect_intent, INTENT_GENERAL
-from backend.routing.trivial_detector import detect_trivial
+from backend.services.trivial_responder import match_trivial_response
+from backend.services.query_rewriter import rewrite_query
+from backend.services.triage_classifier import classify_triage
 from backend.routing.answer_cache import ANSWER_CACHE
 from backend.routing.chunk_limiter import limit_chunks, DEFAULT_MAX_CHUNKS
 from backend.routing.input_guard import check_input, GUARD_REASON_OK
@@ -121,6 +134,108 @@ HYBRID_CONFIG = {
     "RERANK_TOP_K_LOG": 6,
     "RERANK_TOP_K_KB": 5,
 }
+
+# ---------------------------------------------------------------------------
+# Follow-up context inheritance (Fix 5)
+# ---------------------------------------------------------------------------
+# A bare follow-up like "what QA gaps?" contains no ticket ID, so the embedding
+# and BM25 terms drift to an unrelated chunk. We carry forward explicit
+# entities from the recent assistant turns and prepend them to the
+# retrieval-only query. The LLM prompt and chat persistence still see the
+# original user text — the enrichment exists solely to steer retrieval.
+_FOLLOWUP_TICKET_RE = re.compile(r"\bINC-\d+\b", re.I)
+_FOLLOWUP_ENTERPRISE_RE = re.compile(r"\bEnterprise-\d+\b", re.I)
+_FOLLOWUP_NEBULA_RE = re.compile(r"\bNebula-Corp\b", re.I)
+_FOLLOWUP_PATTERNS = (
+    _FOLLOWUP_TICKET_RE,
+    _FOLLOWUP_ENTERPRISE_RE,
+    _FOLLOWUP_NEBULA_RE,
+)
+
+# Goal 3 — cross-cutting / aggregation tokens. When the query contains any
+# of these, the user wants a multi-record view and enrichment would bias
+# retrieval toward whatever ticket was last discussed.
+_CROSS_CUTTING_RE = re.compile(
+    r"\b(?:"
+    r"across|all|every|each|common|patterns|trends|compare|"
+    r"how\s+many|list\s+all|show\s+all|rank|ranking"
+    r")\b",
+    re.IGNORECASE,
+)
+# "which X had ..." — narrow but still cross-cutting over a cohort.
+_WHICH_X_HAD_RE = re.compile(r"\bwhich\s+\w+\s+(?:had|have|has)\b", re.IGNORECASE)
+
+
+def _classify_followup_intent(query: str) -> str:
+    """Classify the current query into one of three follow-up intents.
+
+    Returns:
+        "self_contained" — already names an identifier (any schema) or a
+            tracked named entity (Enterprise-N / Nebula-Corp). Don't enrich.
+        "cross_cutting"  — multi-record question (across / common / rank /
+            compare / how many / ...). Enriching with one entity biases
+            retrieval toward a single record; skip.
+        "narrow_followup" — everything else. Short bare follow-ups go here
+            and get one entity carried from the most recent assistant turn.
+    """
+    q = (query or "").strip()
+    if not q:
+        return "narrow_followup"
+
+    # Self-contained: explicit entity in the current turn.
+    if _FOLLOWUP_TICKET_RE.search(q):
+        return "self_contained"
+    if _FOLLOWUP_ENTERPRISE_RE.search(q):
+        return "self_contained"
+    if _FOLLOWUP_NEBULA_RE.search(q):
+        return "self_contained"
+    # Config-driven identifiers (PROJ-001, KB-123, ...).
+    try:
+        if _extract_identifiers(q):
+            return "self_contained"
+    except Exception:
+        pass
+
+    # Cross-cutting: multi-record question. Enrichment would pollute.
+    if _CROSS_CUTTING_RE.search(q) or _WHICH_X_HAD_RE.search(q):
+        return "cross_cutting"
+
+    return "narrow_followup"
+
+
+def _enrich_query_with_history(
+    query: str,
+    recent_messages: Optional[List[Dict[str, Any]]],
+) -> Tuple[str, List[str]]:
+    """
+    DEPRECATED (Brief 3, Phase 3): the /ask pipeline now runs an LLM
+    query rewriter upstream that resolves pronouns, ordinals, ellipsis,
+    and filter swaps — a strict superset of this function's behavior.
+
+    Kept as a no-op for any legacy callers so nothing breaks. Remove in
+    a future cleanup pass once we're sure nothing outside /ask uses it.
+    """
+    return query, []
+
+
+# Brief 4 / Opt 2 helper. Conservative: when any listed aggregation signal
+# appears on one side but not the other, we must re-run the classifier on
+# the rewritten query since the Tier-2 verdict (customer/priority/sla/op)
+# may have flipped. A mismatch on any signal returns True.
+_AGGREGATION_FLIP_SIGNALS = (
+    "all", "how many", "list", "count", "top", "bottom", "by customer",
+    "total", "missed sla", "p1", "p2", "p3", "p4",
+)
+
+
+def _might_flip_aggregation(original: str, rewritten: str, intent) -> bool:
+    a = (original or "").lower()
+    b = (rewritten or "").lower()
+    for s in _AGGREGATION_FLIP_SIGNALS:
+        if (s in a) != (s in b):
+            return True
+    return False
+
 
 storage = LocalStorageProvider()
 
@@ -365,6 +480,14 @@ async def auth_dependency(
     return None
 
 
+class ClarificationSelection(BaseModel):
+    """Payload sent when user clicks an Interactive Clarifier option (Brief 6)."""
+    clarification_id: str
+    selected_option_id: str
+    free_text: Optional[str] = None
+    model_config = ConfigDict(extra="ignore")
+
+
 class Question(BaseModel):
     q: str = Field(min_length=1, max_length=1000)
     session_id: Optional[str] = None
@@ -376,6 +499,8 @@ class Question(BaseModel):
         default=STAGE_GENERAL,
         description="Conversation stage: 'general' (default), 'tickets' (ticket-only retrieval), or 'docs' (docs flow w/ unresolved escalation)",
     )
+    # Brief 6 — present only when the user clicks a clarification option.
+    clarification_response: Optional[ClarificationSelection] = None
     model_config = ConfigDict(extra="ignore")
 
     @field_validator("q")
@@ -411,6 +536,13 @@ class JobStatus(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
+class ClarificationOptionDTO(BaseModel):
+    """Frontend-facing Interactive Clarifier option (Brief 6)."""
+    id: str
+    label: str
+    model_config = ConfigDict(extra="ignore")
+
+
 class AnswerResponse(BaseModel):
     answer: str
     sources: List[str]
@@ -418,6 +550,11 @@ class AnswerResponse(BaseModel):
     processing_time_ms: Optional[int] = None
     context_stats: Optional[Dict] = None
     session_id: Optional[str] = None
+    # Brief 6 — populated when clarification is needed instead of an answer
+    needs_clarification: Optional[bool] = None
+    clarification_id: Optional[str] = None
+    clarification_options: Optional[List[ClarificationOptionDTO]] = None
+    clarification_context: Optional[str] = None
     model_config = ConfigDict(extra="ignore")
 
 
@@ -446,6 +583,87 @@ class FileInfo(BaseModel):
     job_id: Optional[str] = None
     uploaded_at: str
     owner_id: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Interactive Clarifier (Brief 6) — in-process clarification store
+# ---------------------------------------------------------------------------
+# Maps clarification_id → {session_id, options, created_at}. 10-minute TTL.
+# Good enough for single-instance MVP; move to DB for horizontal scaling.
+_CLARIFICATION_STORE: Dict[str, Dict[str, Any]] = {}
+_CLARIFICATION_STORE_TTL_SECONDS: int = 600
+
+
+def _prune_clarification_store() -> None:
+    """Drop entries older than TTL. Called opportunistically."""
+    now = _time.time()
+    expired = [
+        cid for cid, rec in _CLARIFICATION_STORE.items()
+        if now - rec.get("created_at", 0) > _CLARIFICATION_STORE_TTL_SECONDS
+    ]
+    for cid in expired:
+        _CLARIFICATION_STORE.pop(cid, None)
+
+
+def _store_clarification(
+    *,
+    session_id: str,
+    options: List[Dict[str, Any]],
+    original_query: str,
+) -> str:
+    """Persist a clarification record and return its id."""
+    _prune_clarification_store()
+    clarification_id = uuid.uuid4().hex
+    _CLARIFICATION_STORE[clarification_id] = {
+        "session_id": session_id,
+        "options": [
+            {
+                "id": o.get("id"),
+                "label": o.get("label"),
+                "refined_query": o.get("refined_query") or "",
+                "record_ref": o.get("record_ref"),
+            }
+            for o in options
+        ],
+        "original_query": original_query,
+        "created_at": _time.time(),
+    }
+    return clarification_id
+
+
+def _expand_clarification_selection(
+    *,
+    session_id: str,
+    selection: ClarificationSelection,
+    fallback_query: str,
+) -> str:
+    """
+    Look up the stored clarification record and return the refined_query
+    for the selected option. Falls back to fallback_query on any problem
+    (expired, missing, wrong session).
+    """
+    _prune_clarification_store()
+    rec = _CLARIFICATION_STORE.get(selection.clarification_id)
+    if not rec:
+        logger.info(
+            "[interactive_clarifier] selection: clarification_id %s expired/missing",
+            selection.clarification_id,
+        )
+        return fallback_query
+    if rec.get("session_id") != session_id:
+        logger.info("[interactive_clarifier] selection: session mismatch")
+        return fallback_query
+
+    # opt_other with free_text → use the free text directly
+    if selection.selected_option_id == "opt_other":
+        return (selection.free_text or "").strip() or fallback_query
+
+    for opt in rec.get("options", []):
+        if opt.get("id") == selection.selected_option_id:
+            refined = (opt.get("refined_query") or "").strip()
+            return refined or fallback_query
+
+    return fallback_query
 
 
 def safe_embed(text: str) -> Optional[List[float]]:
@@ -620,6 +838,17 @@ def rerank_chunks(
     top_k: int = 6,
 ) -> List[Tuple[str, str, Dict, float]]:
     if not chunks or len(chunks) <= 1:
+        return chunks[:top_k]
+    # Brief 4 / Opt 4: skip the Mistral call entirely when the candidate
+    # set is below the configured minimum — nothing to re-order.
+    if (
+        getattr(settings, "SKIP_RERANK_ON_TINY_RESULTS_ENABLED", False)
+        and len(chunks) < int(getattr(settings, "RERANK_MIN_CHUNKS", 3))
+    ):
+        logger.info(
+            "[rerank] skipped (api.rerank_chunks) — only %d chunks (threshold=%d)",
+            len(chunks), int(settings.RERANK_MIN_CHUNKS),
+        )
         return chunks[:top_k]
 
     candidates = chunks[: min(len(chunks), 12)]
@@ -1005,7 +1234,8 @@ async def index_file_job(
         # ── Phase 1: Parse + contextual enrichment (Haiku LLM calls) ──
         t_parse_start = _time.perf_counter()
 
-        processed = process_document(
+        processed = await asyncio.to_thread(
+            process_document,
             local_path=local_path,
             filename=filename,
             file_type=file_type,
@@ -1048,22 +1278,26 @@ async def index_file_job(
             embed_text = row.get("contextualized_content") or row["content"]
             embed_inputs.append((idx, row, embed_text))
 
-        embeddings_map: Dict[int, List[float]] = {}
         embed_workers = min(settings.EMBED_CONCURRENCY, max(1, total_chunks))
 
-        with ThreadPoolExecutor(max_workers=embed_workers) as executor:
-            future_to_idx = {
-                executor.submit(safe_embed, text): idx
-                for idx, _row, text in embed_inputs
-            }
-            for future in as_completed(future_to_idx):
-                idx = future_to_idx[future]
-                try:
-                    emb = future.result()
-                    if emb:
-                        embeddings_map[idx] = emb
-                except Exception:
-                    pass
+        def _run_embeddings() -> Dict[int, List[float]]:
+            emb_map: Dict[int, List[float]] = {}
+            with ThreadPoolExecutor(max_workers=embed_workers) as executor:
+                future_to_idx = {
+                    executor.submit(safe_embed, text): idx
+                    for idx, _row, text in embed_inputs
+                }
+                for future in as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    try:
+                        emb = future.result()
+                        if emb:
+                            emb_map[idx] = emb
+                    except Exception:
+                        pass
+            return emb_map
+
+        embeddings_map: Dict[int, List[float]] = await asyncio.to_thread(_run_embeddings)
 
         t_embed_end = _time.perf_counter()
         logger.info(
@@ -1110,7 +1344,8 @@ async def index_file_job(
         # ── Phase 4: DB insert ──
         t_db_start = _time.perf_counter()
 
-        inserted = insert_document_and_chunks(
+        inserted = await asyncio.to_thread(
+            insert_document_and_chunks,
             document_id=file_id,
             filename=filename,
             fingerprint=file_hash,
@@ -1133,8 +1368,10 @@ async def index_file_job(
         t_bm25_start = _time.perf_counter()
 
         if bm25 and inserted["status"] == "inserted" and bm25_ids:
-            bm25.remove_documents_by_file_id(file_id)
-            bm25.add_documents_batch(bm25_ids, bm25_docs, bm25_metas)
+            def _update_bm25() -> None:
+                bm25.remove_documents_by_file_id(file_id)
+                bm25.add_documents_batch(bm25_ids, bm25_docs, bm25_metas)
+            await asyncio.to_thread(_update_bm25)
 
         t_bm25_end = _time.perf_counter()
 
@@ -1475,11 +1712,21 @@ async def delete_file(file_id: str, user_id: Optional[str] = Depends(auth_depend
     if bm25:
         bm25.remove_documents_by_file_id(file_id)
 
+    # Brief 5 / Part 1 — wipe cached answers sourced from this file so
+    # stale content doesn't keep serving after delete.
+    semantic_rows_invalidated = 0
+    try:
+        from backend.services.semantic_cache import invalidate_by_source_file
+        semantic_rows_invalidated = invalidate_by_source_file(file_id)
+    except Exception as _sem_exc:
+        logger.warning("[semantic_cache] invalidate_by_source_file wrapper failed: %s", _sem_exc)
+
     return {
         "status": "deleted",
         "file_id": file_id,
         "filename": files[file_id]["name"],
         "deleted_chunks": deleted_chunks,
+        "semantic_cache_invalidated": semantic_rows_invalidated,
     }
 
 
@@ -1533,25 +1780,50 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         owner_id=owner_id,
     )
 
-    # ── Trivial input short-circuit (greetings / thanks / ack / bye) ──
-    trivial = detect_trivial(req.q)
-    if trivial.matched:
+    # ── Interactive Clarifier — expand refined-query follow-ups ──
+    if req.clarification_response is not None:
+        try:
+            expanded_q = _expand_clarification_selection(
+                session_id=session_id,
+                selection=req.clarification_response,
+                fallback_query=req.q,
+            )
+            if expanded_q and expanded_q.strip() != req.q.strip():
+                logger.info(
+                    "[interactive_clarifier] expanded selection %s -> %r",
+                    req.clarification_response.selected_option_id, expanded_q[:120],
+                )
+                req = req.model_copy(update={"q": expanded_q, "clarification_response": None})
+        except Exception as _clarify_exc:
+            logger.warning(
+                "[interactive_clarifier] selection expansion failed (%s) - using raw q",
+                _clarify_exc,
+            )
+
+    # ── Trivial input short-circuit (greetings / thanks / ack / bye / small-talk) ──
+    trivial = match_trivial_response(req.q)
+    if trivial is not None:
+        trivial_category, trivial_response_text = trivial
+        logger.info(
+            "[trivial] category=%s query=%r — zero-LLM response",
+            trivial_category, req.q[:80],
+        )
         save_message_to_session(
             session_id=session_id,
             role="assistant",
-            content=trivial.canned_response,
+            content=trivial_response_text,
             owner_id=owner_id,
             sources={"docs": []},
         )
         return AnswerResponse(
-            answer=trivial.canned_response,
+            answer=trivial_response_text,
             sources=[],
             confidence=1.0,
             processing_time_ms=int((time.perf_counter() - start) * 1000),
             session_id=session_id,
             context_stats={
                 "trivial_short_circuit": True,
-                "trivial_kind": trivial.kind,
+                "trivial_category": trivial_category,
                 "cache_hit": False,
             },
         )
@@ -1586,11 +1858,167 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             },
         )
 
+    # ── Brief 5 / Part 3 — 3-layer input guardrails (injection/secret/PII) ──
+    # Runs after the lightweight regex input_guard above so we preserve the
+    # existing canned-rejection path for legacy patterns, then applies the
+    # deeper BLOCK/SCRUB verdicts from the new guardrail service.
+    _pii_scrubbed_query: Optional[str] = None
+    _pii_scrub_matches: List[str] = []
+    if settings.INPUT_GUARDRAILS_ENABLED:
+        try:
+            from backend.services.input_guardrails import (
+                check_input as _guardrail_check,
+                GuardrailVerdict as _GV,
+                safe_rejection_message as _safe_reject,
+            )
+            _guard = _guardrail_check(req.q)
+        except Exception as _gr_exc:
+            logger.warning("[guardrail] wrapper raised (%s) — failing open", _gr_exc)
+            _guard = None
+
+        if _guard is not None and _guard.verdict == _GV.BLOCK:
+            _central = bool(getattr(_guard, "scrub_invalidates_query", False))
+            if _central:
+                logger.info(
+                    "[guardrail] block (pii, central): patterns=%s reason=%s",
+                    _guard.matched_patterns, _guard.reason,
+                )
+            else:
+                logger.info(
+                    "[guardrail] blocked query: category=%s layer=%s reason=%s",
+                    _guard.category, _guard.layer, _guard.reason,
+                )
+            _block_msg = _safe_reject(_guard.category, guard=_guard)
+            save_message_to_session(
+                session_id=session_id,
+                role="assistant",
+                content=_block_msg,
+                owner_id=owner_id,
+                sources={"docs": []},
+            )
+            return AnswerResponse(
+                answer=_block_msg,
+                sources=[],
+                confidence=1.0,
+                processing_time_ms=int((time.perf_counter() - start) * 1000),
+                session_id=session_id,
+                context_stats={
+                    "guardrail_blocked": True,
+                    "guardrail_category": _guard.category,
+                    "guardrail_layer": _guard.layer,
+                    "guardrail_reason": _guard.reason,
+                    "model_used": "guardrail_block",
+                    "cache_hit": False,
+                },
+            )
+        if _guard is not None and _guard.verdict == _GV.SCRUB:
+            _pii_scrubbed_query = _guard.scrubbed_query
+            _pii_scrub_matches = list(_guard.matched_patterns or [])
+            logger.info(
+                "[guardrail] query scrubbed: removed=%s",
+                _pii_scrub_matches,
+            )
+
+    # ── Brief 3: same-session query rewriter ──
+    # Resolves pronouns, ordinals, ellipsis, and filter swaps against
+    # the last few turns BEFORE aggregation detect / retrieval run. Every
+    # downstream stage consumes `effective_query`. The session record still
+    # stores req.q verbatim so the UI continues to render the user's words.
+    #
+    # Brief 4 / Opt 2: when PARALLEL_REWRITE_AND_CLASSIFY_ENABLED, the
+    # rewriter and the aggregation classifier run concurrently on req.q.
+    # If the rewrite ends up changing an aggregation-significant signal
+    # (customer, priority, sla, "how many"/"list"/"all", etc.), we
+    # re-run the classifier synchronously on the rewritten query so the
+    # downstream fast-path stays correct.
+    # Brief 5 / Part 3 — pipeline runs on the PII-scrubbed text when the
+    # guardrail returned SCRUB; req.q is preserved for session display and
+    # auditing. Everything downstream (rewriter, aggregation, retrieval)
+    # sees _guarded_q so the scrubbed tokens never reach downstream LLMs.
+    _guarded_q = _pii_scrubbed_query if _pii_scrubbed_query is not None else req.q
+
+    recent_msgs_all = get_recent_session_messages(session_id, owner_id)
+    _parallel_agg_intent = None  # populated only on the parallel path
+    _parallel_path_used = False
+    _triage_result = None  # Brief 4 / Opt 3
+    if (
+        settings.QUERY_REWRITER_ENABLED
+        and getattr(settings, "PARALLEL_REWRITE_AND_CLASSIFY_ENABLED", False)
+    ):
+        _parallel_path_used = True
+        _par_skip_agg = bool(re.search(r"\bINC-\d+\b", _guarded_q, re.IGNORECASE))
+        _triage_on = bool(getattr(settings, "MERGED_TRIAGE_ENABLED", False))
+        _workers = 2 + (1 if _triage_on else 0)
+        try:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=_workers) as _pool:
+                _rw_fut = _pool.submit(
+                    rewrite_query, _guarded_q, recent_msgs_all
+                )
+                _ag_fut = (
+                    _pool.submit(detect_aggregation_intent_v2, _guarded_q)
+                    if not _par_skip_agg else None
+                )
+                _tr_fut = (
+                    _pool.submit(classify_triage, _guarded_q) if _triage_on else None
+                )
+                rewrite = _rw_fut.result(timeout=5.0)
+                _parallel_agg_intent = (
+                    _ag_fut.result(timeout=5.0) if _ag_fut is not None else None
+                )
+                if _tr_fut is not None:
+                    try:
+                        _triage_result = _tr_fut.result(timeout=5.0)
+                    except Exception as _tr_exc:
+                        logger.warning("[triage] future error: %s", _tr_exc)
+                        _triage_result = None
+        except Exception as _parallel_exc:
+            logger.warning(
+                "[parallel] fallback to sequential (%s: %s)",
+                type(_parallel_exc).__name__, _parallel_exc,
+            )
+            _parallel_path_used = False
+            rewrite = rewrite_query(_guarded_q, recent_messages=recent_msgs_all)
+            _parallel_agg_intent = None
+            _triage_result = None
+
+        effective_query = rewrite.rewritten_query
+        rewrite_reason = rewrite.reason
+        rewrite_confidence = rewrite.confidence
+        rewrite_applied = rewrite.was_rewritten
+
+        # Reconciliation: if the rewrite changed an aggregation signal, the
+        # classifier verdict computed against req.q may be stale. Re-run.
+        if (
+            _parallel_path_used
+            and rewrite_applied
+            and _might_flip_aggregation(_guarded_q, effective_query, _parallel_agg_intent)
+        ):
+            logger.info(
+                "[parallel] rewrite invalidated classifier verdict — re-classifying on %r",
+                effective_query[:120],
+            )
+            _parallel_agg_intent = (
+                detect_aggregation_intent_v2(effective_query)
+                if not re.search(r"\bINC-\d+\b", effective_query, re.IGNORECASE)
+                else None
+            )
+    elif settings.QUERY_REWRITER_ENABLED:
+        rewrite = rewrite_query(_guarded_q, recent_messages=recent_msgs_all)
+        effective_query = rewrite.rewritten_query
+        rewrite_reason = rewrite.reason
+        rewrite_confidence = rewrite.confidence
+        rewrite_applied = rewrite.was_rewritten
+    else:
+        effective_query = _guarded_q
+        rewrite_reason = "disabled"
+        rewrite_confidence = 0.0
+        rewrite_applied = False
+
     active_file_ids = _get_active_indexed_file_ids(user_id)
 
     # ── Answer cache lookup (fail-safe: any error returns miss) ──
     cache_lookup = ANSWER_CACHE.get(
-        query=req.q,
+        query=effective_query,
         owner_id=owner_id,
         active_file_ids=active_file_ids or [],
     )
@@ -1615,6 +2043,48 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             context_stats=stats,
         )
 
+    # ── Brief 5 / Part 1 — Semantic answer cache lookup ──
+    # Runs AFTER exact-match miss, BEFORE aggregation/retrieval/LLM spend.
+    # Fail-safe: any error returns None (treated as miss).
+    if settings.SEMANTIC_CACHE_ENABLED and active_file_ids:
+        try:
+            from backend.services.semantic_cache import lookup as _sem_lookup
+            _sem_hit = _sem_lookup(effective_query, active_file_ids=active_file_ids)
+        except Exception as _sem_exc:
+            logger.warning("[semantic_cache] lookup wrapper raised: %s", _sem_exc)
+            _sem_hit = None
+        if _sem_hit is not None:
+            logger.info(
+                "[semantic_cache] serving cached answer (sim=%.3f, hit_count=%d, id=%s)",
+                _sem_hit.similarity, _sem_hit.hit_count, _sem_hit.cache_id,
+            )
+            _sem_sources = _sem_hit.answer_metadata.get("sources", []) or []
+            save_message_to_session(
+                session_id=session_id,
+                role="assistant",
+                content=_sem_hit.answer_text,
+                owner_id=owner_id,
+                sources={"docs": _sem_sources},
+            )
+            return AnswerResponse(
+                answer=_sem_hit.answer_text,
+                sources=_sem_sources,
+                confidence=float(_sem_hit.answer_metadata.get("confidence", 0.95)),
+                processing_time_ms=int((time.perf_counter() - start) * 1000),
+                session_id=session_id,
+                context_stats={
+                    "semantic_cache_hit": True,
+                    "semantic_cache_id": _sem_hit.cache_id,
+                    "semantic_cache_similarity": round(_sem_hit.similarity, 4),
+                    "semantic_cache_hit_count": _sem_hit.hit_count,
+                    "semantic_cached_query": _sem_hit.cached_query,
+                    "model_used": "semantic_cache",
+                    "cache_hit": False,
+                    "original_query": req.q,
+                    "effective_query": effective_query,
+                },
+            )
+
     if not active_file_ids:
         answer = "No indexed files are currently available. Please upload a document first."
         save_message_to_session(
@@ -1632,6 +2102,65 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             session_id=session_id,
            )
 
+    # ── Fix 6: SQL aggregation fast-path ──
+    # "How many Nebula-Corp tickets?" / "Which tickets missed SLA?" are set
+    # operations, not semantic search. If the query parses as an aggregation
+    # AND at least one ticket is in scope, answer directly from JSONB — no
+    # embeddings, no LLM. Falls through to full RAG when the detector misses
+    # or the SQL returns nothing.
+    # Goal 4: skip aggregation when the query names a specific INC-\d+ ticket —
+    # those belong to retrieval / ticket_id_exact, never to bulk aggregation.
+    if _parallel_path_used:
+        # Reuse the classifier verdict produced concurrently with the rewriter.
+        # If effective_query mentions a specific INC-\d+, drop the verdict so
+        # identifier_exact retrieval handles it (matches sequential behavior).
+        if re.search(r"\bINC-\d+\b", effective_query, re.IGNORECASE):
+            _agg_intent = None
+        else:
+            _agg_intent = _parallel_agg_intent
+    else:
+        _agg_intent = (
+            detect_aggregation_intent_v2(effective_query)
+            if not re.search(r"\bINC-\d+\b", effective_query, re.IGNORECASE)
+            else None
+        )
+    if _agg_intent:
+        _ticket_ids_in_scope = {
+            f["id"] for f in list_active_files_all()
+            if f.get("id") in active_file_ids
+            and str(f.get("file_type", "")).lower() in {"ticket", "tickets", "incident"}
+        }
+        if _ticket_ids_in_scope:
+            _agg_result = run_aggregation(_agg_intent, owner_id, _ticket_ids_in_scope)
+            if _agg_result.count > 0:
+                logger.info("[aggregation] SQL fast-path: %d results", _agg_result.count)
+                save_message_to_session(
+                    session_id=session_id,
+                    role="assistant",
+                    content=_agg_result.prose_summary,
+                    owner_id=owner_id,
+                    sources={"docs": []},
+                )
+                return AnswerResponse(
+                    answer=_agg_result.prose_summary,
+                    sources=[],
+                    confidence=1.0,
+                    processing_time_ms=int((time.perf_counter() - start) * 1000),
+                    session_id=session_id,
+                    context_stats={
+                        "aggregation_fast_path": True,
+                        "aggregation_operation": _agg_intent.operation,
+                        "aggregation_count": _agg_result.count,
+                        "aggregation_filters": _agg_result.filters_applied,
+                        "cache_hit": False,
+                        "original_query": req.q,
+                        "effective_query": effective_query,
+                        "query_rewrite_applied": rewrite_applied,
+                        "query_rewrite_reason": rewrite_reason,
+                        "query_rewrite_confidence": round(rewrite_confidence, 3),
+                    },
+                )
+
     # q_emb = safe_embed(req.q)
     # if not q_emb:
     #     raise HTTPException(500, "Embedding failed")
@@ -1648,24 +2177,35 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     #     if expanded_emb:
     #         q_emb = expanded_emb
     
+    # ── Follow-up enrichment: DEPRECATED by Brief 3 query rewriter. The
+    # rewriter upstream already produces a self-contained effective_query,
+    # so this call is a no-op returning its input. Kept for legacy reasons.
+    _recent_for_followup = recent_msgs_all
+    retrieval_query, _carried_entities = _enrich_query_with_history(
+        effective_query, _recent_for_followup,
+    )
+
     # ── Query Expansion: normalize + resolve abbreviations ──
-    expanded = expand_query(req.q)
+    expanded = expand_query(retrieval_query)
     if expanded.acronyms_found:
         logger.info(
             "Query expansion: '%s' → acronyms=%s",
-            req.q, list(expanded.acronyms_found.keys()),
+            retrieval_query, list(expanded.acronyms_found.keys()),
         )
 
     # Always embed the expanded/normalized text (not raw query)
     # This handles: "toDC" → "to DC", underscores → spaces, acronym expansion
     embed_text = expanded.expanded_text
-    if embed_text.lower() != req.q.lower():
-        logger.info("Embedding normalized query: '%s' (original: '%s')", embed_text, req.q)
+    if embed_text.lower() != retrieval_query.lower():
+        logger.info(
+            "Embedding normalized query: '%s' (original: '%s')",
+            embed_text, retrieval_query,
+        )
 
     q_emb = safe_embed(embed_text)
     if not q_emb:
-        # Fallback: try raw query if expanded text fails
-        q_emb = safe_embed(req.q)
+        # Fallback: try the pre-expansion retrieval query if expanded fails.
+        q_emb = safe_embed(retrieval_query)
     if not q_emb:
         raise HTTPException(500, "Embedding failed")
 
@@ -1679,6 +2219,50 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         bm25_search_fn=bm25.search if bm25 and bm25.size > 0 else None,
         vector_search_fn=pgvector_search,
     )
+
+    # ── Clean "not found" short-circuit when an identifier was asked for
+    # but no such record is indexed. The retrieval layer signals this via
+    # search_mode in {"identifier_not_found", "ticket_id_not_found"}; we
+    # short-circuit here — BEFORE validator, agents, and model routing —
+    # so nothing downstream can override the signal and surface the canned
+    # false-refusal message.
+    if retrieval.stats.get("search_mode") in (
+        "identifier_not_found",
+        "ticket_id_not_found",
+    ):
+        requested_pairs = retrieval.stats.get("requested_identifiers") or []
+        requested = [cid for (cid, _itype) in requested_pairs]
+        if not requested:
+            requested = retrieval.stats.get("requested_ticket_ids") or []
+        if not requested and retrieval.stats.get("ticket_id"):
+            requested = [retrieval.stats["ticket_id"]]
+        ids_str = ", ".join(requested) if requested else "The requested record"
+        answer = (
+            f"{ids_str} was not found in the indexed documents. "
+            "If you expected this record to be available, please upload "
+            "the corresponding data."
+        )
+        save_message_to_session(
+            session_id=session_id,
+            role="assistant",
+            content=answer,
+            owner_id=owner_id,
+            sources={"docs": []},
+        )
+        return AnswerResponse(
+            answer=answer,
+            sources=[],
+            confidence=1.0,
+            processing_time_ms=int((time.perf_counter() - start) * 1000),
+            session_id=session_id,
+            context_stats={
+                "ticket_id_not_found": True,
+                "identifier_not_found": True,
+                "requested_ticket_ids": requested,
+                "cache_hit": False,
+                **retrieval.stats,
+            },
+        )
 
     # ── Fallback: try variant queries if primary retrieval found nothing ──
     # if not retrieval.ranked and len(expanded.variants) > 1:
@@ -1711,7 +2295,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         and (
             not retrieval.ranked
             or not has_sufficient_document_support(
-                req.q, retrieval.ranked,
+                effective_query, retrieval.ranked,
                 expanded_keywords=expanded.expanded_keywords,
             )
         )
@@ -1756,8 +2340,9 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     chunk_limit_applied = _limit.applied
 
     # ── Stage enforcement (filter by stage + track unresolved follow-ups) ──
-    # Intent detected on the raw query; stage filter runs against limited chunks.
-    _pre_intent = detect_intent(req.q)
+    # Intent detected on the effective (rewritten) query so pronoun-style
+    # follow-ups route to the same stage as the resolved subject.
+    _pre_intent = detect_intent(effective_query)
     stage_norm = normalize_stage(req.stage)
     try:
         stage_result = enforce_stage(
@@ -1778,16 +2363,127 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         )
     doc_ranked = stage_result.filtered_chunks
 
+    # ── Interactive Clarifier — post-retrieval, pre-agent-pipeline ──
+    if getattr(settings, "INTERACTIVE_CLARIFIER_ENABLED", False) and doc_ranked:
+        try:
+            from backend.services.interactive_clarifier import try_clarify as _try_clarify
+            _triage_conf = None
+            try:
+                if _triage_result is not None and getattr(_triage_result, "is_valid", False):
+                    _triage_conf = float(getattr(_triage_result, "confidence", 0.0) or 0.0)
+            except Exception:
+                _triage_conf = None
+            _clarify_res = _try_clarify(
+                query=effective_query,
+                ranked_chunks=doc_ranked,
+                triage_confidence=_triage_conf,
+                carried_identifiers=list(_carried_entities or []),
+                session_id=session_id,
+                recent_messages=recent_msgs_all,
+            )
+            if _clarify_res.needs_clarification:
+                _clarif_id = _store_clarification(
+                    session_id=session_id,
+                    options=[
+                        {
+                            "id": o.id,
+                            "label": o.label,
+                            "refined_query": o.refined_query,
+                            "record_ref": o.record_ref,
+                        }
+                        for o in _clarify_res.options
+                    ],
+                    original_query=req.q,
+                )
+                _clarif_dtos = [
+                    ClarificationOptionDTO(
+                        id=o.id,
+                        label=o.label,
+                        refined_query=o.refined_query,
+                        record_ref=o.record_ref,
+                    )
+                    for o in _clarify_res.options
+                ]
+                _clarif_assistant_text = (
+                    _clarify_res.context_summary
+                    or "Can you clarify which of these you meant?"
+                )
+                save_message_to_session(
+                    session_id=session_id,
+                    role="assistant",
+                    content=_clarif_assistant_text,
+                    owner_id=owner_id,
+                    sources={
+                        "docs": [],
+                        "clarification_presented": True,
+                        "clarification_id": _clarif_id,
+                        "ambiguity_score": _clarify_res.ambiguity_score,
+                    },
+                )
+                logger.info(
+                    "[interactive_clarifier] returning clarification_id=%s opts=%d",
+                    _clarif_id, len(_clarif_dtos),
+                )
+                return AnswerResponse(
+                    answer=_clarif_assistant_text,
+                    sources=[],
+                    confidence=0.0,
+                    processing_time_ms=int((time.perf_counter() - start) * 1000),
+                    session_id=session_id,
+                    context_stats={
+                        "clarification_presented": True,
+                        "clarification_id": _clarif_id,
+                        "ambiguity_score": _clarify_res.ambiguity_score,
+                        "cache_hit": False,
+                    },
+                    needs_clarification=True,
+                    clarification_id=_clarif_id,
+                    clarification_options=_clarif_dtos,
+                    clarification_context=_clarify_res.context_summary or None,
+                )
+            else:
+                logger.info(
+                    "[interactive_clarifier] no clarification skip=%s score=%.2f",
+                    _clarify_res.skip_reason or "n/a", _clarify_res.ambiguity_score,
+                )
+        except Exception as _clarify_trigger_exc:
+            logger.warning(
+                "[interactive_clarifier] trigger failed (%s) - continuing normally",
+                _clarify_trigger_exc,
+            )
+
     max_ctx_chars = TOKEN_BUDGET["MAX_LOG_CONTEXT_CHARS"] + TOKEN_BUDGET["MAX_KB_CONTEXT_CHARS"]
+
+    # Brief 4 / Opt 5: compress single identifier_exact chunks down to just
+    # the sections the query asks about. Safe — non-ticket chunks and broad
+    # queries pass through unchanged; only applies when exactly one chunk
+    # came back from the identifier_exact short-circuit.
+    if (
+        getattr(settings, "CONTEXT_COMPRESSION_ENABLED", False)
+        and len(doc_ranked) == 1
+        and retrieval.stats.get("search_mode") == "identifier_exact"
+    ):
+        from backend.retrieval.context_builder import compress_chunk_for_query
+        _cid, _ctext, _cmeta, _cscore = doc_ranked[0]
+        _compressed, _was = compress_chunk_for_query(_ctext, effective_query)
+        if _was:
+            logger.info(
+                "[compress] chunk reduced from %d to %d chars (%d%%) query=%r",
+                len(_ctext), len(_compressed),
+                int(100 * len(_compressed) / max(1, len(_ctext))),
+                effective_query[:60],
+            )
+            doc_ranked = [(_cid, _compressed, _cmeta, _cscore)]
+
     doc_ctx, doc_src = assemble_context(doc_ranked, max_ctx_chars)
 
-    if not doc_ctx or not has_sufficient_document_support(req.q, doc_ranked, expanded_keywords=expanded.expanded_keywords):
+    if not doc_ctx or not has_sufficient_document_support(effective_query, doc_ranked, expanded_keywords=expanded.expanded_keywords):
         # No supporting docs — run the conversational fallback (Clarifier +
         # support-engineer-style reply). Never raises; legacy text on failure.
         from backend.agents.fallback_responder import run_conversational_fallback
-        _fallback_prior = get_recent_session_messages(session_id, owner_id)
+        _fallback_prior = recent_msgs_all
         fb = run_conversational_fallback(
-            query=req.q,
+            query=effective_query,
             source_names=list(retrieval.stats.get("doc_sources", []) or []),
             generate_fn=safe_generate,
             bedrock_client=bedrock,
@@ -1817,16 +2513,37 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         )
 
     retrieval_confidence = min(0.3 + len(doc_ranked) * 0.1, 1.0)
-    recent_msgs = get_recent_session_messages(session_id, owner_id)
+    recent_msgs = recent_msgs_all
 
     # ── Complexity classification (always cheap; no LLM call) ──
     complexity = classify_complexity(
-        query=req.q,
+        query=effective_query,
         ranked_chunks=doc_ranked,
         retrieval_confidence=retrieval_confidence,
         source_count=len(set(doc_src)),
         context_chars=len(doc_ctx),
     )
+
+    # Brief 4 / Opt 3: high-confidence LLM triage overrides complexity tier
+    # (used by resolve_mode below). We keep the heuristic score because it
+    # drives the numeric threshold comparison; the tier is the categorical
+    # gate. Only override when confidence >= 0.7 AND verdicts disagree.
+    if (
+        _triage_result is not None
+        and getattr(_triage_result, "is_valid", False)
+        and _triage_result.confidence >= 0.7
+        and _triage_result.complexity
+        and _triage_result.complexity != complexity.tier
+    ):
+        logger.info(
+            "[triage] overriding complexity tier: heuristic=%s → llm=%s (conf=%.2f)",
+            complexity.tier, _triage_result.complexity, _triage_result.confidence,
+        )
+        complexity.tier = _triage_result.complexity
+        if _triage_result.complexity == "complex":
+            complexity.score = max(complexity.score, settings.AGENT_COMPLEXITY_THRESHOLD)
+        elif _triage_result.complexity == "simple":
+            complexity.score = min(complexity.score, settings.COMPLEXITY_SIMPLE_THRESHOLD)
 
     # Placeholder routing slot filled either by hybrid call or agent path
     routing = None
@@ -1834,7 +2551,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     requested_mode = req.mode or MODE_AUTO
 
     # ── Intent detection (additive; never overrides an explicit mode) ──
-    intent_result = detect_intent(req.q)
+    intent_result = detect_intent(effective_query)
     effective_mode = requested_mode
     intent_upgrade = False
     if (
@@ -1856,7 +2573,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
 
     should_agent, agent_reason = resolve_mode(
         mode=effective_mode,
-        query=req.q,
+        query=effective_query,
         complexity_score=complexity.score,
         complexity_tier=complexity.tier,
         source_count=len(set(doc_src)),
@@ -1890,7 +2607,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             step_retriever_fn = None
 
         agent_result = run_agent_pipeline(
-            query=req.q,
+            query=effective_query,
             doc_context=doc_ctx,
             ranked_chunks=doc_ranked,
             source_names=doc_src,
@@ -1898,6 +2615,8 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             bedrock_client=bedrock,
             step_retriever_fn=step_retriever_fn,
             prior_messages=recent_msgs,
+            stage=stage_result.stage,
+            unresolved_count=stage_result.unresolved_count,
         )
         raw_answer = agent_result.answer
 
@@ -1905,7 +2624,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         if not (raw_answer or "").strip():
             logger.warning("Agent pipeline produced empty answer — falling back to hybrid")
             routing = route_and_generate(
-                query=req.q,
+                query=effective_query,
                 doc_context=doc_ctx,
                 ranked_chunks=doc_ranked,
                 source_names=doc_src,
@@ -1917,7 +2636,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             raw_answer = routing.answer
     else:
         routing = route_and_generate(
-            query=req.q,
+            query=effective_query,
             doc_context=doc_ctx,
             ranked_chunks=doc_ranked,
             source_names=doc_src,
@@ -1934,16 +2653,53 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         routing.model_used if routing is not None
         else ("agents (sonnet+haiku)" if agent_result is not None else "unknown")
     )
+
+    # Goal 2.3: bound retry that re-invokes hybrid generation with a stronger
+    # extraction directive. Validator calls this once when it detects a false
+    # refusal on deterministic retrieval modes.
+    def _retry_generate(stronger_prompt: bool = False) -> str:
+        if stronger_prompt:
+            retry_query = (
+                "The answer IS in the documents below. Read them carefully "
+                "and extract it. Do not hedge or refuse.\n\n"
+                f"{effective_query}"
+            )
+        else:
+            retry_query = effective_query
+        r = route_and_generate(
+            query=retry_query,
+            doc_context=doc_ctx,
+            ranked_chunks=doc_ranked,
+            source_names=doc_src,
+            retrieval_confidence=retrieval_confidence,
+            recent_messages=recent_msgs,
+            generate_fn=safe_generate,
+            bedrock_client=bedrock,
+        )
+        return r.answer
+
     validation = validate_answer(
-        query=req.q,
+        query=effective_query,
         answer=raw_answer,
         doc_context=doc_ctx,
         ranked_chunks=doc_ranked,
         source_names=doc_src,
         model_used=_model_used_label,
+        retrieval_stats=retrieval.stats,
+        retry_fn=_retry_generate,
     )
     answer = validation.answer
     confidence = validation.confidence
+
+    # Brief 5 / Part 3 — Layer 3 output sanitizer (never blocks; only scrubs).
+    output_sanitizer_issues: List[str] = []
+    if settings.OUTPUT_SANITIZER_ENABLED:
+        try:
+            from backend.services.output_sanitizer import sanitize_output
+            answer, output_sanitizer_issues = sanitize_output(answer, effective_query)
+        except Exception as _san_exc:
+            logger.warning("[sanitizer] wrapper raised (%s)", _san_exc)
+            output_sanitizer_issues = []
 
     # ── Evidence check (metadata only; never mutates the answer) ──
     try:
@@ -2006,6 +2762,11 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         "validation_ms": validation.validation_ms,
         "version_warning": bool(validation.version_warning),
         "trivial_short_circuit": False,
+        "original_query": req.q,
+        "effective_query": effective_query,
+        "query_rewrite_applied": rewrite_applied,
+        "query_rewrite_reason": rewrite_reason,
+        "query_rewrite_confidence": round(rewrite_confidence, 3),
         "chunk_original_count": chunk_original_count,
         "chunk_limited_count": chunk_limited_count,
         "chunk_limit_applied": chunk_limit_applied,
@@ -2026,12 +2787,16 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         "evidence_answer_chars": evidence.answer_chars,
         "evidence_overlap_tokens": evidence.overlap_tokens,
         "evidence_source_count": evidence.source_count,
+        "guardrail_blocked": False,
+        "guardrail_pii_scrubbed": bool(_pii_scrubbed_query is not None),
+        "guardrail_pii_matches": _pii_scrub_matches,
+        "output_sanitizer_issues": output_sanitizer_issues,
     }
 
     # ── Store in answer cache (fail-safe; never blocks response) ──
     try:
         stored = ANSWER_CACHE.put(
-            query=req.q,
+            query=effective_query,
             owner_id=owner_id,
             active_file_ids=active_file_ids,
             payload={
@@ -2045,6 +2810,63 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     except Exception as _cache_exc:
         logger.warning("Answer cache put wrapper failed: %s", _cache_exc)
         context_stats["cache_stored"] = False
+
+    # ── Brief 5 / Part 1 — Semantic answer cache put ──
+    # Layer 1 gating (confidence >= 0.75, grounding passed, zero fabrications)
+    # is enforced inside semantic_cache.put. Fail-safe: any error logs and
+    # skips without blocking the response.
+    context_stats["semantic_cache_id"] = None
+    context_stats["semantic_cache_stored"] = False
+    if settings.SEMANTIC_CACHE_ENABLED and validation.passed:
+        try:
+            from backend.services.semantic_cache import put as _sem_put
+            _grounding_passed = bool(
+                validation.grounding_detail.passed
+            ) if validation.grounding_detail else True
+            _grounding_score = float(
+                validation.grounding_detail.grounding_score
+            ) if validation.grounding_detail else float(confidence or 0.0)
+            _fabrications = (
+                len(validation.grounding_detail.fabrications)
+                if (validation.grounding_detail and validation.grounding_detail.fabrications)
+                else 0
+            )
+            # Map source names back to file_ids (for invalidate_by_source_file)
+            try:
+                _name_to_id = {
+                    f.get("name"): f.get("id")
+                    for f in list_active_files_all()
+                    if f.get("id") and f.get("name")
+                }
+                _source_file_ids = [
+                    _name_to_id[name]
+                    for name in (doc_src or [])
+                    if isinstance(name, str) and name in _name_to_id
+                ]
+            except Exception:
+                _source_file_ids = []
+            _sem_cache_id = _sem_put(
+                query=effective_query,
+                answer_text=answer,
+                answer_metadata={
+                    "sources": doc_src,
+                    "confidence": confidence,
+                    "model_used": _model_used_label,
+                    "grounding_score": _grounding_score,
+                },
+                source_file_ids=_source_file_ids,
+                active_file_ids=active_file_ids,
+                confidence=float(confidence or 0.0),
+                grounding_score=_grounding_score,
+                grounding_passed=_grounding_passed,
+                fabrications=_fabrications,
+                model_used=_model_used_label,
+                origin_owner_id=owner_id or "",
+            )
+            context_stats["semantic_cache_id"] = _sem_cache_id
+            context_stats["semantic_cache_stored"] = bool(_sem_cache_id)
+        except Exception as _sem_exc:
+            logger.warning("Semantic cache put wrapper failed: %s", _sem_exc)
 
     return AnswerResponse(
         answer=answer,
@@ -2070,6 +2892,7 @@ class FeedbackStateRequest(BaseModel):
     session_id: str
     message_index: int
     feedback_type: str = Field(pattern="^(like|dislike|none)$")
+    semantic_cache_id: Optional[str] = None
     model_config = ConfigDict(extra="ignore")
 
 
@@ -2083,7 +2906,25 @@ async def save_feedback_state(
     ok = update_message_feedback(req.session_id, owner, req.message_index, feedback_value)
     if not ok:
         raise HTTPException(404, "Session not found")
-    return {"status": "saved", "feedback_type": req.feedback_type}
+
+    # Brief 5 / Part 1 — Layer 3 feedback-driven invalidation.
+    # A dislike on a semantic-cache-served answer wipes that row so the next
+    # user gets a fresh pipeline run and the answer is re-cached after validation.
+    invalidated = False
+    if req.feedback_type == "dislike" and req.semantic_cache_id:
+        try:
+            from backend.services.semantic_cache import invalidate as _sem_invalidate
+            invalidated = _sem_invalidate(
+                req.semantic_cache_id, reason="user_dislike"
+            )
+        except Exception as _inv_exc:
+            logger.warning("[semantic_cache] invalidate wrapper failed: %s", _inv_exc)
+
+    return {
+        "status": "saved",
+        "feedback_type": req.feedback_type,
+        "semantic_cache_invalidated": invalidated,
+    }
 
 
 @app.post("/feedback/submit")

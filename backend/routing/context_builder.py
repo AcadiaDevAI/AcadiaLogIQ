@@ -18,16 +18,11 @@ logger = logging.getLogger("acadia-log-iq")
 # ---------------------------------------------------------------------------
 # Grounding rules shared across all models
 # ---------------------------------------------------------------------------
-_GROUNDING_RULES = """IMPORTANT RULES:
-- The DOCUMENTS below have been pre-selected as relevant to the user's question. Extract and present the answer from them.
-- Look for EXACT matches first: the user's query terms (including underscore_separated_names, alert signatures, and technical abbreviations) often appear verbatim in the documents as headings, scenario names, or alert signature fields.
-- Answer ONLY from the DOCUMENTS context below. Do NOT use outside knowledge.
-- Do NOT infer business steps unless they are explicitly written in the documents.
-- Do NOT invent steps, contacts, URLs, phone numbers, policies, or procedures.
-- If the documents contain relevant information, provide ALL of it — probable causes, corrective actions, severity, incident summary — everything the document says about the topic.
-- If the answer is mainly from one document, rely only on that document.
-- Every answer MUST be in bullet-point format.
-- ONLY if the documents contain absolutely NO relevant information at all, reply: "I could not find supporting information for that question in the currently uploaded files." This should be rare since the documents were pre-selected for relevance."""
+_GROUNDING_RULES = """Answering guidance:
+- The DOCUMENTS below were selected because they are relevant to the user's question. Extract and explain the answer naturally.
+- If the answer is in the documents, give it confidently in your own words. Do not hedge.
+- Do NOT use phrases like "insufficient evidence", "I cannot extract", "the documents do not explicitly state" when the information is actually present — just read carefully and answer.
+- Only say "I could not find this in the uploaded documents" if after genuinely reading the context you see that the specific answer is absent. This should be rare since the documents were pre-filtered for relevance."""
 
 
 # ---------------------------------------------------------------------------

@@ -139,8 +139,17 @@ export const getUploadStatus = (jobId) => api.get(`/upload_status/${jobId}`, { t
 export const listFiles = () => api.get("/files");
 export const deleteFile = (fileId) => api.delete(`/files/${fileId}`);
 
-export const askQuestion = (question, sessionId) =>
-  api.post("/ask", { q: question, session_id: sessionId || null });
+export const askQuestion = (question, sessionId, clarificationResponse = null) => {
+  const payload = { q: question, session_id: sessionId || null };
+  if (clarificationResponse) {
+    payload.clarification_response = {
+      clarification_id: clarificationResponse.clarificationId,
+      selected_option_id: clarificationResponse.selectedOptionId,
+      free_text: clarificationResponse.freeText || null,
+    };
+  }
+  return api.post("/ask", payload);
+};
 
 export const listSessions = () => api.get("/chat/sessions");
 export const getSession = (sessionId) => api.get(`/chat/sessions/${sessionId}`);
@@ -150,8 +159,13 @@ export const deleteAllSessions = () => api.delete("/chat/sessions");
 export const resetAll = () => api.post("/reset", {}, { timeout: 30000 });
 
 // ─── Feedback ─────────────────────────────────────────────
-export const saveFeedbackState = (sessionId, messageIndex, feedbackType) =>
-  api.post("/feedback/state", { session_id: sessionId, message_index: messageIndex, feedback_type: feedbackType });
+export const saveFeedbackState = (sessionId, messageIndex, feedbackType, semanticCacheId = null) =>
+  api.post("/feedback/state", {
+    session_id: sessionId,
+    message_index: messageIndex,
+    feedback_type: feedbackType,
+    semantic_cache_id: semanticCacheId,
+  });
 
 export const submitFeedback = (data) => api.post("/feedback/submit", data);
 

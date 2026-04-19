@@ -17,6 +17,7 @@ import {
 } from "@ant-design/icons";
 import { useChat } from "../hooks/ChatContext";
 import { saveFeedbackState, submitFeedback } from "../services/api";
+import ClarificationOptions from "./ClarificationOptions";
 
 const { TextArea } = Input;
 
@@ -29,7 +30,7 @@ const { TextArea } = Input;
  *   Both dialogs: user types optional message (up to 1200 chars) → sent via SES email
  *   Like/dislike state is persisted in backend session → survives refresh/sign-out
  */
-export default function ChatMessage({ msg, index, sessionId }) {
+export default function ChatMessage({ msg, index, sessionId, onClarificationSelect, clarificationDisabled }) {
   const { dispatch } = useChat();
   const [copied, setCopied] = useState(false);
 
@@ -59,7 +60,12 @@ export default function ChatMessage({ msg, index, sessionId }) {
 
     // Persist to backend (so it survives refresh/sign-out)
     if (sessionId) {
-      saveFeedbackState(sessionId, index, "like").catch(() => {});
+      saveFeedbackState(
+        sessionId,
+        index,
+        "like",
+        msg.semanticCacheId || null,
+      ).catch(() => {});
     }
 
     // Open positive feedback dialog
@@ -75,7 +81,14 @@ export default function ChatMessage({ msg, index, sessionId }) {
     dispatch({ type: "SET_MESSAGE_FEEDBACK", payload: { index, feedback: "dislike" } });
 
     if (sessionId) {
-      saveFeedbackState(sessionId, index, "dislike").catch(() => {});
+      // Pass the semantic cache id (if any) so the backend can invalidate
+      // that specific cached row — protecting every subsequent user.
+      saveFeedbackState(
+        sessionId,
+        index,
+        "dislike",
+        msg.semanticCacheId || null,
+      ).catch(() => {});
     }
 
     // Open negative feedback dialog
@@ -184,6 +197,19 @@ export default function ChatMessage({ msg, index, sessionId }) {
         <div className="markdown-body">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
         </div>
+
+        {!isUser && msg.needsClarification && msg.clarificationOptions && (
+          <ClarificationOptions
+            options={msg.clarificationOptions}
+            selectedId={msg.clarificationSelectedId}
+            disabled={!!clarificationDisabled}
+            onSelect={(optionId, freeText) => {
+              if (typeof onClarificationSelect === "function") {
+                onClarificationSelect(index, optionId, freeText);
+              }
+            }}
+          />
+        )}
 
         {!isUser && allSources.length > 0 && (
           <Collapse

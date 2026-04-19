@@ -124,6 +124,7 @@ def verify_clerk_token(token: str) -> dict:
             token,
             signing_key.key,
             algorithms=["RS256"],
+            leeway=60,  # tolerate up to 60s of clock drift between local machine and Clerk
             options={
                 "verify_exp": True,
                 "verify_iss": False,  # We check issuer manually if configured
@@ -131,12 +132,13 @@ def verify_clerk_token(token: str) -> dict:
             },
         )
     except jwt.ExpiredSignatureError:
+        logger.warning("Clerk: token expired (possible clock drift — check system NTP sync)")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token has expired",
         )
     except jwt.InvalidTokenError as e:
-        logger.warning("Clerk: Token validation failed: %s", e)
+        logger.warning("Clerk: token validation failed (%s: %s)", type(e).__name__, e)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid authentication token",

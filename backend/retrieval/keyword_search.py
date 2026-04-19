@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from sqlalchemy import text, bindparam
 
@@ -17,6 +17,121 @@ from backend.config import settings
 from backend.db.connection import SessionLocal
 
 logger = logging.getLogger("acadia-log-iq")
+
+
+# ---------------------------------------------------------------------------
+# Goal 2 — Schema-agnostic identifier exact-match lookup
+# ---------------------------------------------------------------------------
+def identifier_exact_search(
+    *,
+    identifiers: List[Tuple[str, str]],
+    allowed_file_ids: Optional[Set[str]] = None,
+    n_results: int = 20,
+) -> List[Dict[str, Any]]:
+    """Return chunks whose metadata_json->>'primary_id' matches any of the
+    given canonical identifiers. Same hit-dict shape as `fulltext_search`
+    so the caller can pack results straight into a RetrievalResult.
+
+    `identifiers` is a list of (canonical_id, id_type) tuples produced by
+    retrieval.orchestrator._extract_identifiers. We match on primary_id
+    only — id_type is used by callers for logging/diagnostics.
+
+    COALESCE with incident_number keeps legacy gold-ticket chunks (ingested
+    before Goal 1) matchable without a re-upload.
+
+    Why a dedicated path: exact identifiers shouldn't go through embedding
+    / BM25 (INC-10000 ≈ INC-10035 in cosine space → wrong ticket). One
+    indexed JSONB lookup, ~1ms, deterministic.
+    """
+    ids = [str(cid).strip().upper() for (cid, _itype) in (identifiers or []) if cid]
+    ids = [x for x in ids if x]
+    if not ids:
+        return []
+
+    sql = """
+        SELECT
+            c.id,
+            c.content,
+            c.contextualized_content,
+            c.summary,
+            c.section_heading,
+            c.chunk_type,
+            c.labels_json,
+            c.metadata_json,
+            d.id::text       AS file_id,
+            d.owner_id,
+            d.name           AS source,
+            d.file_type
+        FROM chunks c
+        JOIN documents d          ON d.id = c.document_id
+        JOIN document_versions dv ON dv.id = c.document_version_id
+        WHERE UPPER(COALESCE(c.metadata_json->>'primary_id',
+                             c.metadata_json->>'incident_number')) = ANY(:identifiers)
+          AND d.status = 'active'
+          AND dv.is_active = TRUE
+          AND d.current_version_id = dv.id
+    """
+
+    params: Dict[str, Any] = {
+        "identifiers": ids,
+        "limit": int(n_results),
+    }
+
+    if allowed_file_ids:
+        sql += " AND d.id IN :allowed_ids"
+        params["allowed_ids"] = tuple(allowed_file_ids)
+
+    sql += " LIMIT :limit"
+
+    hits: List[Dict[str, Any]] = []
+    try:
+        with SessionLocal() as db:
+            stmt = text(sql)
+            if allowed_file_ids:
+                stmt = stmt.bindparams(bindparam("allowed_ids", expanding=True))
+            rows = db.execute(stmt, params).mappings().all()
+
+        for row in rows:
+            hits.append({
+                "id": row["id"],
+                "text": row["contextualized_content"] or row["content"],
+                "rank": 1.0,  # all exact matches rank equally
+                "search_type": "identifier_exact",
+                "metadata": {
+                    "file_id": row["file_id"],
+                    "owner_id": row["owner_id"],
+                    "source": row["source"],
+                    "file_type": row["file_type"],
+                    "section_heading": row["section_heading"],
+                    "chunk_type": row["chunk_type"],
+                    "summary": row["summary"],
+                    "labels_json": row["labels_json"] or {},
+                    "metadata_json": row["metadata_json"] or {},
+                },
+            })
+    except Exception as exc:
+        logger.warning("Identifier exact search failed: %s", exc)
+
+    return hits
+
+
+def ticket_id_exact_search(
+    *,
+    incident_numbers: List[str],
+    allowed_file_ids: Optional[Set[str]] = None,
+    n_results: int = 20,
+) -> List[Dict[str, Any]]:
+    """Back-compat alias: ticket-ID lookup delegated to identifier_exact_search."""
+    identifiers = [
+        (str(x).strip().upper(), "ticket_number")
+        for x in (incident_numbers or [])
+        if x
+    ]
+    return identifier_exact_search(
+        identifiers=identifiers,
+        allowed_file_ids=allowed_file_ids,
+        n_results=n_results,
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from backend.config import settings
 
@@ -18,6 +19,83 @@ logger = logging.getLogger("acadia-log-iq")
 
 # Result tuple: (chunk_id, text, metadata, score)
 RankedResult = Tuple[str, str, Dict[str, Any], float]
+
+
+# ---------------------------------------------------------------------------
+# FINAL_CLEANUP Bug 3 — robust reranker response parsing.
+# Mistral occasionally emits `{...}\n{...}` or prose-prefixed JSON, which
+# `json.loads` rejects with "Extra data" or similar. Fusion-order fallback
+# is correct behavior, but we'd rather recover the ranking when we can.
+# Returns None only when every strategy fails — caller falls back to fusion.
+# ---------------------------------------------------------------------------
+def _parse_reranker_response(raw: str) -> Optional[List[Dict[str, Any]]]:
+    """Parse reranker output with fallback strategies.
+
+    Returns a list of {chunk, score} dicts, or None if nothing parses.
+    Handles: direct JSON, markdown-fenced JSON, prose-wrapped JSON,
+    multi-object concatenation.
+    """
+    if not raw or not raw.strip():
+        return None
+
+    def _coerce(parsed: Any) -> Optional[List[Dict[str, Any]]]:
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            for key in ("rankings", "scores", "results"):
+                val = parsed.get(key)
+                if isinstance(val, list):
+                    return val
+            # Single {"chunk":N,"score":M} item — wrap into a list so callers
+            # still get a partial ranking instead of a total fallback.
+            if "chunk" in parsed and "score" in parsed:
+                return [parsed]
+        return None
+
+    # Attempt 1 — direct parse of entire response
+    try:
+        return _coerce(json.loads(raw))
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Attempt 2 — strip markdown fences
+    stripped = re.sub(r"^```(?:json)?\s*", "", raw.strip())
+    stripped = re.sub(r"\s*```\s*$", "", stripped)
+    try:
+        return _coerce(json.loads(stripped))
+    except (json.JSONDecodeError, ValueError):
+        pass
+
+    # Attempt 3 — extract first complete JSON array (bracket-balanced)
+    arr_start = raw.find("[")
+    arr_end = raw.rfind("]")
+    if 0 <= arr_start < arr_end:
+        try:
+            return _coerce(json.loads(raw[arr_start : arr_end + 1]))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Attempt 4 — extract first complete JSON object (one-level nested brace balance)
+    obj_match = re.search(r"\{(?:[^{}]|\{[^{}]*\})*\}", raw, re.DOTALL)
+    if obj_match:
+        try:
+            return _coerce(json.loads(obj_match.group(0)))
+        except (json.JSONDecodeError, ValueError):
+            pass
+
+    # Attempt 5 — multi-object newline-separated; take first parseable
+    for chunk in raw.split("\n\n"):
+        chunk = chunk.strip()
+        if not (chunk.startswith("{") or chunk.startswith("[")):
+            continue
+        try:
+            coerced = _coerce(json.loads(chunk))
+            if coerced is not None:
+                return coerced
+        except (json.JSONDecodeError, ValueError):
+            continue
+
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -83,11 +161,16 @@ class LLMReranker(BaseReranker):
             src = meta.get("source", "?")
             previews.append(f"[{i + 1}] (source: {src}) {preview}")
 
+        # FINAL_CLEANUP Bug 3 — harden the prompt to reduce malformed responses.
+        # The robust parser still catches the edge cases, but this lowers the
+        # failure rate before the parser has to do any work.
         prompt = (
             f"Rate each chunk's relevance to the question (0=irrelevant, 10=perfect match).\n"
             f"Question: {query}\n\n"
             f"Chunks:\n" + "\n".join(previews) + "\n\n"
-            f"Respond ONLY with a JSON array: [{{\"chunk\":1,\"score\":8}}, ...]"
+            f"Respond ONLY with a single valid JSON array. No prose, no commentary, "
+            f"no markdown fences, no multiple objects. Example: "
+            f"[{{\"chunk\":1,\"score\":8}}, {{\"chunk\":2,\"score\":3}}]"
         )
 
         try:
@@ -95,14 +178,25 @@ class LLMReranker(BaseReranker):
             resp = self._generate(prompt, 512)
             raw = resp.strip()
 
-            # Parse the JSON response
-            if "```" in raw:
-                raw = raw.split("```json")[-1].split("```")[0] if "```json" in raw else raw.split("```")[1]
-            start, end = raw.find("["), raw.rfind("]") + 1
-            if start < 0 or end <= start:
-                raise ValueError("No JSON array in reranker response")
-
-            scores = json.loads(raw[start:end])
+            # FINAL_CLEANUP Bug 3 — robust multi-strategy parse. Old path used a
+            # single json.loads and raised "Extra data" on Mistral's multi-object
+            # responses, silently losing the ranking signal.
+            if getattr(settings, "RERANKER_ROBUST_PARSE_ENABLED", True):
+                scores = _parse_reranker_response(raw)
+                if scores is None:
+                    logger.warning(
+                        "[rerank] all parse attempts failed — raw=%r falling back to fusion order",
+                        raw[:200],
+                    )
+                    return pool[:top_k]
+            else:
+                # Legacy path — kept behind the flag for emergency rollback.
+                if "```" in raw:
+                    raw = raw.split("```json")[-1].split("```")[0] if "```json" in raw else raw.split("```")[1]
+                start, end = raw.find("["), raw.rfind("]") + 1
+                if start < 0 or end <= start:
+                    raise ValueError("No JSON array in reranker response")
+                scores = json.loads(raw[start:end])
 
             # --- Blend LLM scores with fusion scores ---
             scored: List[RankedResult] = []

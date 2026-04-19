@@ -8,7 +8,7 @@ export default function ChatInput({ onSend }) {
   const [input, setInput] = useState("");
   const textareaRef = useRef(null);
 
-  const disabled = state.isLoading || state.isUploading;
+  const disabled = state.isLoading;
 
   useEffect(() => {
     if (textareaRef.current) {
@@ -43,9 +43,7 @@ export default function ChatInput({ onSend }) {
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder={
-            state.isUploading ? "Upload in progress..." : state.isLoading ? "Thinking..." : "How can I help you today?"
-          }
+          placeholder={state.isLoading ? "Thinking..." : "How can I help you today?"}
           disabled={disabled}
           rows={1}
           className="flex-1 text-sm resize-none outline-none py-1.5 max-h-40 font-sans disabled:opacity-50"

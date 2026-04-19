@@ -13,7 +13,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from backend.config import settings
 from backend.validation.confidence_scorer import ConfidenceResult, score_confidence
@@ -136,6 +136,8 @@ def validate_answer(
     ranked_chunks: List[Tuple[str, str, Dict[str, Any], float]],
     source_names: List[str],
     model_used: str = "unknown",
+    retrieval_stats: Optional[Dict[str, Any]] = None,
+    retry_fn: Optional[Callable[..., str]] = None,
 ) -> ValidationResult:
     """
     Run the full validation pipeline on a generated answer.
@@ -154,6 +156,21 @@ def validate_answer(
 
     Returns ValidationResult with the final answer, confidence, and details.
     """
+    # Fix 7 (c): a canonical "not found" message must bypass validation.
+    # It's not a model refusal — it's a deterministic response the caller
+    # produced when retrieval signalled no such record. The false-refusal
+    # guard below would otherwise misread it as a failure.
+    if retrieval_stats and retrieval_stats.get("search_mode") in (
+        "identifier_not_found",
+        "ticket_id_not_found",
+    ):
+        return ValidationResult(
+            answer=answer,
+            confidence=1.0,
+            passed=True,
+            was_modified=False,
+        )
+
     if not settings.ENABLE_ANSWER_VALIDATION:
         # Validation disabled — pass through with simple confidence
         return ValidationResult(
@@ -171,16 +188,15 @@ def validate_answer(
     # If the model says "could not find" but retrieval returned strong
     # chunks, the model is incorrectly refusing. Mark it so we can
     # override later.
+    # Goal 2.2: only fire on genuine "I cannot find anything" statements.
+    # Partial-answer hedges ("do not contain specific X, but Y is...") are
+    # acceptable and must not be misclassified as refusals.
     _NOT_FOUND_PHRASES = [
         "could not find supporting information",
         "could not find sufficiently supported",
-        "could not be adequately verified",
-        "could not be fully verified",
-        "do not contain specific",
-        "does not contain specific",
-        "do not contain explicit",
-        "does not contain explicit",
         "not contain the answer",
+        "no relevant information was found",
+        "i was unable to find",
     ]
     answer_lower = answer.lower()
     is_model_refusal = any(phrase in answer_lower for phrase in _NOT_FOUND_PHRASES)
@@ -293,16 +309,56 @@ def validate_answer(
             logger.warning("Validation FAILED (low grounding): %.3f", grounding.grounding_score)
 
     # ==================================================================
-    # Step 3b: False-refusal safety net
+    # Step 3b: False-refusal safety net with retry path
     # ==================================================================
-    # If the model said "not found" but retrieval was strong, the model
-    # incorrectly refused. Mark confidence as LOW so the caller knows
-    # this answer is unreliable. The prompt fixes (system prompt +
-    # grounding rules) should prevent this, but this catches edge cases.
+    # Goal 2.3: when the model hedges despite strong retrieval, give it
+    # one more shot with an explicit "the answer IS in the documents"
+    # directive before falling back to the canned message. Only retry when
+    # retrieval was deterministic enough that we're confident the answer
+    # is actually present.
+    _RETRIEVAL_MODES_OK_FOR_RETRY = {
+        "identifier_exact",
+        "ticket_id_exact",  # legacy alias
+        "hybrid_phase3 (strategy=keyword)",
+        "hybrid_phase3 (strategy=semantic)",
+        "hybrid_phase3 (strategy=mixed)",
+    }
+    _search_mode = (retrieval_stats or {}).get("search_mode") if retrieval_stats else None
+
     if is_false_refusal and result.passed:
+        retried = False
+        if retry_fn is not None and _search_mode in _RETRIEVAL_MODES_OK_FOR_RETRY:
+            try:
+                logger.warning(
+                    "[validator] false refusal detected (mode=%s) — attempting stronger-prompt retry",
+                    _search_mode,
+                )
+                retry_answer = retry_fn(stronger_prompt=True)
+                retried = True
+                if retry_answer and retry_answer.strip():
+                    retry_lower = retry_answer.lower()
+                    still_refused = any(p in retry_lower for p in _NOT_FOUND_PHRASES)
+                    if not still_refused:
+                        result.answer = retry_answer
+                        result.was_modified = True
+                        result.issues.append("Recovered from false refusal via stronger-prompt retry")
+                        logger.info("[validator] retry succeeded — returning retried answer")
+                        result.validation_ms = int((time.perf_counter() - t_start) * 1000)
+                        _log_eval_record(
+                            query=query,
+                            answer=result.answer,
+                            validation=result,
+                            source_names=source_names,
+                            model_used=model_used,
+                        )
+                        return result
+                    logger.warning("[validator] false refusal survived retry")
+            except Exception as retry_exc:
+                logger.warning("[validator] retry_fn raised: %s", retry_exc)
+
         result.passed = False
         result.was_modified = True
-        result.confidence = 0.1  # Signal to caller: answer is bad
+        result.confidence = 0.1
         result.answer = (
             "I found relevant documents but was unable to extract the answer. "
             "This is a known issue being addressed. Please try asking again."
@@ -310,11 +366,12 @@ def validate_answer(
         result.issues.append(
             f"False refusal: model said 'not found' but retrieval top_score="
             f"{float(ranked_chunks[0][3] or 0):.3f} with {len(ranked_chunks)} chunks"
+            + (" (retry also refused)" if retried else "")
         )
         logger.error(
             "FALSE REFUSAL: model refused despite strong retrieval "
-            "(top_score=%.3f, %d chunks). Prompt tuning needed.",
-            float(ranked_chunks[0][3] or 0), len(ranked_chunks),
+            "(top_score=%.3f, %d chunks, mode=%s, retried=%s).",
+            float(ranked_chunks[0][3] or 0), len(ranked_chunks), _search_mode, retried,
         )
 
     result.validation_ms = int((time.perf_counter() - t_start) * 1000)

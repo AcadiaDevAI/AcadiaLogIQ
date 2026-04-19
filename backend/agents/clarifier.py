@@ -72,6 +72,15 @@ _DIRECT_ANSWER_PATTERNS = re.compile(
     re.I,
 )
 
+# Specific-target patterns — these pin down intent unambiguously, so the
+# clarifier must not interrupt retrieval with a generic "can you clarify?".
+_TICKET_ID_PATTERN = re.compile(r"\bINC-\d+\b", re.I)
+_ENTITY_PATTERN = re.compile(r"\b(?:customer|enterprise|nebula)-?\w+\b", re.I)
+_DIRECT_FACTUAL_PATTERN = re.compile(
+    r"^(what|who|when|where|how\s+many|list|show)\b",
+    re.I,
+)
+
 
 def _detect_domain(query: str) -> str:
     """Classify the user query into a coarse domain for topic-locking."""
@@ -118,18 +127,35 @@ def _format_history(prior_messages: Optional[List[Dict[str, str]]], max_turns: i
     return block
 
 
-def _looks_trivially_clear(query: str) -> bool:
-    """Quick pre-check — skip the LLM call when the query is obviously specific."""
+def _looks_trivially_clear(query: str) -> Optional[str]:
+    """
+    Quick pre-check. Returns a short reason string when the clarifier LLM
+    should be skipped, or None when the query is ambiguous enough to
+    warrant clarification. The reason is surfaced in the caller's log line.
+    """
     q = (query or "").strip()
     if len(q) < settings.CLARIFIER_MIN_QUERY_LEN:
-        return True
+        return "too-short"
     # Explicit "troubleshooting steps" / "how do I fix X" → answer directly.
     if _DIRECT_ANSWER_PATTERNS.search(q):
-        return True
+        return "direct-answer-request"
     # Long queries that cite specifics are usually clear enough to plan against.
     if len(q) > 160 and not _AMBIGUITY_HINTS.search(q):
-        return True
-    return False
+        return "long-specific"
+    # Specific targets should never be gated by the clarifier. ONE ticket ID
+    # already fully disambiguates the query; so does TWO (e.g. "Compare
+    # INC-10005 and INC-10006") — use findall so multi-ID queries skip too.
+    if len(_TICKET_ID_PATTERN.findall(q)) >= 1:
+        return "ticket-id"
+    if _ENTITY_PATTERN.search(q):
+        return "named-entity"
+    if (
+        _DIRECT_FACTUAL_PATTERN.search(q)
+        and len(q) < 120
+        and not _AMBIGUITY_HINTS.search(q)
+    ):
+        return "direct-factual"
+    return None
 
 
 def run_clarifier(
@@ -157,10 +183,17 @@ def run_clarifier(
 
     history_block = _format_history(prior_messages)
 
-    # Skip the LLM only when the query is obviously specific AND there is
-    # no prior conversation to interpret it against.
-    if _looks_trivially_clear(query) and not history_block:
-        result.reason = "query passes trivial-clarity pre-check"
+    # Unconditional early return when the query is self-contained (ticket ID,
+    # named entity, direct factual ask). Previously this skip was gated on
+    # `not history_block`, which caused the LLM to still run after an earlier
+    # assistant turn — including asking a clarifying question about a ticket
+    # ID the user had already named explicitly. The skip MUST short-circuit
+    # here so the log line "skipped — specific query pattern" is a promise,
+    # not a suggestion.
+    skip_reason = _looks_trivially_clear(query)
+    if skip_reason:
+        logger.info("[clarifier] skipped — specific query pattern: %s", skip_reason)
+        result.reason = f"skipped: {skip_reason}"
         return result
 
     if budget.exhausted:

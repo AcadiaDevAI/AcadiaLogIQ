@@ -84,28 +84,30 @@ def _invoke_claude(
     """Invoke Claude (Haiku or Sonnet) via Bedrock Messages API."""
     body = {
         "anthropic_version": "bedrock-2023-05-31",
+        # Conversational-engineer voice. See CONVERSATIONAL_REFACTOR_BRIEF goal 1.1 —
+        # bullets-only-when-asked + length-proportional + no "based on documents" phrasing.
         "system": (
-            # "You are a document-grounded technical assistant. "
-            # "The DOCUMENTS section in the user message contains pre-retrieved, "
-            # "highly relevant content from uploaded files. "
-            # "Your job is to extract and present the answer from these documents. "
-            # "The documents ARE the source of truth — if information appears in them, use it. "
-            # "Alert signature names (e.g., Consistent_High_Interface_Errors) are exact "
-            # "identifiers from the documents — match them to their scenarios. "
-            # "Use bullet-point format. Be precise and thorough."
-            "You are a conversational technical assistant."
-
-            "You are given DOCUMENTS containing relevant information. Use them as the source of truth, but do not copy text directly."
-
-            "Understand the user’s question, extract key facts from the documents, and explain the answer clearly in your own words. Focus on reasoning, not repetition."
-
-            "Avoid dumping metadata like timestamps, IDs, or fields unless explicitly asked. Present only what is useful to answer the question."
-
-            "If the documents fully answer the question, explain the answer clearly. If partially relevant, combine document facts with reasoning. If weak or missing, say so briefly and still provide helpful guidance."
-
-            "If the question is vague, ask at most one clarification question. If enough context is available, answer directly."
-
-            "Keep responses clear, concise, and practical, like a support engineer explaining a problem and solution. Use bullet points only when helpful."
+            "You are a senior operations engineer chatting with a trainee engineer. "
+            "The DOCUMENTS section below contains pre-retrieved, highly relevant content "
+            "from uploaded incident tickets, runbooks, and KBs. Your job is to understand "
+            "the trainee's question and answer it in your own words, the way a human "
+            "expert would in a real conversation.\n\n"
+            "How to respond:\n"
+            "- Read the documents, understand the answer, then explain it naturally. "
+            "Do NOT copy-paste document text verbatim.\n"
+            "- Match your response length to the question. A short specific question "
+            "gets a short specific answer — two to four sentences. A broad question gets "
+            "a fuller answer. A comparison gets a comparison. A how-to gets steps.\n"
+            "- Use bullet points ONLY when the question genuinely calls for a list "
+            "(e.g., \"list all X\", \"what are the steps\", \"compare\"). For everything "
+            "else, answer in natural prose paragraphs.\n"
+            "- Never produce section headers like \"Root Cause\", \"Resolution\", "
+            "\"Key Findings\" unless the user explicitly asked for a structured breakdown.\n"
+            "- The documents are your source of truth. If the answer is in them, give it "
+            "confidently in your own words. Never say \"the documents show\" or \"based on "
+            "the documents\" — just answer.\n"
+            "- If the answer is genuinely not in the documents, say so plainly in one "
+            "sentence. Do not hedge with \"insufficient evidence\" or \"I cannot extract.\""
         ),
         "max_tokens": max_tokens,
         "temperature": temperature,
@@ -154,12 +156,36 @@ def route_and_generate(
     recent_messages: Optional[List[Dict[str, str]]] = None,
     generate_fn: Callable[[str, int], str],
     bedrock_client: Any,
+    triage_context: Optional[Dict[str, Any]] = None,
 ) -> RoutingResult:
     """
     Main routing entry point. Called by the /ask endpoint.
     Classifies complexity → selects model → builds prompt → invokes → returns.
     """
     result = RoutingResult()
+
+    # Brief 5 / Part 2 — response-class-driven max_tokens budget.
+    # Classifier is zero-LLM (regex + optional merged-triage signal). When
+    # disabled, fall back to a conservative default cap.
+    _resp_class = None
+    _resp_cap = settings.RESPONSE_TOKENS_DEFAULT
+    if settings.RESPONSE_TOKEN_CAPS_ENABLED:
+        try:
+            from backend.services.response_class_router import (
+                classify_response_class, get_token_cap,
+            )
+            _resp_class = classify_response_class(
+                query, context={"merged_triage": triage_context} if triage_context else None,
+            )
+            _resp_cap = get_token_cap(_resp_class)
+            logger.info(
+                "[resp_class] class=%s max_tokens=%d query=%r",
+                _resp_class.value, _resp_cap, (query or "")[:80],
+            )
+        except Exception as _rc_exc:
+            logger.warning("[resp_class] classifier failed (%s) — default cap", _rc_exc)
+            _resp_class = None
+            _resp_cap = settings.RESPONSE_TOKENS_DEFAULT
 
     # Step 1: Classify complexity
     complexity = classify_complexity(
@@ -196,26 +222,48 @@ def route_and_generate(
     # Step 4: Invoke the selected model
     t_start = time.perf_counter()
 
-    try:
+    def _invoke_with_cap(cap: int) -> str:
         if model_name == "sonnet":
-            answer = _invoke_claude(
+            return _invoke_claude(
                 prompt=prompt,
                 bedrock_client=bedrock_client,
                 model_id=settings.BEDROCK_SONNET_MODEL,
-                max_tokens=settings.SONNET_MAX_TOKENS,
+                max_tokens=cap,
                 temperature=settings.SONNET_TEMPERATURE,
             )
-        elif model_name == "haiku":
-            answer = _invoke_claude(
+        if model_name == "haiku":
+            return _invoke_claude(
                 prompt=prompt,
                 bedrock_client=bedrock_client,
                 model_id=settings.BEDROCK_HAIKU_MODEL,
-                max_tokens=settings.HAIKU_ANSWER_MAX_TOKENS,
+                max_tokens=cap,
                 temperature=settings.HAIKU_ANSWER_TEMPERATURE,
             )
-        else:
-            # Mistral fallback (should rarely reach here)
-            answer = _invoke_mistral(prompt, generate_fn)
+        return _invoke_mistral(prompt, generate_fn)
+
+    try:
+        answer = _invoke_with_cap(_resp_cap)
+        # Brief 5 / Part 2 — one-shot truncation retry at the next tier up.
+        if (
+            settings.RESPONSE_TOKEN_CAPS_ENABLED
+            and _resp_class is not None
+            and model_name in {"haiku", "sonnet"}
+        ):
+            from backend.services.response_class_router import is_truncated, next_tier, get_token_cap
+            if is_truncated(answer, _resp_cap):
+                nxt = next_tier(_resp_class)
+                if nxt is not None:
+                    retry_cap = get_token_cap(nxt)
+                    logger.warning(
+                        "[resp_class] answer appears truncated at %d tokens, retrying at %s (cap=%d)",
+                        _resp_cap, nxt.value, retry_cap,
+                    )
+                    try:
+                        answer = _invoke_with_cap(retry_cap)
+                        _resp_class = nxt
+                        _resp_cap = retry_cap
+                    except Exception as _rt_exc:
+                        logger.warning("[resp_class] retry failed (%s) — keeping truncated answer", _rt_exc)
 
     except Exception as exc:
         logger.warning("Model %s failed (%s), falling back to Mistral", model_name, exc)
@@ -230,6 +278,8 @@ def route_and_generate(
     t_end = time.perf_counter()
     result.answer = answer
     result.generation_ms = int((t_end - t_start) * 1000)
+    if _resp_class is not None:
+        result.reason += f" | resp_class={_resp_class.value} max_tokens={_resp_cap}"
 
     logger.info(
         "Generation complete: model=%s, %dms, %d prompt chars, complexity=%.3f (%s)",

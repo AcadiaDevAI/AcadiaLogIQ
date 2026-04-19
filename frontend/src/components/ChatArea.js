@@ -68,14 +68,21 @@ export default function ChatArea() {
             confidence: data.confidence,
             processing_time_ms: data.processing_time_ms,
             sessionId: data.session_id,
+            context_stats: data.context_stats || null,
+            needs_clarification: data.needs_clarification,
+            clarification_id: data.clarification_id,
+            clarification_options: data.clarification_options,
+            clarification_context: data.clarification_context,
           },
         });
+        dispatch({ type: "SET_LOADING", payload: false });
 
-        try {
-          const sessRes = await listSessions();
-          dispatch({ type: "SET_SESSIONS", payload: sessRes.data.sessions || [] });
-        } catch {}
-
+        // Fire-and-forget sessions refresh — does not block UI or loading state
+        listSessions()
+          .then((sessRes) =>
+            dispatch({ type: "SET_SESSIONS", payload: sessRes.data.sessions || [] })
+          )
+          .catch(() => {});
       } catch (err) {
         const detail = err?.response?.data?.error || err?.message || "Something went wrong";
         message.error(detail);
@@ -83,11 +90,80 @@ export default function ChatArea() {
           type: "ADD_ASSISTANT_MESSAGE",
           payload: { answer: `Error: ${detail}. Please try again.`, sources: [], confidence: 0 },
         });
-      } finally {
         dispatch({ type: "SET_LOADING", payload: false });
       }
     },
     [state.sessionId, dispatch]
+  );
+
+  const handleClarificationSelect = useCallback(
+    async (messageIndex, optionId, freeText) => {
+      const clarificationMessage = state.messages[messageIndex];
+      if (!clarificationMessage || !clarificationMessage.clarificationId) return;
+
+      dispatch({
+        type: "SET_CLARIFICATION_SELECTED",
+        payload: { index: messageIndex, optionId },
+      });
+
+      const picked = clarificationMessage.clarificationOptions?.find(
+        (o) => o.id === optionId
+      );
+      const userFacingText =
+        optionId === "opt_other"
+          ? freeText
+          : picked?.label || "Selected option";
+
+      dispatch({ type: "ADD_USER_MESSAGE", payload: userFacingText });
+      dispatch({ type: "SET_LOADING", payload: true });
+
+      try {
+        const originalQuery =
+          state.messages
+            .slice(0, messageIndex)
+            .reverse()
+            .find((m) => m.role === "user")?.content || "";
+
+        const res = await askQuestion(originalQuery, state.sessionId, {
+          clarificationId: clarificationMessage.clarificationId,
+          selectedOptionId: optionId,
+          freeText: freeText || null,
+        });
+        const data = res.data;
+
+        dispatch({
+          type: "ADD_ASSISTANT_MESSAGE",
+          payload: {
+            answer: data.answer,
+            sources: data.sources || [],
+            confidence: data.confidence,
+            processing_time_ms: data.processing_time_ms,
+            sessionId: data.session_id,
+            context_stats: data.context_stats || null,
+            needs_clarification: data.needs_clarification,
+            clarification_id: data.clarification_id,
+            clarification_options: data.clarification_options,
+            clarification_context: data.clarification_context,
+          },
+        });
+        dispatch({ type: "SET_LOADING", payload: false });
+
+        listSessions()
+          .then((sessRes) =>
+            dispatch({ type: "SET_SESSIONS", payload: sessRes.data.sessions || [] })
+          )
+          .catch(() => {});
+      } catch (err) {
+        const detail = err?.response?.data?.error || err?.message || "Something went wrong";
+        message.error(detail);
+        dispatch({
+          type: "ADD_ASSISTANT_MESSAGE",
+          payload: { answer: `Error: ${detail}. Please try again.`, sources: [], confidence: 0 },
+        });
+        dispatch({ type: "SET_LOADING", payload: false });
+      }
+    },
+    [state.messages, state.sessionId, dispatch]
   );
 
   return (
@@ -95,6 +171,21 @@ export default function ChatArea() {
       <div className="absolute inset-0 flex items-center justify-center pointer-events-none" style={{ zIndex: 0, opacity: 0.05 }}>
         <img src="/logo.png" alt="Acadia Watermark" className="w-[350px] md:w-[420px] lg:w-[500px] object-contain select-none" />
       </div>
+
+      {state.isUploading && (
+        <div
+          className="px-4 py-2 text-xs flex items-center gap-2 border-b"
+          style={{
+            backgroundColor: "var(--bg-tertiary)",
+            borderColor: "var(--border-color)",
+            color: "var(--text-muted)",
+            zIndex: 20,
+          }}
+        >
+          <span className="typing-dot" style={{ animationDelay: "0s" }} />
+          <span>File upload in progress — you can keep chatting</span>
+        </div>
+      )}
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto relative" style={{ zIndex: 10 }}>
         {state.messages.length === 0 ? (
@@ -107,9 +198,15 @@ export default function ChatArea() {
                 msg={msg}
                 index={i}
                 sessionId={state.sessionId}
+                onClarificationSelect={handleClarificationSelect}
+                clarificationDisabled={state.isLoading}
               />
             ))}
-            {state.isLoading && <TypingIndicator />}
+            {state.isLoading &&
+              state.messages.length > 0 &&
+              state.messages[state.messages.length - 1]?.role === "user" && (
+                <TypingIndicator />
+              )}
           </div>
         )}
       </div>
