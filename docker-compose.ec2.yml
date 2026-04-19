@@ -31,6 +31,10 @@ services:
       dockerfile: Dockerfile
       args:
         REACT_APP_CLERK_PUBLISHABLE_KEY: ${REACT_APP_CLERK_PUBLISHABLE_KEY:-}
+        # BUILD_TIMESTAMP is set at rebuild time (see the rebuild sequence
+        # in Frontend_docker.md). Changing this arg invalidates the build
+        # stage cache and guarantees a fresh bundle hash.
+        BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-unset}
     container_name: acadialogiq-ui
     ports:
       - "8501:80"
