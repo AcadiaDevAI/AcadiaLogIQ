@@ -7,16 +7,22 @@ import ChatArea from "./components/ChatArea";
 import MobileHeader from "./components/MobileHeader";
 import AuthGate from "./components/AuthGate";
 
-const BUILD_TIMESTAMP = process.env.REACT_APP_BUILD_TIMESTAMP || "dev";
-
 function BuildStamp() {
   return (
     <div
-      className="fixed bottom-1 right-2 text-[10px] opacity-40 pointer-events-none select-none"
-      style={{ zIndex: 9999, color: "var(--text-muted, #888)" }}
-      title="Build timestamp — confirms the running bundle"
+      style={{
+        position: "fixed",
+        bottom: "8px",
+        right: "12px",
+        fontSize: "10px",
+        color: "#888",
+        opacity: 0.5,
+        pointerEvents: "none",
+        zIndex: 9999,
+        fontFamily: "monospace",
+      }}
     >
-      build {BUILD_TIMESTAMP}
+      build {process.env.REACT_APP_BUILD_TIMESTAMP || "dev"}
     </div>
   );
 }
