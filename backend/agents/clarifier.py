@@ -127,6 +127,51 @@ def _format_history(prior_messages: Optional[List[Dict[str, str]]], max_turns: i
     return block
 
 
+# ─────────────────────────────────────────────────────────────
+# Agent pipeline performance — extended clarifier early-skip.
+# Complements _looks_trivially_clear below. Adds extra guard patterns
+# (greetings, simple factual, aggregation keywords) so the clarifier LLM
+# call is avoided on queries whose intent is already obvious. Fully
+# flag-gated via CLARIFIER_EARLY_SKIP_ENABLED — when False, returns
+# (False, "flag_disabled") and the pipeline continues exactly as before.
+# ─────────────────────────────────────────────────────────────
+
+_CLARIFIER_SKIP_SIMPLE_PATTERNS = [
+    re.compile(r"^(hi|hello|hey|thanks|thank you)\b", re.I),
+    re.compile(r"^(what is|what are|who is|when did)\b.{3,40}$", re.I),
+    re.compile(r"^(how many|count|list)\b", re.I),
+]
+
+
+def _should_skip_clarifier(
+    query: str,
+    extracted_identifiers: Optional[List[str]] = None,
+    retrieval_confidence: float = 0.0,
+) -> tuple[bool, str]:
+    """
+    Decide whether the clarifier step should be skipped entirely.
+
+    Returns (should_skip, reason). Fails safely: if the feature flag is
+    off, returns (False, "flag_disabled") so existing behavior is
+    byte-identical.
+    """
+    if not getattr(settings, "CLARIFIER_EARLY_SKIP_ENABLED", True):
+        return False, "flag_disabled"
+
+    if extracted_identifiers and len(extracted_identifiers) >= 1:
+        return True, "specific_identifier_present"
+
+    if retrieval_confidence >= 0.90:
+        return True, "high_retrieval_confidence"
+
+    query_lower = (query or "").lower().strip()
+    for pattern in _CLARIFIER_SKIP_SIMPLE_PATTERNS:
+        if pattern.match(query_lower):
+            return True, "simple_pattern"
+
+    return False, "clarifier_needed"
+
+
 def _looks_trivially_clear(query: str) -> Optional[str]:
     """
     Quick pre-check. Returns a short reason string when the clarifier LLM
@@ -194,6 +239,17 @@ def run_clarifier(
     if skip_reason:
         logger.info("[clarifier] skipped — specific query pattern: %s", skip_reason)
         result.reason = f"skipped: {skip_reason}"
+        return result
+
+    # Extended performance skip — greetings, simple factual, aggregation
+    # patterns. Additive to _looks_trivially_clear; only fires when flag is on.
+    extracted_ids = _TICKET_ID_PATTERN.findall(query or "")
+    should_skip, skip_kind = _should_skip_clarifier(
+        query, extracted_identifiers=extracted_ids, retrieval_confidence=0.0,
+    )
+    if should_skip:
+        logger.info("[clarifier_skip] reason=%s", skip_kind)
+        result.reason = f"skipped_early: {skip_kind}"
         return result
 
     if budget.exhausted:

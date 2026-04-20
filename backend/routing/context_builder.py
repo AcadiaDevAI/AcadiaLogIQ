@@ -18,11 +18,38 @@ logger = logging.getLogger("acadia-log-iq")
 # ---------------------------------------------------------------------------
 # Grounding rules shared across all models
 # ---------------------------------------------------------------------------
-_GROUNDING_RULES = """Answering guidance:
+_GROUNDING_RULES_BASE = """Answering guidance:
 - The DOCUMENTS below were selected because they are relevant to the user's question. Extract and explain the answer naturally.
 - If the answer is in the documents, give it confidently in your own words. Do not hedge.
 - Do NOT use phrases like "insufficient evidence", "I cannot extract", "the documents do not explicitly state" when the information is actually present — just read carefully and answer.
 - Only say "I could not find this in the uploaded documents" if after genuinely reading the context you see that the specific answer is absent. This should be rare since the documents were pre-filtered for relevance."""
+
+# Rich Response Formatting Brief — Step 7: optional markdown formatting section
+# appended to the grounding rules when RICH_FORMATTING_GROUNDING_RULES_ENABLED.
+# Keeps the base guidance verbatim so flag-off reverts to pre-feature behavior.
+_GROUNDING_RULES_FORMATTING_SECTION = """
+
+Formatting guidance (markdown is supported — use it only when it genuinely improves clarity):
+- Comparing two or more items → use a markdown table with meaningful column headers
+- Commands, config snippets, or code → wrap in fenced code blocks with a language hint (```bash, ```python, ```json, ```yaml, ```sql)
+- Step-by-step procedures (when explicitly asked) → use a numbered list
+- Ticket IDs, customer names, and identifiers → use **bold** emphasis (e.g., **INC-10037**, **Enterprise-617**)
+- Inline code (`backticks`) ONLY for: literal commands (`show bgp summary`), file paths (`/etc/config`), code snippets (`grep -i`), or variable names
+- Do NOT wrap ticket IDs, customer names, component names, or error descriptions in backticks — use bold instead
+- For general prose answers (most questions), write flowing paragraphs — do NOT force structure that isn't needed
+- Never use markdown headers (#, ##, ###) unless the user explicitly asks for a structured report
+
+CRITICAL — Confident synthesis: When asked for lessons, insights, takeaways, recommendations, biggest learnings, or similar insight questions, synthesize the answer by reasoning from RESOLUTION, ROOT CAUSE, ITIL 5-WHY, SOP STEPS, and QA GAPS sections. The lesson or insight is implicit in how the incident was resolved and what gaps were identified — extract it confidently in your own words. Do NOT refuse by saying "not explicitly stated" or "I could not find this" just because the exact word isn't in the document. The documents contain everything needed for insight questions through reasonable inference."""
+
+
+def _get_grounding_rules() -> str:
+    """
+    Build grounding rules, optionally including formatting guidance.
+    Controlled by RICH_FORMATTING_GROUNDING_RULES_ENABLED flag.
+    """
+    if getattr(settings, "RICH_FORMATTING_GROUNDING_RULES_ENABLED", True):
+        return _GROUNDING_RULES_BASE + _GROUNDING_RULES_FORMATTING_SECTION
+    return _GROUNDING_RULES_BASE
 
 
 # ---------------------------------------------------------------------------
@@ -205,7 +232,7 @@ def build_prompt(
         sections.append(confidence_block)
 
     # --- Grounding rules ---
-    sections.append(_GROUNDING_RULES)
+    sections.append(_get_grounding_rules())
 
     # --- Document context ---
     sections.append(f"DOCUMENTS:\n{doc_context}")

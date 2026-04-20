@@ -1,7 +1,11 @@
 import React, { useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import rehypeHighlight from "rehype-highlight";
+import "highlight.js/styles/github.css";
 import { Tag, Tooltip, Collapse, Modal, Input, message } from "antd";
+import { markdownComponents } from "./markdownComponents";
+import { settings } from "../config/clientSettings";
 import {
   UserOutlined,
   RobotOutlined,
@@ -195,7 +199,13 @@ export default function ChatMessage({ msg, index, sessionId, onClarificationSele
         </div>
 
         <div className="markdown-body">
-          <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg.content}</ReactMarkdown>
+          <ReactMarkdown
+            remarkPlugins={[remarkGfm]}
+            rehypePlugins={settings.RICH_FORMATTING_ENABLED ? [rehypeHighlight] : []}
+            components={settings.RICH_FORMATTING_ENABLED ? markdownComponents : undefined}
+          >
+            {msg.content}
+          </ReactMarkdown>
         </div>
 
         {!isUser && msg.needsClarification && msg.clarificationOptions && (

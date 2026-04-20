@@ -405,3 +405,47 @@ def _evict_if_over_capacity() -> int:
     except Exception as exc:
         logger.warning("[semantic_cache] eviction failed (%s)", exc)
         return 0
+
+
+# ---------------------------------------------------------------------------
+# Cross-Cutting Analytical Router — cache helpers
+#
+# Append-only additions for the analytical routing layer. Existing cache
+# lookup/put/invalidate functions are untouched; these helpers produce a
+# corpus-versioned cache key for analytical queries so results invalidate
+# automatically when new tickets are uploaded (MAX(updated_at) changes).
+# ---------------------------------------------------------------------------
+
+
+def get_analytical_cache_key(query: str, corpus_version: str) -> str:
+    """
+    Generate cache key for analytical queries.
+    Includes corpus_version so cache invalidates when new tickets uploaded.
+    """
+    key_input = f"analytical|{(query or '').lower().strip()}|{corpus_version}"
+    return hashlib.sha256(key_input.encode("utf-8")).hexdigest()[:16]
+
+
+def get_corpus_version() -> str:
+    """
+    Get current corpus version — hash of MAX(updated_at) across
+    document_metadata. Changes when new documents are uploaded, which
+    automatically invalidates analytical cache entries keyed on this value.
+
+    Fail-safe: on any DB error returns the sentinel "unknown" so callers
+    can still produce a cache key (it just won't roll over on upload).
+    """
+    try:
+        with SessionLocal() as db:
+            row = db.execute(
+                text("SELECT MAX(updated_at) AS max_updated FROM document_metadata")
+            ).mappings().first()
+            max_updated = row["max_updated"] if row else None
+            if max_updated is None:
+                return "empty"
+            return hashlib.sha256(
+                str(max_updated).encode("utf-8")
+            ).hexdigest()[:12]
+    except Exception as exc:
+        logger.warning("[semantic_cache] corpus_version lookup failed (%s)", exc)
+        return "unknown"

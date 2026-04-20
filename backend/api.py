@@ -69,6 +69,7 @@ from backend.agents.orchestrator import should_escalate_to_agents, run_agent_pip
 from backend.agents.mode_selector import resolve_mode, MODE_AUTO, MODE_HYBRID, MODE_MULTI_AGENT
 from backend.agents.step_retriever import build_step_retriever
 from backend.routing.complexity_classifier import classify_complexity
+from backend.routing.cross_cutting_detector import detect_cross_cutting_analytical
 from backend.routing.intent_detector import detect_intent, INTENT_GENERAL
 from backend.services.trivial_responder import match_trivial_response
 from backend.services.query_rewriter import rewrite_query
@@ -2106,6 +2107,34 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             session_id=session_id,
            )
 
+    # ── Cross-Cutting Analytical Router ──
+    # "What are common root causes across all tickets?" / "What process
+    # improvements were recommended most frequently?" look like aggregation
+    # to the SQL classifier but need synthesis across ticket content, not a
+    # list of IDs. Detect analytical intent with multi-signal categories
+    # (pattern + insight + scope + frequency + synthesis) and skip the
+    # aggregation fast-path, forcing the agent pipeline below. Fails closed:
+    # any query that doesn't clear the confidence threshold drops through
+    # the existing agg_classifier unchanged.
+    force_agent_mode = False
+    analytical_mode = None
+    if getattr(settings, "CROSS_CUTTING_ANALYTICAL_ROUTING_ENABLED", True):
+        _cc = detect_cross_cutting_analytical(effective_query)
+        if _cc.is_analytical:
+            force_agent_mode = True
+            analytical_mode = _cc.mode
+            logger.info(
+                "[cross_cutting] analytical=True conf=%.2f mode=%s "
+                "categories=%s signals=%s",
+                _cc.confidence, _cc.mode,
+                _cc.matched_categories, _cc.signals,
+            )
+        else:
+            logger.info(
+                "[cross_cutting] non-analytical conf=%.2f (below threshold)",
+                _cc.confidence,
+            )
+
     # ── Fix 6: SQL aggregation fast-path ──
     # "How many Nebula-Corp tickets?" / "Which tickets missed SLA?" are set
     # operations, not semantic search. If the query parses as an aggregation
@@ -2114,18 +2143,23 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     # or the SQL returns nothing.
     # Goal 4: skip aggregation when the query names a specific INC-\d+ ticket —
     # those belong to retrieval / ticket_id_exact, never to bulk aggregation.
+    # Cross-cutting: also skip when analytical intent was detected above;
+    # force_agent_mode routes directly to the agent pipeline for synthesis.
     if _parallel_path_used:
         # Reuse the classifier verdict produced concurrently with the rewriter.
         # If effective_query mentions a specific INC-\d+, drop the verdict so
         # identifier_exact retrieval handles it (matches sequential behavior).
-        if re.search(r"\bINC-\d+\b", effective_query, re.IGNORECASE):
+        if re.search(r"\bINC-\d+\b", effective_query, re.IGNORECASE) or force_agent_mode:
             _agg_intent = None
         else:
             _agg_intent = _parallel_agg_intent
     else:
         _agg_intent = (
             detect_aggregation_intent_v2(effective_query)
-            if not re.search(r"\bINC-\d+\b", effective_query, re.IGNORECASE)
+            if (
+                not re.search(r"\bINC-\d+\b", effective_query, re.IGNORECASE)
+                and not force_agent_mode
+            )
             else None
         )
     if _agg_intent:
@@ -2610,7 +2644,11 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     if stage_enforced_mode and requested_mode != MODE_HYBRID:
         agent_reason = f"{agent_reason} [stage={stage_result.stage}:{stage_result.escalate_reason}]"
 
-    if should_agent:
+    if should_agent or force_agent_mode:
+        if force_agent_mode and not should_agent:
+            agent_reason = (
+                f"{agent_reason} [cross_cutting=True mode={analytical_mode}]"
+            )
         logger.info("Escalating to agent pipeline: %s", agent_reason)
 
         # ── Build the per-step hybrid retriever the Analyst will use ──

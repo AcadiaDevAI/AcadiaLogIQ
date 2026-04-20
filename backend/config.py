@@ -516,6 +516,23 @@ class Settings(BaseSettings):
     PATTERN_ANALYTICS_FORCE_ENABLE_IN_TROUBLESHOOTING_MODE: bool = True
 
     # ----------------------------------------------------------------
+    # Rich Response Formatting Brief (Approach A — pure markdown)
+    # ----------------------------------------------------------------
+    # Master flag for rich formatting prompt guidance. When enabled, backend
+    # adds a markdown formatting addendum to the Claude system prompt, telling
+    # the LLM when to use tables, code blocks, bold, inline code, blockquotes.
+    # When False, the prompt is byte-identical to the pre-brief conversational
+    # engineer voice (zero behavioral change).
+    RICH_FORMATTING_PROMPT_ENABLED: bool = True
+
+    # When True, the grounding rules emitted by context_builder include the
+    # "Formatting guidance" block that tells the model when to reach for
+    # markdown tables / fenced code / bold. When False, only the original
+    # answering guidance is emitted. Independent of the system-prompt flag
+    # so the two prompt layers can be A/B tested.
+    RICH_FORMATTING_GROUNDING_RULES_ENABLED: bool = True
+
+    # ----------------------------------------------------------------
     # Pattern Analytics Polish Brief — 3 surgical fixes, each flag-gated.
     # ----------------------------------------------------------------
     # Fix 1 — queries.load_similar_tickets_for_topic splits topic into
@@ -539,6 +556,107 @@ class Settings(BaseSettings):
     # being falsely masked as PII. Only affects the credit_card PII type
     # — SSN, email, AWS keys, private keys are untouched.
     PII_CREDIT_CARD_LUHN_VALIDATION_ENABLED: bool = True
+
+    # ────────────────────────────────────────────────
+    # Rich Formatting Polish — Fix 5: Agent Composer Markdown
+    # ────────────────────────────────────────────────
+    #
+    # When True, the multi-agent Composer's system prompt receives a
+    # markdown formatting addendum instructing it to use tables for
+    # compare queries, bold for identifiers, fenced code blocks for
+    # commands, etc. When False, Composer behaves exactly as before
+    # (prose-heavy synthesis, no markdown instructions) — the prompt
+    # is byte-for-byte identical to the pre-fix composer prompt.
+    #
+    # Rollback: set to False, restart backend. Zero impact on other flags.
+    AGENT_COMPOSER_MARKDOWN_ENABLED: bool = True
+
+    # ────────────────────────────────────────────────
+    # Cross-Cutting Analytical Router
+    # ────────────────────────────────────────────────
+    #
+    # When True, analytical queries ("common root causes", "recurring
+    # patterns", "most frequently recommended improvements") are detected
+    # before the SQL aggregation classifier and routed to the agent
+    # pipeline for proper content synthesis. When False, all queries flow
+    # through existing agg_classifier exactly as before.
+    CROSS_CUTTING_ANALYTICAL_ROUTING_ENABLED: bool = True
+
+    # Minimum confidence to route as analytical (0.0-1.0).
+    # Higher = fewer false positives, some analytical queries miss.
+    # Lower = more analytical routing, some SQL queries misrouted.
+    CROSS_CUTTING_DETECTOR_CONFIDENCE_THRESHOLD: float = 0.75
+
+    # Minimum distinct signal categories required (prevents single-word
+    # triggers like "list all tickets" with only one scope signal).
+    CROSS_CUTTING_MIN_SIGNAL_CATEGORIES: int = 2
+
+    # Fast mode ticket limit (top reranked tickets the analyst reads).
+    CROSS_CUTTING_FAST_MODE_TICKET_LIMIT: int = 20
+
+    # Deep mode ticket limit (all matching, capped for cost).
+    CROSS_CUTTING_DEEP_MODE_TICKET_LIMIT: int = 50
+
+    # Analytical result cache TTL in seconds (1 hour default).
+    CROSS_CUTTING_CACHE_TTL_SECONDS: int = 3600
+
+    # ────────────────────────────────────────────────
+    # Agent Pipeline Performance Tuning
+    # Additive flags — all existing budget/flag behavior preserved when
+    # these four are flipped False.
+    # ────────────────────────────────────────────────
+
+    # Budget ceiling for analytical + compare queries (cross-cutting, deep
+    # analysis). Separate from PATTERN_ANALYTICS_AGENT_BUDGET (pattern-specific
+    # queries). Higher ceiling prevents Composer truncation on complex work.
+    AGENT_ANALYTICAL_BUDGET: int = 25000
+
+    # Concurrency limit for parallel analyst step execution.
+    # 3 = reasonable balance of speed vs Bedrock rate limits.
+    ANALYST_PARALLEL_CONCURRENCY: int = 3
+
+    # Run independent analyst steps in parallel (wave-based).
+    # Dependent steps (synthesize/combine/cross-reference) stay sequential.
+    ANALYST_PARALLEL_EXECUTION_ENABLED: bool = True
+
+    # Cache retrieval results keyed by identifier list within one pipeline run.
+    AGENT_RETRIEVAL_CACHE_ENABLED: bool = True
+
+    # Early-skip clarifier when identifiers/high-confidence retrieval/simple
+    # patterns make clarification unnecessary.
+    CLARIFIER_EARLY_SKIP_ENABLED: bool = True
+
+    # ────────────────────────────────────────────────
+    # Dynamic Agent Budget
+    # Replaces static AGENT_ANALYTICAL_BUDGET for analytical queries with a
+    # formula: base + (tickets × per_ticket) + (steps × per_step), × deep
+    # multiplier when applicable, clamped to [floor, ceiling].
+    # AGENT_ANALYTICAL_BUDGET (25000) is preserved as the fallback used
+    # when AGENT_DYNAMIC_BUDGET_ENABLED is False.
+    # ────────────────────────────────────────────────
+
+    # Master flag — when True, analytical queries use formula-based dynamic
+    # budget. When False, falls back to static AGENT_ANALYTICAL_BUDGET for
+    # byte-identical pre-brief behavior.
+    AGENT_DYNAMIC_BUDGET_ENABLED: bool = True
+
+    # Base synthesis budget (Composer minimum — prevents truncation floor).
+    AGENT_DYNAMIC_BUDGET_BASE: int = 8000
+
+    # Per-ticket overhead (synthesis tokens needed per ticket analyzed).
+    AGENT_DYNAMIC_BUDGET_PER_TICKET: int = 1500
+
+    # Per-step overhead (planner step contribution to final synthesis).
+    AGENT_DYNAMIC_BUDGET_PER_STEP: int = 2000
+
+    # Floor — minimum viable budget regardless of inputs.
+    AGENT_DYNAMIC_BUDGET_FLOOR: int = 10000
+
+    # Ceiling — hard cap to prevent runaway cost on huge queries.
+    AGENT_DYNAMIC_BUDGET_CEILING: int = 35000
+
+    # Multiplier for deep analysis mode (explicit user request for depth).
+    AGENT_DYNAMIC_BUDGET_DEEP_MULTIPLIER: float = 1.5
 
     model_config = SettingsConfigDict(
         env_file=str(BASE_DIR / ".env"),

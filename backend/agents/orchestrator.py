@@ -9,7 +9,9 @@ from __future__ import annotations
 
 import logging
 import re
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from backend.config import settings
@@ -21,6 +23,334 @@ from backend.agents.composer import run_composer
 from backend.routing.stage_enforcer import STAGE_DOCS, UNRESOLVED_ESCALATE_THRESHOLD
 
 logger = logging.getLogger("acadia-log-iq")
+
+
+# ---------------------------------------------------------------------------
+# Agent pipeline performance additions (additive, flag-gated).
+# All behavior preserved when the matching feature flag is False.
+# ---------------------------------------------------------------------------
+
+# Dependency markers — steps mentioning these phrases are treated as
+# dependent on earlier findings and run sequentially after the parallel wave.
+_ANALYST_DEPENDENCY_PHRASES = (
+    "based on above",
+    "from previous",
+    "from step",
+    "using findings",
+    "synthesize",
+    "combine",
+    "cross-reference",
+)
+
+# Analytical / compare regex — triggers the AGENT_ANALYTICAL_BUDGET bump
+# when present in the user query and no pattern_context is active. Matches
+# the analytical synthesis queries the Composer would otherwise truncate.
+_ANALYTICAL_BUDGET_TRIGGERS = re.compile(
+    r"\b(?:compare|contrast|versus|vs\.?|common|recurring|pattern|patterns|"
+    r"themes?|trends?|typical|across|overall|root causes|improvements|"
+    r"takeaways|insights|findings|gaps|weaknesses|recommendations|"
+    r"deep\s+analysis|comprehensive\s+analysis|full\s+analysis)\b",
+    re.I,
+)
+
+# Deep-mode analytical triggers. Mirrors the cross_cutting_detector's deep
+# markers — duplicated here to avoid a new import dependency and keep this
+# module self-contained.
+_ANALYTICAL_DEEP_TRIGGERS = (
+    "deep analysis",
+    "deeper analysis",
+    "detailed analysis",
+    "comprehensive analysis",
+    "full analysis",
+    "all tickets in detail",
+)
+
+
+def _detect_analytical_mode(query: str) -> str:
+    """Return 'deep' when the query explicitly requests depth, else 'fast'."""
+    if not query:
+        return "fast"
+    q = query.lower()
+    for trigger in _ANALYTICAL_DEEP_TRIGGERS:
+        if trigger in q:
+            return "deep"
+    return "fast"
+
+
+def _compute_dynamic_agent_budget(
+    *,
+    ticket_count: int,
+    step_count: int,
+    mode: str = "fast",
+) -> int:
+    """
+    Compute a query-specific agent budget from complexity signals.
+
+    Formula:
+        base + (ticket_count × per_ticket) + (step_count × per_step)
+        × deep_multiplier when mode == "deep"
+        Clamped to [floor, ceiling]
+
+    All six parameters (base / per_ticket / per_step / floor / ceiling /
+    deep_multiplier) are independently tunable via config flags so the
+    formula can be retuned without code changes.
+
+    When AGENT_DYNAMIC_BUDGET_ENABLED is False, returns the static
+    AGENT_ANALYTICAL_BUDGET — byte-identical pre-brief behavior.
+    """
+    if not getattr(settings, "AGENT_DYNAMIC_BUDGET_ENABLED", True):
+        static_budget = getattr(settings, "AGENT_ANALYTICAL_BUDGET", 25000)
+        logger.info(
+            "[dynamic_budget] DISABLED → using static budget=%d",
+            static_budget,
+        )
+        return static_budget
+
+    base = getattr(settings, "AGENT_DYNAMIC_BUDGET_BASE", 8000)
+    per_ticket = getattr(settings, "AGENT_DYNAMIC_BUDGET_PER_TICKET", 1500)
+    per_step = getattr(settings, "AGENT_DYNAMIC_BUDGET_PER_STEP", 2000)
+    floor = getattr(settings, "AGENT_DYNAMIC_BUDGET_FLOOR", 10000)
+    ceiling = getattr(settings, "AGENT_DYNAMIC_BUDGET_CEILING", 35000)
+    deep_multiplier = getattr(
+        settings, "AGENT_DYNAMIC_BUDGET_DEEP_MULTIPLIER", 1.5,
+    )
+
+    safe_ticket_count = max(0, int(ticket_count or 0))
+    safe_step_count = max(1, int(step_count or 1))
+
+    computed = base + (safe_ticket_count * per_ticket) + (safe_step_count * per_step)
+
+    if mode == "deep":
+        computed = int(computed * deep_multiplier)
+
+    final = max(floor, min(computed, ceiling))
+
+    logger.info(
+        "[dynamic_budget] tickets=%d steps=%d mode=%s → computed=%d final=%d "
+        "(floor=%d ceiling=%d)",
+        safe_ticket_count, safe_step_count, mode, computed, final, floor, ceiling,
+    )
+
+    return final
+
+
+def _get_step_dependencies(step: Any) -> List[str]:
+    """
+    Extract dependency signals from a planner step's text.
+    Accepts either a str or a dict (description/text fields).
+    Steps referencing prior findings run sequentially after wave 1.
+    """
+    if isinstance(step, dict):
+        step_text = (step.get("description") or step.get("text", "") or "")
+    else:
+        step_text = str(step or "")
+    step_text = step_text.lower()
+    return [phrase for phrase in _ANALYST_DEPENDENCY_PHRASES if phrase in step_text]
+
+
+def _make_retrieval_cache_key(identifiers: List[str]) -> str:
+    """Order-independent cache key from identifier list."""
+    if not identifiers:
+        return ""
+    return "|".join(sorted(str(i) for i in identifiers))
+
+
+class PipelineRetrievalCache:
+    """
+    In-memory retrieval cache scoped to a single pipeline run.
+
+    Cleared between pipeline runs — no cross-query contamination. Reduces
+    redundant retrieval work when analyst steps reference the same
+    identifier set. Thread-safe for concurrent analyst steps.
+    """
+
+    def __init__(self) -> None:
+        self._cache: Dict[str, Any] = {}
+        self._lock = threading.Lock()
+        self._hit_count = 0
+        self._miss_count = 0
+
+    def get(self, identifiers: List[str]) -> Optional[Any]:
+        if not getattr(settings, "AGENT_RETRIEVAL_CACHE_ENABLED", True):
+            return None
+        key = _make_retrieval_cache_key(identifiers)
+        if not key:
+            return None
+        with self._lock:
+            if key in self._cache:
+                self._hit_count += 1
+                logger.debug(
+                    "[retrieval_cache] hit key=%s (total hits=%d)",
+                    key[:40], self._hit_count,
+                )
+                return self._cache[key]
+            self._miss_count += 1
+            return None
+
+    def put(self, identifiers: List[str], value: Any) -> None:
+        if not getattr(settings, "AGENT_RETRIEVAL_CACHE_ENABLED", True):
+            return
+        key = _make_retrieval_cache_key(identifiers)
+        if not key:
+            return
+        with self._lock:
+            self._cache[key] = value
+
+    def stats(self) -> Dict[str, float]:
+        with self._lock:
+            total = self._hit_count + self._miss_count
+            return {
+                "hits": self._hit_count,
+                "misses": self._miss_count,
+                "hit_rate": self._hit_count / total if total > 0 else 0.0,
+            }
+
+
+def _wrap_step_retriever_with_cache(
+    original_fn: Optional[Callable[[str], Any]],
+    cache: PipelineRetrievalCache,
+) -> Optional[Callable[[str], Any]]:
+    """
+    Return a step-retriever that checks/populates the pipeline-scoped cache
+    using identifier lists extracted from the step text. When the original
+    fn is None or the feature flag is disabled, returns the original fn
+    unchanged (byte-identical behavior).
+    """
+    if original_fn is None:
+        return None
+    if not getattr(settings, "AGENT_RETRIEVAL_CACHE_ENABLED", True):
+        return original_fn
+
+    def _cached(step_text: str) -> Any:
+        try:
+            from backend.retrieval.orchestrator import _extract_identifiers
+            ids = [cid for cid, _t in (_extract_identifiers(step_text) or [])]
+        except Exception:
+            ids = []
+
+        if ids:
+            cached = cache.get(ids)
+            if cached is not None:
+                return cached
+
+        result = original_fn(step_text)
+
+        if ids and result is not None:
+            cache.put(ids, result)
+        return result
+
+    return _cached
+
+
+def _execute_analyst_steps_parallel(
+    *,
+    plan_steps: List[str],
+    doc_context: str,
+    query: str,
+    budget: TokenBudget,
+    generate_fn: Callable,
+    bedrock_client: Any,
+    step_retriever_fn: Optional[Callable[[str], Any]],
+) -> Tuple[List[str], List[Any]]:
+    """
+    Wave-based parallel analyst execution.
+
+    Wave 1: independent steps run concurrently (semaphore-limited).
+    Wave 2: dependent steps (synthesize/combine/cross-reference) run
+            sequentially after Wave 1, enriched with prior findings.
+
+    When ANALYST_PARALLEL_EXECUTION_ENABLED is False, this function
+    delegates to the original sequential run_analysis() — byte-identical
+    behavior to pre-fix pipeline.
+    """
+    if not getattr(settings, "ANALYST_PARALLEL_EXECUTION_ENABLED", True):
+        return run_analysis(
+            steps=plan_steps,
+            doc_context=doc_context,
+            query=query,
+            budget=budget,
+            generate_fn=generate_fn,
+            bedrock_client=bedrock_client,
+            step_retriever_fn=step_retriever_fn,
+        )
+
+    if not plan_steps:
+        return [], []
+
+    independent: List[Tuple[int, Any]] = []
+    dependent: List[Tuple[int, Any]] = []
+    for idx, step in enumerate(plan_steps):
+        if _get_step_dependencies(step):
+            dependent.append((idx, step))
+        else:
+            independent.append((idx, step))
+
+    concurrency = max(1, int(getattr(settings, "ANALYST_PARALLEL_CONCURRENCY", 3)))
+    logger.info(
+        "[analyst_parallel] %d independent + %d dependent steps (concurrency=%d)",
+        len(independent), len(dependent), concurrency,
+    )
+
+    findings_by_idx: Dict[int, str] = {}
+    results_by_idx: Dict[int, Any] = {}
+
+    def _run_single(step_text: Any, sub_ctx: str) -> Tuple[List[str], List[Any]]:
+        return run_analysis(
+            steps=[step_text],
+            doc_context=sub_ctx,
+            query=query,
+            budget=budget,
+            generate_fn=generate_fn,
+            bedrock_client=bedrock_client,
+            step_retriever_fn=step_retriever_fn,
+        )
+
+    # Wave 1 — independent steps in parallel
+    if independent:
+        with ThreadPoolExecutor(max_workers=concurrency) as executor:
+            future_map = {
+                executor.submit(_run_single, step, doc_context): idx
+                for idx, step in independent
+            }
+            for future in as_completed(future_map):
+                idx = future_map[future]
+                try:
+                    sub_findings, sub_results = future.result()
+                    if sub_findings:
+                        findings_by_idx[idx] = sub_findings[0]
+                    if sub_results:
+                        results_by_idx[idx] = sub_results[0]
+                except Exception as exc:
+                    logger.warning(
+                        "[analyst_parallel] step %d failed: %s", idx + 1, exc,
+                    )
+
+    # Wave 2 — dependent steps sequential, enriched with prior findings
+    for idx, step in dependent:
+        prior = [findings_by_idx[k] for k in sorted(findings_by_idx)]
+        enriched_ctx = (
+            f"{doc_context}\n\nPRIOR FINDINGS:\n" + "\n\n".join(prior)
+            if prior else doc_context
+        )
+        try:
+            sub_findings, sub_results = _run_single(step, enriched_ctx)
+            if sub_findings:
+                findings_by_idx[idx] = sub_findings[0]
+            if sub_results:
+                results_by_idx[idx] = sub_results[0]
+        except Exception as exc:
+            logger.warning(
+                "[analyst_parallel] dependent step %d failed: %s", idx + 1, exc,
+            )
+
+    ordered_findings = [findings_by_idx[i] for i in sorted(findings_by_idx)]
+    ordered_results = [results_by_idx[i] for i in sorted(results_by_idx)]
+
+    logger.info(
+        "[analyst_parallel] completed %d/%d steps",
+        len(ordered_results), len(plan_steps),
+    )
+    return ordered_findings, ordered_results
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +464,15 @@ def run_agent_pipeline(
 
     # --- Reasoning log (internal only, never exposed to user) ---
     reasoning_log: List[str] = []
+
+    # Pipeline-scoped retrieval cache (Fix 2). Wraps the incoming
+    # step_retriever_fn so identifier-keyed retrieval hits are deduplicated
+    # within this single run. When AGENT_RETRIEVAL_CACHE_ENABLED=False the
+    # wrapper returns the original fn unchanged — byte-identical behavior.
+    pipeline_retrieval_cache = PipelineRetrievalCache()
+    step_retriever_fn = _wrap_step_retriever_with_cache(
+        step_retriever_fn, pipeline_retrieval_cache,
+    )
 
     try:
         # ==================================================================
@@ -259,13 +598,52 @@ def run_agent_pipeline(
                 budget.max_total, composer_reserve, per_step_budget,
             )
 
+        # ── Fix 4 / Dynamic Budget: analytical / compare budget bump ──
+        # When the query is analytical (cross-cutting synthesis, compare,
+        # deep analysis) and the pattern_context path didn't already bump
+        # the budget, compute a query-specific budget from complexity
+        # signals (ticket count, planner step count, analysis mode) and
+        # raise the ceiling so the Composer isn't starved.
+        #
+        # The dynamic formula replaces the earlier flat AGENT_ANALYTICAL_BUDGET
+        # override. AGENT_ANALYTICAL_BUDGET is preserved as the fallback
+        # that _compute_dynamic_agent_budget returns when the master
+        # AGENT_DYNAMIC_BUDGET_ENABLED flag is False. The trigger gate,
+        # pattern_context short-circuit, and log-tag format stay
+        # byte-compatible with prior observability tooling.
+        _analytical_dynamic_applied = False
+        if not pattern_context:
+            if _ANALYTICAL_BUDGET_TRIGGERS.search(query or ""):
+                ticket_count = len(ranked_chunks) if ranked_chunks else 0
+                step_count = len(plan_steps) if plan_steps else 1
+                mode = _detect_analytical_mode(query)
+                analytical_budget = _compute_dynamic_agent_budget(
+                    ticket_count=ticket_count,
+                    step_count=step_count,
+                    mode=mode,
+                )
+                if analytical_budget and budget.max_total < analytical_budget:
+                    logger.info(
+                        "[agents] analytical query: bumping budget from %d to %d",
+                        budget.max_total, analytical_budget,
+                    )
+                    budget.max_total = analytical_budget
+                    _analytical_dynamic_applied = True
+
         # ── Goal 4: dynamic budget sizing now that we know the plan ──
         # The static AGENT_MAX_TOTAL_TOKENS cap was regularly blowing up on
         # 4-step plans. Compute a plan-aware budget (Clarifier + Planner +
         # N*PerStep + Composer), clamped by AGENT_BUDGET_HARD_CAP_TOKENS so
         # a runaway planner with 50 steps can't explode cost. max() with the
         # existing budget ensures we never shrink what's already in flight.
-        if settings.ENABLE_DYNAMIC_AGENT_BUDGET:
+        #
+        # DYNAMIC_BUDGET_OVERRIDE_FIX — Fix 1: skip this legacy sizing when
+        # the analytical dynamic budget already fired. Its hard-cap clamp
+        # (AGENT_BUDGET_HARD_CAP_TOKENS, ~20000) was silently reversing the
+        # analytical bump back to ~19000, starving the Composer on deep
+        # cross-cutting synthesis. For non-analytical queries, this path is
+        # unchanged.
+        if settings.ENABLE_DYNAMIC_AGENT_BUDGET and not _analytical_dynamic_applied:
             step_count = len(plan_steps or [])
             computed = (
                 settings.AGENT_BUDGET_CLARIFIER_TOKENS
@@ -294,8 +672,8 @@ def run_agent_pipeline(
         if plan_steps and not budget.exhausted:
             reasoning_log.append(f"[Analyst] Executing {len(plan_steps)} steps against document context")
 
-            findings, analysis_results = run_analysis(
-                steps=plan_steps,
+            findings, analysis_results = _execute_analyst_steps_parallel(
+                plan_steps=plan_steps,
                 doc_context=doc_context,
                 query=query,
                 budget=budget,
@@ -349,6 +727,18 @@ def run_agent_pipeline(
     result.total_ms = int((time.perf_counter() - t_start) * 1000)
     result.total_tokens = budget.used
     result.reasoning_summary = " | ".join(reasoning_log)
+
+    # Fix 2: emit pipeline-scoped retrieval cache stats.
+    try:
+        _cache_stats = pipeline_retrieval_cache.stats()
+        if _cache_stats["hits"] + _cache_stats["misses"] > 0:
+            logger.info(
+                "[retrieval_cache] pipeline stats: hits=%d misses=%d hit_rate=%.0f%%",
+                int(_cache_stats["hits"]), int(_cache_stats["misses"]),
+                _cache_stats["hit_rate"] * 100,
+            )
+    except Exception:
+        pass
 
     logger.info(
         "Agent pipeline complete: %d steps, %d tokens, %dms | %s",

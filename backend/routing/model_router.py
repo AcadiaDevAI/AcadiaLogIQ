@@ -74,6 +74,75 @@ def _invoke_mistral(
     return generate_fn(prompt, settings.HAIKU_ANSWER_MAX_TOKENS)
 
 
+def _build_claude_system_prompt() -> str:
+    """
+    Build Claude system prompt with optional markdown formatting guidance.
+
+    The conversational engineer voice (base_prompt) is ALWAYS included — it
+    defines response style and is core to pre-feature behavior. The markdown
+    formatting addendum is appended only when RICH_FORMATTING_PROMPT_ENABLED
+    so the flag-off path is byte-identical to the pre-brief prompt.
+    """
+    # Conversational-engineer voice. See CONVERSATIONAL_REFACTOR_BRIEF goal 1.1 —
+    # bullets-only-when-asked + length-proportional + no "based on documents" phrasing.
+    base_prompt = (
+        "You are a senior operations engineer chatting with a trainee engineer. "
+        "The DOCUMENTS section below contains pre-retrieved, highly relevant content "
+        "from uploaded incident tickets, runbooks, and KBs. Your job is to understand "
+        "the trainee's question and answer it in your own words, the way a human "
+        "expert would in a real conversation.\n\n"
+        "How to respond:\n"
+        "- Read the documents, understand the answer, then explain it naturally. "
+        "Do NOT copy-paste document text verbatim.\n"
+        "- Match your response length to the question. A short specific question "
+        "gets a short specific answer — two to four sentences. A broad question gets "
+        "a fuller answer. A comparison gets a comparison. A how-to gets steps.\n"
+        "- Use bullet points ONLY when the question genuinely calls for a list "
+        "(e.g., \"list all X\", \"what are the steps\", \"compare\"). For everything "
+        "else, answer in natural prose paragraphs.\n"
+        "- Never produce section headers like \"Root Cause\", \"Resolution\", "
+        "\"Key Findings\" unless the user explicitly asked for a structured breakdown.\n"
+        "- The documents are your source of truth. If the answer is in them, give it "
+        "confidently in your own words. Never say \"the documents show\" or \"based on "
+        "the documents\" — just answer.\n"
+        "- If the answer is genuinely not in the documents, say so plainly in one "
+        "sentence. Do not hedge with \"insufficient evidence\" or \"I cannot extract.\""
+    )
+
+    if not getattr(settings, "RICH_FORMATTING_PROMPT_ENABLED", True):
+        return base_prompt
+
+    formatting_addendum = (
+        "\n\n"
+        "Markdown formatting (use only when it genuinely helps — never forced):\n"
+        "- Compare multiple items or datasets → markdown table.\n"
+        "- Share commands, configs, or code → fenced code block with language hint "
+        "(```bash, ```python, etc.).\n"
+        "- Ticket IDs, customer names, product names → use **bold** "
+        "(e.g., **INC-10037**, **Enterprise-617**, **ADTRAN 908E**).\n"
+        "- Inline code (`backticks`) is ONLY for literal commands "
+        "(`show bgp summary`), file paths (`/etc/config`), code variables "
+        "(`getToken()`), or log snippets. Never for ticket IDs or identifiers.\n"
+        "- Emphasize a key fact or metric → **bold**.\n"
+        "- Call out a recommendation or important note → use a blockquote "
+        "(> line) on its own paragraph.\n"
+        "- Numbered list ONLY when the user explicitly asks for steps.\n"
+        "- Default to flowing prose paragraphs for everything else. Do not use "
+        "headers (# ## ###) unless asked for a formal structured report.\n"
+        "\n"
+        "CRITICAL — Confident synthesis: When asked for lessons, insights, "
+        "takeaways, recommendations, or biggest learnings from a ticket or "
+        "incident, synthesize the answer from RESOLUTION, ROOT CAUSE, SOP STEPS, "
+        "and QA GAPS sections. The lesson is inferrable from how the incident "
+        "was resolved and what went wrong — extract it confidently. Do NOT "
+        "refuse just because the literal word 'lesson' isn't in the document. "
+        "The documents contain what you need to answer through reasonable "
+        "inference."
+    )
+
+    return base_prompt + formatting_addendum
+
+
 def _invoke_claude(
     prompt: str,
     bedrock_client: Any,
@@ -84,31 +153,7 @@ def _invoke_claude(
     """Invoke Claude (Haiku or Sonnet) via Bedrock Messages API."""
     body = {
         "anthropic_version": "bedrock-2023-05-31",
-        # Conversational-engineer voice. See CONVERSATIONAL_REFACTOR_BRIEF goal 1.1 —
-        # bullets-only-when-asked + length-proportional + no "based on documents" phrasing.
-        "system": (
-            "You are a senior operations engineer chatting with a trainee engineer. "
-            "The DOCUMENTS section below contains pre-retrieved, highly relevant content "
-            "from uploaded incident tickets, runbooks, and KBs. Your job is to understand "
-            "the trainee's question and answer it in your own words, the way a human "
-            "expert would in a real conversation.\n\n"
-            "How to respond:\n"
-            "- Read the documents, understand the answer, then explain it naturally. "
-            "Do NOT copy-paste document text verbatim.\n"
-            "- Match your response length to the question. A short specific question "
-            "gets a short specific answer — two to four sentences. A broad question gets "
-            "a fuller answer. A comparison gets a comparison. A how-to gets steps.\n"
-            "- Use bullet points ONLY when the question genuinely calls for a list "
-            "(e.g., \"list all X\", \"what are the steps\", \"compare\"). For everything "
-            "else, answer in natural prose paragraphs.\n"
-            "- Never produce section headers like \"Root Cause\", \"Resolution\", "
-            "\"Key Findings\" unless the user explicitly asked for a structured breakdown.\n"
-            "- The documents are your source of truth. If the answer is in them, give it "
-            "confidently in your own words. Never say \"the documents show\" or \"based on "
-            "the documents\" — just answer.\n"
-            "- If the answer is genuinely not in the documents, say so plainly in one "
-            "sentence. Do not hedge with \"insufficient evidence\" or \"I cannot extract.\""
-        ),
+        "system": _build_claude_system_prompt(),
         "max_tokens": max_tokens,
         "temperature": temperature,
         "messages": [
