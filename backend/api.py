@@ -1780,6 +1780,10 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         owner_id=owner_id,
     )
 
+    # Capture clarifier-refined flag before clarification_response is consumed
+    # below; pattern analytics uses this signal downstream.
+    _pattern_is_clarifier_refined = req.clarification_response is not None
+
     # ── Interactive Clarifier — expand refined-query follow-ups ──
     if req.clarification_response is not None:
         try:
@@ -2515,6 +2519,29 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     retrieval_confidence = min(0.3 + len(doc_ranked) * 0.1, 1.0)
     recent_msgs = recent_msgs_all
 
+    # ── Layer 3 Pattern Analytics (selective, gated, cache-aware) ──
+    # Runs only when the classifier deems the query benefits from historical
+    # pattern insights. Every integration point is try/except wrapped so that
+    # any failure here leaves the standard response pipeline untouched.
+    pattern_context: Optional[Dict[str, Any]] = None
+    try:
+        from backend.services.pattern_analytics import enrich_if_needed as _pattern_enrich
+        from backend.db.queries import load_similar_tickets_for_topic as _load_similar
+
+        pattern_context = _pattern_enrich(
+            query=effective_query,
+            retrieved_chunks=doc_ranked,
+            session_mode=None,
+            is_clarifier_refined=_pattern_is_clarifier_refined,
+            organization_id=owner_id,
+            similar_tickets_loader=_load_similar,
+        )
+    except Exception as _pa_exc:
+        logger.warning(
+            "[pattern_analytics] enrichment failed: %s (continuing without)", _pa_exc,
+        )
+        pattern_context = None
+
     # ── Complexity classification (always cheap; no LLM call) ──
     complexity = classify_complexity(
         query=effective_query,
@@ -2617,6 +2644,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             prior_messages=recent_msgs,
             stage=stage_result.stage,
             unresolved_count=stage_result.unresolved_count,
+            pattern_context=pattern_context,
         )
         raw_answer = agent_result.answer
 
@@ -2632,6 +2660,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
                 recent_messages=recent_msgs,
                 generate_fn=safe_generate,
                 bedrock_client=bedrock,
+                pattern_context=pattern_context,
             )
             raw_answer = routing.answer
     else:
@@ -2644,6 +2673,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             recent_messages=recent_msgs,
             generate_fn=safe_generate,
             bedrock_client=bedrock,
+            pattern_context=pattern_context,
         )
         raw_answer = routing.answer
 
@@ -2675,6 +2705,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             recent_messages=recent_msgs,
             generate_fn=safe_generate,
             bedrock_client=bedrock,
+            pattern_context=pattern_context,
         )
         return r.answer
 

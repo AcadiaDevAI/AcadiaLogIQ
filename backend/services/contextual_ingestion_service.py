@@ -1239,8 +1239,33 @@ def process_document(
                 )
                 break
 
-    blocks = parse_file(local_path)
-    chunks = build_chunks(blocks)
+    # CSV/TSV: use column-aware parser that emits one ParsedChunk per row.
+    # Short-circuits the generic parse_file/build_chunks path (which would
+    # treat the file as flat text). Gated by CSV_COLUMN_AWARE_PARSING_ENABLED
+    # inside parse_csv; when disabled it falls back to a single flat-text chunk.
+    ext = local_path.suffix.lower()
+    if ext in (".csv", ".tsv"):
+        from backend.ingestion.csv_parser import parse_csv
+        org_schema_mapping: Optional[Dict[str, str]] = None
+        if getattr(settings, "DYNAMIC_SCHEMA_INFERENCE_ENABLED", False):
+            try:
+                from backend.services.schema_inference import get_or_infer_schema_from_csv
+                info = get_or_infer_schema_from_csv(
+                    organization_id=owner_id,
+                    local_path=local_path,
+                )
+                if info and info.get("schema_mapping"):
+                    org_schema_mapping = info["schema_mapping"]
+            except Exception as exc:  # non-fatal — fall back to heuristics
+                logger.warning(
+                    "[schema_inference] lookup failed for org=%s file=%s: %s",
+                    owner_id, filename, exc,
+                )
+        chunks = parse_csv(local_path, org_schema=org_schema_mapping)
+    else:
+        blocks = parse_file(local_path)
+        chunks = build_chunks(blocks)
+
     if not chunks:
         raise RuntimeError("No parsable content found in file")
 

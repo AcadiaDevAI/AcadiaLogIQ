@@ -142,6 +142,7 @@ def build_prompt(
     ranked_chunks: Optional[List[Tuple[str, str, Dict[str, Any], float]]] = None,
     retrieval_confidence: float = 0.5,
     source_count: int = 1,
+    pattern_context: Optional[Dict[str, Any]] = None,
 ) -> str:
     """
     Build the final generation prompt enriched with context signals.
@@ -208,6 +209,12 @@ def build_prompt(
 
     # --- Document context ---
     sections.append(f"DOCUMENTS:\n{doc_context}")
+
+    # --- Pattern analytics block (Layer 3, optional) ---
+    if pattern_context and isinstance(pattern_context, dict):
+        block = pattern_context.get("pattern_block")
+        if block:
+            sections.append(block)
 
     # --- User question ---
     sections.append(f"USER QUESTION: {query}")

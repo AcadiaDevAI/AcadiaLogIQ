@@ -1526,6 +1526,10 @@ def list_active_files_all() -> list:
     """
     List ALL active files across ALL users.
     Uses the same LATERAL JOIN pattern as list_active_files() which already works.
+
+    Includes version-chain fields (normalized_name, version_family_key,
+    version_label, version_rank) so the frontend can group documents by
+    version family.
     """
     with SessionLocal() as db:
         rows = db.execute(
@@ -1538,7 +1542,11 @@ def list_active_files_all() -> list:
                     d.status,
                     d.owner_id,
                     d.created_at,
+                    d.normalized_name,
+                    d.version_family_key,
                     dv.id::text AS version_id,
+                    dv.version_label,
+                    dv.version_rank,
                     COALESCE(dv.file_size_mb, '0') AS file_size_mb,
                     ij.job_id,
                     COALESCE(ij.status, 'indexed') AS job_status
@@ -1565,6 +1573,13 @@ def list_active_files_all() -> list:
         except Exception:
             size_value = 0.0
 
+        version_rank_val = None
+        try:
+            if row["version_rank"] is not None:
+                version_rank_val = float(row["version_rank"])
+        except Exception:
+            version_rank_val = None
+
         results.append(
             {
                 "id": row["id"],
@@ -1579,6 +1594,10 @@ def list_active_files_all() -> list:
                 if row["created_at"]
                 else None,
                 "owner_id": row["owner_id"],
+                "normalized_name": row["normalized_name"],
+                "version_family_key": row["version_family_key"],
+                "version_label": row["version_label"],
+                "version_rank": version_rank_val,
             }
         )
     return results

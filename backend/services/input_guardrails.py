@@ -119,6 +119,50 @@ PII_PATTERNS = {
     "email":           re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
 }
 
+
+# ---------------------------------------------------------------------------
+# Pattern Analytics Polish — Fix 3: Luhn-validated credit-card detection.
+# ---------------------------------------------------------------------------
+# Real credit-card numbers pass the Luhn checksum; 13-16 digit ticket IDs,
+# incident numbers, and arbitrary numeric strings almost always fail it.
+# When PII_CREDIT_CARD_LUHN_VALIDATION_ENABLED is True, we only treat a
+# regex match as a credit card if it passes Luhn. Flag False reverts to
+# the original regex-only redaction (legacy behavior preserved).
+#
+# Only credit_card is affected — SSN, AWS keys, private keys, and email
+# continue to redact on bare regex match.
+def _is_valid_luhn(number_str: str) -> bool:
+    """Return True if the digits in `number_str` satisfy the Luhn checksum."""
+    digits = [int(c) for c in (number_str or "") if c.isdigit()]
+    if len(digits) < 13 or len(digits) > 19:
+        return False
+    total = 0
+    for i, digit in enumerate(reversed(digits)):
+        if i % 2 == 1:
+            doubled = digit * 2
+            total += doubled if doubled < 10 else (doubled - 9)
+        else:
+            total += digit
+    return total % 10 == 0
+
+
+def _should_redact_pii_match(name: str, candidate: str) -> bool:
+    """
+    Decide whether a regex match for PII `name` should actually be redacted.
+
+    For `credit_card`, consult the Luhn validator when the feature flag is
+    on. For every other PII type, always return True — matches redact as
+    they always did. This keeps the fix scoped to credit-card detection.
+
+    Legacy behavior (flag=False) also returns True, so the caller redacts
+    the match unconditionally as it did before the polish brief.
+    """
+    if name != "credit_card":
+        return True
+    if not getattr(settings, "PII_CREDIT_CARD_LUHN_VALIDATION_ENABLED", True):
+        return True
+    return _is_valid_luhn(candidate)
+
 _SECRET_EXFIL_PATTERNS = [
     re.compile(r"\bprint\s+(your|the)\s+environment\s+variables?\b", re.I),
     re.compile(r"\bshow\s+(me\s+)?(the\s+)?(api\s+key|password|secret|token|credentials?)\b", re.I),
@@ -167,7 +211,14 @@ def _layer1_regex(query: str) -> Optional[GuardrailResult]:
         scrubbed = q
         pii_hit: List[str] = []
         for name, pattern in PII_PATTERNS.items():
-            def _repl(_m, _name=name):
+            def _repl(m, _name=name):
+                candidate = m.group(0)
+                if not _should_redact_pii_match(_name, candidate):
+                    logger.debug(
+                        "[guardrails] skipping Luhn-invalid digit sequence: %s (likely ticket ID)",
+                        candidate,
+                    )
+                    return candidate
                 pii_hit.append(_name)
                 return f"[REDACTED_{_name.upper()}]"
             scrubbed = pattern.sub(_repl, scrubbed)

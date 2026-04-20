@@ -12,7 +12,7 @@ import logging
 from typing import List, Tuple
 
 from backend.config import settings
-from backend.services.input_guardrails import PII_PATTERNS
+from backend.services.input_guardrails import PII_PATTERNS, _should_redact_pii_match
 
 logger = logging.getLogger("acadia-log-iq")
 
@@ -40,9 +40,18 @@ def sanitize_output(answer: str, original_query: str = "") -> Tuple[str, List[st
     try:
         if settings.OUTPUT_SANITIZER_SCRUB_PII:
             for name, pattern in PII_PATTERNS.items():
-                if pattern.search(result):
-                    issues.append(f"pii:{name}")
-                    result = pattern.sub(f"[REDACTED_{name.upper()}]", result)
+                def _repl(m, _name=name):
+                    candidate = m.group(0)
+                    if not _should_redact_pii_match(_name, candidate):
+                        logger.debug(
+                            "[sanitizer] skipping Luhn-invalid digit sequence: %s (likely ticket ID)",
+                            candidate,
+                        )
+                        return candidate
+                    if f"pii:{_name}" not in issues:
+                        issues.append(f"pii:{_name}")
+                    return f"[REDACTED_{_name.upper()}]"
+                result = pattern.sub(_repl, result)
 
         lowered = result.lower()
         for hint in _PROMPT_LEAK_HINTS:

@@ -99,6 +99,23 @@ class Settings(BaseSettings):
     ADAPTIVE_MAX_TOKENS_MAX: int = 8000
 
     # ----------------------------------------------------------------
+    # CSV column-aware parsing
+    # ----------------------------------------------------------------
+    CSV_COLUMN_AWARE_PARSING_ENABLED: bool = True
+    CSV_MAX_ROWS_PER_UPLOAD: int = 50000
+
+    # ----------------------------------------------------------------
+    # Dynamic per-organization schema inference
+    # ----------------------------------------------------------------
+    DYNAMIC_SCHEMA_INFERENCE_ENABLED: bool = True
+    SCHEMA_CONFIDENCE_THRESHOLD: float = 0.5
+
+    # ----------------------------------------------------------------
+    # Retrieval: prefer latest version of a document family
+    # ----------------------------------------------------------------
+    PREFER_LATEST_VERSION_IN_RETRIEVAL: bool = True
+
+    # ----------------------------------------------------------------
     # Concurrency — PERFORMANCE TUNED
     # ----------------------------------------------------------------
 
@@ -485,6 +502,43 @@ class Settings(BaseSettings):
     SES_FEEDBACK_RECIPIENT: str = "dev@acadiaconsultants.com"
     SES_REGION: Optional[str] = None
     SES_ENABLED: str = "true"
+
+    # ----------------------------------------------------------------
+    # Pattern Analytics (Layer 3 selective stats engine)
+    # ----------------------------------------------------------------
+    PATTERN_ANALYTICS_ENABLED: bool = True
+    PATTERN_ANALYTICS_MIN_SIMILAR_TICKETS: int = 3
+    PATTERN_ANALYTICS_CONFIDENCE_THRESHOLD: float = 0.7
+    PATTERN_ANALYTICS_SIMILARITY_THRESHOLD: float = 0.65
+    PATTERN_ANALYTICS_RECENCY_WINDOW_DAYS: int = 30
+    PATTERN_ANALYTICS_CACHE_TTL_HOURS: int = 24
+    PATTERN_ANALYTICS_TOP_N_ACTIONS: int = 3
+    PATTERN_ANALYTICS_FORCE_ENABLE_IN_TROUBLESHOOTING_MODE: bool = True
+
+    # ----------------------------------------------------------------
+    # Pattern Analytics Polish Brief — 3 surgical fixes, each flag-gated.
+    # ----------------------------------------------------------------
+    # Fix 1 — queries.load_similar_tickets_for_topic splits topic into
+    # individual terms and OR-matches tsvector + ILIKE across summary /
+    # resolution_text / component / chunk content. Flip False to fall
+    # back to the legacy ILIKE-OR-on-chunks path preserved under
+    # _load_similar_tickets_legacy.
+    PATTERN_ANALYTICS_SQL_OR_MATCHING_ENABLED: bool = True
+
+    # Fix 2 — when pattern_context is active, orchestrator caps planner
+    # steps, bumps the dynamic budget, and reserves composer tokens so
+    # the Composer never gets starved. All other (non-pattern) queries
+    # use the legacy dynamic budget exactly as before.
+    PATTERN_ANALYTICS_BUDGET_TUNING_ENABLED: bool = True
+    PATTERN_ANALYTICS_MAX_PLANNER_STEPS: int = 3
+    PATTERN_ANALYTICS_AGENT_BUDGET: int = 25000
+    PATTERN_ANALYTICS_COMPOSER_RESERVE: int = 4000
+
+    # Fix 3 — Luhn-validate candidate credit-card digit sequences before
+    # redacting. Prevents ticket IDs / long numeric identifiers from
+    # being falsely masked as PII. Only affects the credit_card PII type
+    # — SSN, email, AWS keys, private keys are untouched.
+    PII_CREDIT_CARD_LUHN_VALIDATION_ENABLED: bool = True
 
     model_config = SettingsConfigDict(
         env_file=str(BASE_DIR / ".env"),

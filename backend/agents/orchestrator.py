@@ -104,6 +104,7 @@ def run_agent_pipeline(
     prior_messages: Optional[List[Dict[str, str]]] = None,
     stage: Optional[str] = None,
     unresolved_count: int = 0,
+    pattern_context: Optional[Dict[str, Any]] = None,
 ) -> AgentPipelineResult:
     """
     Run the full multi-agent pipeline: Planner → Analyst → Composer.
@@ -215,6 +216,48 @@ def run_agent_pipeline(
         result.steps.append(plan_result)
         result.plan = plan_steps
         reasoning_log.append(f"[Planner] Produced {len(plan_steps)} steps: {[s[:50] for s in plan_steps]}")
+
+        # ── Pattern Analytics Polish — Fix 2: pattern-aware budget tuning ──
+        # When pattern_context is active, Composer was regularly getting
+        # starved ("Skipped (budget exhausted)") because 4 analyst steps ate
+        # the whole 19K default. For pattern queries we cap planner steps,
+        # bump the hard budget, and reserve composer tokens explicitly.
+        # Flag-gated so pattern queries revert to the legacy dynamic budget
+        # path below whenever it's flipped False.
+        if (
+            getattr(settings, "PATTERN_ANALYTICS_BUDGET_TUNING_ENABLED", True)
+            and pattern_context
+        ):
+            max_steps_for_patterns = getattr(
+                settings, "PATTERN_ANALYTICS_MAX_PLANNER_STEPS", 3,
+            )
+            if plan_steps and len(plan_steps) > max_steps_for_patterns:
+                logger.info(
+                    "[agents] pattern query: reducing planner steps from %d to %d",
+                    len(plan_steps), max_steps_for_patterns,
+                )
+                plan_steps = plan_steps[:max_steps_for_patterns]
+                result.plan = plan_steps
+
+            pattern_budget = getattr(
+                settings, "PATTERN_ANALYTICS_AGENT_BUDGET", 25000,
+            )
+            if budget.max_total < pattern_budget:
+                logger.info(
+                    "[agents] pattern query: bumping budget from %d to %d",
+                    budget.max_total, pattern_budget,
+                )
+                budget.max_total = pattern_budget
+
+            composer_reserve = getattr(
+                settings, "PATTERN_ANALYTICS_COMPOSER_RESERVE", 4000,
+            )
+            step_cnt = max(1, len(plan_steps or []))
+            per_step_budget = max(2000, (budget.max_total - composer_reserve) // step_cnt)
+            logger.info(
+                "[agents] pattern query: budget breakdown total=%d reserve=%d per_step=%d",
+                budget.max_total, composer_reserve, per_step_budget,
+            )
 
         # ── Goal 4: dynamic budget sizing now that we know the plan ──
         # The static AGENT_MAX_TOTAL_TOKENS cap was regularly blowing up on

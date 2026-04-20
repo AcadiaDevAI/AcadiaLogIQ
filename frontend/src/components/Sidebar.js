@@ -26,6 +26,31 @@ import {
 } from "../services/api";
 import UploadPanel from "./UploadPanel";
 import UserProfile from "./UserProfile";
+import VersionGroup from "./VersionGroup";
+
+// Group files by (normalized_name || version_family_key || name), sort
+// each group descending by version_rank so the newest version is first.
+function groupByVersionFamily(files) {
+  const groups = new Map();
+  for (const f of files || []) {
+    const key = f.normalized_name || f.version_family_key || f.name;
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(f);
+  }
+  const result = [];
+  for (const [key, versions] of groups.entries()) {
+    versions.sort((a, b) => {
+      const ra = a.version_rank != null ? a.version_rank : 0;
+      const rb = b.version_rank != null ? b.version_rank : 0;
+      if (rb !== ra) return rb - ra;
+      const ta = a.created_at ? new Date(a.created_at).getTime() : 0;
+      const tb = b.created_at ? new Date(b.created_at).getTime() : 0;
+      return tb - ta;
+    });
+    result.push({ key, versions });
+  }
+  return result;
+}
 
 export default function Sidebar() {
   const { state, dispatch } = useChat();
@@ -169,44 +194,56 @@ export default function Sidebar() {
           {state.uploadedFiles.length === 0 ? (
             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span className="t-text-muted text-xs">No files uploaded</span>} />
           ) : (
-            state.uploadedFiles.map((f) => (
-              <div key={f.id} className="group flex items-center justify-between px-3 py-2 rounded-lg t-bg-tertiary border" style={{ borderColor: "var(--border-color)" }}>
-                <div className="flex items-center gap-2 min-w-0 flex-1">
-                  <FileOutlined style={{ color: "#6366f1" }} />
-                  <div className="min-w-0">
-                    <p className="text-xs t-text truncate max-w-[140px]">{f.name}</p>
-                    <p className="text-[10px] t-text-muted">
-                      {f.size_mb.toFixed(1)}MB ·{" "}
-                      <span style={{ color: f.status === "indexed" ? "#10b981" : f.status === "failed" ? "#ef4444" : "#f59e0b" }}>
-                        {f.status}
-                      </span>
-                    </p>
+            groupByVersionFamily(state.uploadedFiles).map(({ key, versions }) => {
+              if (versions.length === 1) {
+                const f = versions[0];
+                return (
+                  <div key={f.id} className="group flex items-center justify-between px-3 py-2 rounded-lg t-bg-tertiary border" style={{ borderColor: "var(--border-color)" }}>
+                    <div className="flex items-center gap-2 min-w-0 flex-1">
+                      <FileOutlined style={{ color: "#6366f1" }} />
+                      <div className="min-w-0">
+                        <p className="text-xs t-text truncate max-w-[140px]">{f.name}</p>
+                        <p className="text-[10px] t-text-muted">
+                          {f.size_mb != null ? `${f.size_mb.toFixed(1)}MB · ` : ""}
+                          <span style={{ color: f.status === "indexed" ? "#10b981" : f.status === "failed" ? "#ef4444" : "#f59e0b" }}>
+                            {f.status}
+                          </span>
+                        </p>
+                      </div>
+                    </div>
+                    {isAdmin && (
+                      <Popconfirm
+                        title={`Delete "${f.name}"?`}
+                        description="This will remove the file and all its indexed data."
+                        onConfirm={() => handleDeleteFile(f.id, f.name)}
+                        okText="Delete"
+                        cancelText="Cancel"
+                        okButtonProps={{ danger: true }}
+                      >
+                        <Tooltip title="Delete file">
+                          <Button
+                            type="text"
+                            size="small"
+                            icon={<DeleteOutlined />}
+                            className="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                            style={{ color: "var(--text-muted)" }}
+                            danger
+                          />
+                        </Tooltip>
+                      </Popconfirm>
+                    )}
                   </div>
-                </div>
-                {/* Delete button — Admin only */}
-                {isAdmin && (
-                  <Popconfirm
-                    title={`Delete "${f.name}"?`}
-                    description="This will remove the file and all its indexed data."
-                    onConfirm={() => handleDeleteFile(f.id, f.name)}
-                    okText="Delete"
-                    cancelText="Cancel"
-                    okButtonProps={{ danger: true }}
-                  >
-                    <Tooltip title="Delete file">
-                      <Button
-                        type="text"
-                        size="small"
-                        icon={<DeleteOutlined />}
-                        className="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
-                        style={{ color: "var(--text-muted)" }}
-                        danger
-                      />
-                    </Tooltip>
-                  </Popconfirm>
-                )}
-              </div>
-            ))
+                );
+              }
+              return (
+                <VersionGroup
+                  key={key}
+                  versions={versions}
+                  isAdmin={isAdmin}
+                  onDelete={handleDeleteFile}
+                />
+              );
+            })
           )}
         </div>
       ),

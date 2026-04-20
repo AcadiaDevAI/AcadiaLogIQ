@@ -157,6 +157,7 @@ def route_and_generate(
     generate_fn: Callable[[str, int], str],
     bedrock_client: Any,
     triage_context: Optional[Dict[str, Any]] = None,
+    pattern_context: Optional[Dict[str, Any]] = None,
 ) -> RoutingResult:
     """
     Main routing entry point. Called by the /ask endpoint.
@@ -216,6 +217,7 @@ def route_and_generate(
         ranked_chunks=ranked_chunks,
         retrieval_confidence=retrieval_confidence,
         source_count=len(set(source_names)),
+        pattern_context=pattern_context,
     )
     result.prompt_chars = len(prompt)
 
