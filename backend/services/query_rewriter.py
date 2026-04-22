@@ -343,6 +343,85 @@ _PRIORITY_TOKEN_RE = re.compile(r"\bP[1-4]\b", re.IGNORECASE)
 _SLA_TOKEN_RE = re.compile(r"\bSLA\b", re.IGNORECASE)
 
 
+# Sprint 2.8.1 — true-ellipsis structural signals. The rewriter was
+# classifying complete, standalone queries as ellipsis_expanded and
+# injecting stale customer scope from prior turns. A real ellipsis
+# must fail to stand alone — that means either a referential pronoun
+# at the head, a sentence-continuation conjunction, or a tiny query
+# with no named entity to anchor it.
+_REFERENTIAL_PRONOUNS = frozenset({
+    "it", "that", "those", "them", "these", "this", "one", "ones",
+    "they", "both", "either", "neither",
+})
+_SENTENCE_CONJUNCTIONS = frozenset({
+    "and", "but", "or", "also", "plus", "additionally",
+})
+_NAMED_ENTITY_KEYWORD_RE = re.compile(
+    r"\b(score|priority|status|customer|sla|rework|bgp|mpls|ospf|bgp|"
+    r"vpn|firewall|citrix|exadata|oracle|ticket|ticketid|incident)\b",
+    re.I,
+)
+_NAMED_ENTITY_ID_RE = re.compile(r"\b[A-Z]+-[A-Z0-9]+-\d+\b|\b[A-Z]+-\d+\b")
+
+
+def _is_true_ellipsis(query: str) -> bool:
+    """Sprint 2.8.1 — return True only when the query genuinely depends
+    on prior context to be answerable. False for any query that can
+    stand alone (has named entity / filter keyword / identifier /
+    sufficient length and no fragment marker)."""
+    q = (query or "").strip()
+    if not q:
+        return False
+    q_lower = q.lower()
+    tokens = q_lower.split()
+    if not tokens:
+        return False
+
+    head = tokens[0].strip(".,?!:;")
+
+    # Signal 1 — starts with a referential pronoun.
+    if head in _REFERENTIAL_PRONOUNS:
+        return True
+    # Signal 2 — starts with a sentence-continuation conjunction.
+    if head in _SENTENCE_CONJUNCTIONS:
+        return True
+    # Signal 3 — very short query with no named-entity anchor.
+    # Check against the original-cased query so we can see capital
+    # words like "BGP" / "Aetheris".
+    if len(tokens) < 5:
+        has_named_entity = (
+            any(c.isupper() for c in query)
+            or _NAMED_ENTITY_ID_RE.search(query) is not None
+            or _NAMED_ENTITY_KEYWORD_RE.search(query) is not None
+        )
+        if not has_named_entity:
+            return True
+
+    return False
+
+
+def _should_expand_ellipsis(
+    query: str,
+    confidence: float,
+    min_conf: float,
+) -> bool:
+    """Sprint 2.8.1 — gated ellipsis expansion.
+
+    Flag-off: only the raised confidence threshold applies — this
+    alone prevents the observed 0.85 over-eager rewrite while staying
+    within the rewriter's existing contract.
+
+    Flag-on: ALSO require that the query shows a real structural
+    ellipsis signal. Complete, standalone queries no longer take the
+    expansion path even if the LLM returned ellipsis_expanded with
+    high confidence."""
+    if confidence < min_conf:
+        return False
+    if not getattr(settings, "LOGIQ_REWRITER_STRICT_ELLIPSIS", False):
+        return True
+    return _is_true_ellipsis(query)
+
+
 def _looks_like_fragment(text: str) -> bool:
     """A query is a fragment if it starts with an ellipsis marker or is a
     pure pronoun/ordinal reference that can't stand alone."""
@@ -559,6 +638,27 @@ def rewrite_query(
             q[:120], rewritten[:120],
         )
         return _sentinel(q, "over_eager_rewrite_rejected", raw=raw, confidence=confidence)
+
+    # Sprint 2.8.1 — ellipsis_expanded gate. Observed incident: the
+    # LLM returned reason=ellipsis_expanded at confidence=0.85 on a
+    # complete standalone query (`present me the BGP related incidents
+    # with Resolution_Quality_Score of 5`) and injected `for Aetheris
+    # Corp` from session history. Raised threshold (0.85 → 0.92) and,
+    # under LOGIQ_REWRITER_STRICT_ELLIPSIS, require a true-fragment
+    # structural signal before honoring ellipsis_expanded.
+    if was_rewritten and reason == "ellipsis_expanded":
+        min_conf = float(
+            getattr(settings, "REWRITER_ELLIPSIS_MIN_CONF", 0.92)
+        )
+        if not _should_expand_ellipsis(q, confidence, min_conf):
+            logger.info(
+                "[rewriter] dropping rewrite (ellipsis_not_true_fragment, conf=%.2f) "
+                "original=%r rewrite=%r",
+                confidence, q[:120], rewritten[:120],
+            )
+            return _sentinel(
+                q, "over_eager_rewrite_rejected", raw=raw, confidence=confidence,
+            )
 
     result = RewriteResult(
         rewritten_query=rewritten if was_rewritten else q,

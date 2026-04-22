@@ -66,6 +66,29 @@ def _extract_negation_tokens(query: str) -> List[str]:
     return sorted({w for w in words if w in _NEGATION_TOKENS})
 
 
+def _similarity_threshold() -> float:
+    """Hotfix: tighten the cosine threshold when LOGIQ_HOTFIX_BACKEND is on
+    to reduce near-miss cache hits on paraphrased-but-different queries."""
+    if getattr(settings, "LOGIQ_HOTFIX_BACKEND", False):
+        return float(getattr(
+            settings, "HOTFIX_SEMANTIC_CACHE_THRESHOLD", 0.985,
+        ))
+    return float(settings.SEMANTIC_CACHE_SIMILARITY_THRESHOLD)
+
+
+_NUMERIC_RE = re.compile(r"-?\d+(?:\.\d+)?")
+
+
+def _numeric_tokens(query: str) -> List[str]:
+    """Hotfix: numbers that semantically partition meaning (top-5 vs top-10,
+    P1 vs P3, >30 days vs >90 days). Treat as a strict equality gate so
+    'top 5 tickets' doesn't reuse the answer for 'top 10 tickets'.
+    """
+    if not query:
+        return []
+    return sorted(set(_NUMERIC_RE.findall(query)))
+
+
 def _extract_cache_identifiers(query: str) -> List[str]:
     from backend.retrieval.orchestrator import _extract_identifiers
     return sorted({canonical for canonical, _id_type in _extract_identifiers(query or "")})
@@ -131,11 +154,12 @@ def lookup(query: str, active_file_ids: Iterable[str]) -> Optional[SemanticCache
             return None
 
         similarity = float(row["similarity"])
-        if similarity < settings.SEMANTIC_CACHE_SIMILARITY_THRESHOLD:
+        active_threshold = _similarity_threshold()
+        if similarity < active_threshold:
             if settings.SEMANTIC_CACHE_LOG_HITS:
                 logger.info(
-                    "[semantic_cache] below threshold: sim=%.3f < %.2f query=%r",
-                    similarity, settings.SEMANTIC_CACHE_SIMILARITY_THRESHOLD, (query or "")[:80],
+                    "[semantic_cache] below threshold: sim=%.3f < %.3f query=%r",
+                    similarity, active_threshold, (query or "")[:80],
                 )
             return None
 
@@ -156,6 +180,19 @@ def lookup(query: str, active_file_ids: Iterable[str]) -> Optional[SemanticCache
                 cached_negs, incoming_negations,
             )
             return None
+
+        # Hotfix: numeric-token equality. 'top 5' and 'top 10' share almost
+        # all their embedding mass but are different questions — reject when
+        # the number set differs.
+        if getattr(settings, "LOGIQ_HOTFIX_BACKEND", False):
+            incoming_nums = _numeric_tokens(query)
+            cached_nums = _numeric_tokens(row["query_text"] or "")
+            if cached_nums != incoming_nums:
+                logger.info(
+                    "[semantic_cache] numeric mismatch: cached=%s incoming=%s — reject",
+                    cached_nums, incoming_nums,
+                )
+                return None
 
         # Layer 2 check 3: source file still accessible
         cached_sources = set(row["source_file_ids"] or [])

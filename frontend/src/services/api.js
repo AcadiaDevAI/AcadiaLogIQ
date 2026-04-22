@@ -177,4 +177,29 @@ export const getProfile = () => api.get("/auth/profile");
 
 export const deleteAccount = () => api.delete("/auth/delete-account");
 
+// ─── Guided Workflow (Sprint 1) ───────────────────────────
+// Endpoints land the session in one of the 4 PRD modes.
+// See backend/services/session_mode_state.py for the canonical
+// list of mode / sub_mode values.
+
+export const getSessionMode = (sessionId) =>
+  api.get(`/chat/sessions/${sessionId}/mode`);
+
+export const setSessionMode = (sessionId, { selectedMode, subMode, formData }) =>
+  api.post(`/chat/sessions/${sessionId}/mode`, {
+    selected_mode: selectedMode,
+    sub_mode: subMode || null,
+    form_data: formData || null,
+  });
+
+export const resetSessionContext = (sessionId) =>
+  api.post(`/chat/sessions/${sessionId}/context/reset`);
+
+// ─── Guided Workflow (Sprint 2) ───────────────────────────
+// Partial patch to mode-state. Server returns 403 when the
+// Sprint 2 flag is off — callers must treat that as a feature
+// disabled signal (not an error to surface to the user).
+export const patchSessionForm = (sessionId, fields) =>
+  api.post(`/chat/sessions/${sessionId}/mode/form`, fields || {});
+
 export default api;

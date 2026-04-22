@@ -296,7 +296,10 @@ class Settings(BaseSettings):
     RESPONSE_TOKEN_CAPS_ENABLED: bool = True
     RESPONSE_TOKENS_CLASSIFICATION: int = 30
     RESPONSE_TOKENS_SHORT_FACT: int = 120
-    RESPONSE_TOKENS_EXPLANATION: int = 350
+    # Sprint 2.7 Bug D — was 350; raised to 600 so multi-section
+    # explanations (hardware + application + network) fit in one Haiku
+    # call instead of triggering the walkthrough-reclassification retry.
+    RESPONSE_TOKENS_EXPLANATION: int = 600
     RESPONSE_TOKENS_WALKTHROUGH: int = 600
     RESPONSE_TOKENS_ANALYTICAL: int = 1200
     RESPONSE_TOKENS_DEFAULT: int = 350
@@ -657,6 +660,134 @@ class Settings(BaseSettings):
 
     # Multiplier for deep analysis mode (explicit user request for depth).
     AGENT_DYNAMIC_BUDGET_DEEP_MULTIPLIER: float = 1.5
+
+    # ─────────────────────────────────────────────────────────────
+    # Guided Workflow (PRD: User Journey - LogIQ Landing Page Guidance)
+    # Sprint 1 — session state foundation + landing page shell.
+    # ─────────────────────────────────────────────────────────────
+
+    # Master kill-switch. When False, the backend ignores mode endpoints
+    # and the frontend skips the landing page. Flip to True to roll out.
+    GUIDED_WORKFLOW_ENABLED: bool = False
+
+    # When True, a session with a locked mode rejects /ask queries that
+    # look clearly cross-mode. Sprint 1 keeps this OFF (soft mode); the
+    # real enforcement arrives in Sprint 2 once context-break detection
+    # is wired. Flag exists now so Sprint 1 is forward-compatible.
+    MODE_LOCK_STRICT: bool = False
+
+    # Sprint 2 placeholder — regex-based context-break phrase detection.
+    # Declared now so Sprint 1 deploys don't need a config reload later.
+    CONTEXT_BREAK_DETECTION_ENABLED: bool = False
+
+    # Sprint 2 placeholder — lets triage_classifier's existing Haiku call
+    # emit a context_break hint on ambiguous messages (no new LLM call).
+    CONTEXT_BREAK_LLM_HINT_ENABLED: bool = False
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 2 — Context awareness + pattern response + structured forms.
+    # Single master flag for the whole sprint. Soft dependency on
+    # Sprint 1 (GUIDED_WORKFLOW_ENABLED) — Sprint 2 code no-ops with
+    # a log line when Sprint 1 is off.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_SPRINT2_BACKEND: bool = False
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 2.5 — Retrieval & Pattern Hotfix.
+    # Single master switch for all 9 bug fixes. When False every
+    # touched site falls back byte-for-byte to pre-hotfix behavior.
+    # The three HOTFIX_* tunables are *defaults*, not independent
+    # feature flags — operators may override them in .env if needed.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_HOTFIX_BACKEND: bool = False
+
+    HOTFIX_VOCAB_MIN_OCCURRENCE: int = 1
+    HOTFIX_SEMANTIC_CACHE_THRESHOLD: float = 0.985
+    HOTFIX_COMPOSER_RESERVE_TOKENS: int = 5000
+
+    # ─────────────────────────────────────────────────────────────
+    # Production Retrieval Fix v2 — 5 deeper architectural bugs.
+    # All flags default True so the v2 behavior ships on by default
+    # once LOGIQ_HOTFIX_BACKEND is True; each flag is also an
+    # independent kill-switch for fast rollback.
+    # ─────────────────────────────────────────────────────────────
+
+    # Bug #2: JSON-tree-aware vocabulary learning — keys become
+    # field_names, values matching identifier pattern become
+    # identifiers, short repeated uppercase values become enums.
+    VOCABULARY_JSON_STRUCTURAL_PARSING: bool = True
+    VOCABULARY_ENUM_MIN_OCCURRENCE: int = 3
+
+    # Bug #1: identifier extractor consults learned_vocabulary and
+    # skips tokens classified as 'field_name' so
+    # Resolution_Quality_Score isn't treated as a ticket ID.
+    IDENTIFIER_VOCAB_TYPE_CHECK: bool = True
+
+    # Bug #5: multi-column exact lookup across incident_number /
+    # vector_id / external_incident_id + suffix stripping so
+    # INC-ALPHA-001_SEMANTIC_UNIT maps to INC-ALPHA-001.
+    IDENTIFIER_MULTI_COLUMN_LOOKUP: bool = True
+    IDENTIFIER_SUFFIX_STRIP_ENABLED: bool = True
+
+    # Bug #4: reserve Composer tokens in a separate pool so the
+    # Analyst can't drain the budget and starve the synthesis step.
+    AGENT_BUDGET_SEPARATE_COMPOSER_POOL: bool = True
+
+    # Bug #3: admin-only ingestion verification + reindex endpoints.
+    INGESTION_VERIFICATION_ENABLED: bool = True
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 2.6 — Numeric Equality Filter
+    # Single master flag gating every new code path added by
+    # Sprint 2.6 (score = N / quality_score = N equality filter).
+    # Default False so production pre-flip behavior is byte-identical.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_NUMERIC_FILTER_BACKEND: bool = False
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 2.7 — Accuracy Hotfix (5 bugs)
+    # Single master flag gating every new code path added by
+    # Sprint 2.7. Flag-off = byte-identical pre-2.7 behavior.
+    # HOTFIX_EXPLANATION_TOKENS_CAP is a tunable int (not a second
+    # on/off flag) so operators can retune without a code change.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_ACCURACY_HOTFIX_BACKEND: bool = False
+    HOTFIX_EXPLANATION_TOKENS_CAP: int = 600
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 2.8 — Dynamic Content Term Extraction
+    # Single master flag gating every new code path added by
+    # Sprint 2.8 (dynamic stopword+metadata subtraction for compound
+    # content+metadata filters, Bug F customer-name variant match,
+    # aggregation-intent-aware reranker cap). Flag-off = byte-identical
+    # pre-2.8 behavior. RERANK_TOP_K_AGGREGATION is a tunable int (not
+    # a second on/off flag) so operators can retune the aggregation
+    # reranker ceiling without a code change.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_COMPOUND_FILTER_BACKEND: bool = False
+    RERANK_TOP_K_AGGREGATION: int = 40
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 2.8.1 — Rewriter ellipsis tightening
+    # LOGIQ_REWRITER_STRICT_ELLIPSIS gates the TRUE-ellipsis
+    # structural requirement (referential pronoun / sentence
+    # conjunction / short fragment without named entity).
+    # REWRITER_ELLIPSIS_MIN_CONF raises the confidence floor for
+    # accepting an ellipsis_expanded rewrite from 0.85 → 0.92 —
+    # SAFE to apply even when the master flag is off.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_REWRITER_STRICT_ELLIPSIS: bool = False
+    REWRITER_ELLIPSIS_MIN_CONF: float = 0.92
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 2.9 — JSON Structure Validator
+    # Rejects uploads whose CONTENT looks like JSON (first non-whitespace
+    # byte is { or [) but fails strict parse. Flag-off = byte-identical
+    # pre-2.9 behavior (silent False in _is_gold_ticket_json on malformed
+    # JSON, fall-through to generic text chunking). See
+    # SPRINT_2_9_JSON_VALIDATOR.md for runtime acceptance walk.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_JSON_VALIDATOR_BACKEND: bool = False
 
     model_config = SettingsConfigDict(
         env_file=str(BASE_DIR / ".env"),

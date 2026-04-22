@@ -45,6 +45,27 @@ Rules:
 Output ONLY the JSON object."""
 
 
+# Sprint 2 — optional addendum. Appended to _SYSTEM_PROMPT only when
+# CONTEXT_BREAK_LLM_HINT_ENABLED is True. When the flag is off the prompt
+# is byte-for-byte unchanged (backward-compat guarantee).
+_CONTEXT_BREAK_ADDENDUM = """
+
+4. context_break: true if the query clearly signals a switch to a new topic
+   or mode (phrases like "new issue", "different question", "change context",
+   "switch to escalation", "unrelated", "start over"). False when the query
+   is a follow-up, clarification, or drills deeper into the same topic.
+5. context_break_reason: one short phrase explaining the signal, or empty.
+
+Extended JSON: {"complexity":"...","intent":"...","mode_hint":"...","confidence":0.0-1.0,"context_break":false,"context_break_reason":""}"""
+
+
+def _build_system_prompt() -> str:
+    """Return the base triage prompt, optionally augmented for context break."""
+    if getattr(settings, "CONTEXT_BREAK_LLM_HINT_ENABLED", False):
+        return _SYSTEM_PROMPT + _CONTEXT_BREAK_ADDENDUM
+    return _SYSTEM_PROMPT
+
+
 _ALLOWED_COMPLEXITY = {"simple", "moderate", "complex"}
 _ALLOWED_INTENT = {"single_record", "aggregation", "compare", "multi_step", "conversational"}
 _ALLOWED_MODE = {"chat", "rag", "agents"}
@@ -58,6 +79,11 @@ class TriageResult:
     confidence: float
     raw_response: str
     is_valid: bool
+    # Sprint 2 — extended fields. Defaults keep every existing callsite
+    # working unchanged. Only populated when the LLM hint addendum is on
+    # AND the model returned the optional keys.
+    context_break: bool = False
+    context_break_reason: str = ""
 
 
 def _sentinel(raw: str = "") -> TriageResult:
@@ -70,7 +96,7 @@ def _sentinel(raw: str = "") -> TriageResult:
 def _invoke_bedrock(prompt: str, max_tokens: int) -> str:
     body = {
         "anthropic_version": "bedrock-2023-05-31",
-        "system": _SYSTEM_PROMPT,
+        "system": _build_system_prompt(),
         "max_tokens": max_tokens,
         "temperature": 0.0,
         "messages": [
@@ -147,9 +173,24 @@ def classify_triage(query: str) -> TriageResult:
         )
         return _sentinel(raw)
 
+    # Sprint 2 — optional context-break hint. Only read when the addendum
+    # is active; missing/malformed values fall through to False/"" which
+    # preserves pre-Sprint-2 behavior.
+    _context_break = False
+    _context_break_reason = ""
+    if getattr(settings, "CONTEXT_BREAK_LLM_HINT_ENABLED", False):
+        cb_raw = data.get("context_break", False)
+        if isinstance(cb_raw, bool):
+            _context_break = cb_raw
+        elif isinstance(cb_raw, str):
+            _context_break = cb_raw.strip().lower() in {"true", "1", "yes"}
+        cb_reason = data.get("context_break_reason", "")
+        if isinstance(cb_reason, str):
+            _context_break_reason = cb_reason.strip()[:200]
+
     logger.info(
-        "[triage] complexity=%s intent=%s mode_hint=%s confidence=%.2f",
-        complexity, intent, mode_hint, confidence,
+        "[triage] complexity=%s intent=%s mode_hint=%s confidence=%.2f context_break=%s",
+        complexity, intent, mode_hint, confidence, _context_break,
     )
     return TriageResult(
         complexity=complexity,
@@ -158,4 +199,6 @@ def classify_triage(query: str) -> TriageResult:
         confidence=confidence,
         raw_response=raw,
         is_valid=True,
+        context_break=_context_break,
+        context_break_reason=_context_break_reason,
     )

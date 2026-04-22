@@ -39,6 +39,7 @@ from backend.vector_store import (
     get_chat_session,
     get_ingestion_job,
     insert_document_and_chunks,
+    insert_rejected_document_row,
     list_active_files,
     list_active_files_all,
     list_chat_sessions,
@@ -83,6 +84,17 @@ from backend.routing.stage_enforcer import (
     STAGE_GENERAL,
     STAGE_TICKETS,
     STAGE_DOCS,
+)
+from backend.services.session_mode_state import (
+    get_session_mode,
+    set_session_mode,
+    reset_session_mode,
+    patch_session_mode,
+    SessionMode,
+    MODE_TROUBLESHOOTING,
+    MODE_TICKET_HANDLING,
+    MODE_ESCALATION,
+    MODE_VENDOR_OEM,
 )
 from backend.routing.evidence_checker import check_evidence
 from backend.validation.validator import validate_answer
@@ -1252,6 +1264,45 @@ async def index_file_job(
             filename, t_parse_end - t_parse_start, len(processed.get("chunk_rows", []))
         )
 
+        # Sprint 2.9 — malformed-JSON rejection. process_document returns
+        # a {"status": "rejected", ...} dict BEFORE any Haiku / embedding /
+        # DB-chunk work when LOGIQ_JSON_VALIDATOR_BACKEND rejects the file.
+        # Persist a rejected documents row so the admin UI can show a
+        # red-dot badge, mark the ingestion job failed with a human-friendly
+        # error detail, and return — no chunks, no embeddings.
+        if processed.get("status") == "rejected" and processed.get("ingestion_status") == "invalid_json":
+            detail = (
+                f"Invalid JSON at line {processed.get('error_line', '?')}"
+                f" col {processed.get('error_col', '?')}: "
+                f"{processed.get('error_reason', 'parse error')}"
+            )
+            try:
+                await asyncio.to_thread(
+                    insert_rejected_document_row,
+                    document_id=file_id,
+                    owner_id=owner_id,
+                    filename=filename,
+                    file_type=file_type,
+                    ingestion_status="invalid_json",
+                    ingestion_error=detail,
+                )
+            except Exception as row_exc:
+                logger.warning("[json_validator] could not persist rejected row: %s", row_exc)
+            update_ingestion_job(
+                job_id,
+                status="error",
+                processed_chunks="0",
+                total_chunks="0",
+                successful_chunks="0",
+                error=detail,
+                completed_at=datetime.now(timezone.utc),
+            )
+            logger.info(
+                "[json_validator] rejected %s in %.1fs",
+                filename, _time.perf_counter() - t_total_start,
+            )
+            return
+
         if processed["status"] == "exact_duplicate":
             update_ingestion_job(
                 job_id,
@@ -1628,6 +1679,170 @@ async def purge_orphan_chunks(user_id: Optional[str] = Depends(auth_dependency))
     }
 
 
+# ────────────────────────────────────────────────────────────────
+# v2 Bug #5 — Admin ingestion diagnostics
+# ────────────────────────────────────────────────────────────────
+# verify-ingestion reports chunk / embedding / vocab counts so operators
+# can detect the "chunks exist but not queryable" failure mode. reindex
+# rebuilds the learned vocabulary from existing chunks — cheaper than
+# re-running the full LLM pipeline and directly targets the scenario
+# where a file was ingested BEFORE the v2 JSON-aware learner deployed.
+# Both are gated by INGESTION_VERIFICATION_ENABLED so the routes fail
+# closed when the feature flag is flipped off.
+
+@app.get("/admin/verify-ingestion/{file_id}")
+async def admin_verify_ingestion(
+    file_id: str,
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    if not getattr(settings, "INGESTION_VERIFICATION_ENABLED", False):
+        raise HTTPException(404, "Ingestion verification disabled")
+
+    from sqlalchemy import text as _sql_text
+    from backend.db.connection import engine as _engine
+
+    issues: List[str] = []
+    chunks_count = 0
+    embeddings_count = 0
+    identifiers_learned = 0
+    file_exists = False
+    file_name: Optional[str] = None
+
+    try:
+        with _engine.connect() as conn:
+            row = conn.execute(
+                _sql_text(
+                    "SELECT id::text AS id, name, status FROM documents "
+                    "WHERE id::text = :fid LIMIT 1"
+                ),
+                {"fid": file_id},
+            ).mappings().first()
+            if row:
+                file_exists = True
+                file_name = row.get("name")
+
+            chunks_count = conn.execute(
+                _sql_text(
+                    "SELECT COUNT(*)::int FROM chunks WHERE document_id::text = :fid"
+                ),
+                {"fid": file_id},
+            ).scalar() or 0
+
+            embeddings_count = conn.execute(
+                _sql_text(
+                    "SELECT COUNT(*)::int FROM chunks "
+                    "WHERE document_id::text = :fid AND embedding IS NOT NULL"
+                ),
+                {"fid": file_id},
+            ).scalar() or 0
+
+            identifiers_learned = conn.execute(
+                _sql_text(
+                    "SELECT COUNT(*)::int FROM learned_vocabulary "
+                    "WHERE first_seen_file = :fid AND token_type = 'identifier'"
+                ),
+                {"fid": file_id},
+            ).scalar() or 0
+    except Exception as exc:
+        logger.warning("[admin/verify-ingestion] query failed: %s", exc)
+        issues.append(f"QUERY_ERROR — {exc}")
+
+    if not file_exists:
+        issues.append("FILE_NOT_FOUND — no row in documents table")
+    if file_exists and chunks_count == 0:
+        issues.append("NO_CHUNKS — file exists but has zero chunks")
+    if chunks_count > 0 and identifiers_learned == 0:
+        issues.append("NO_IDENTIFIERS — vocab learning produced no identifiers")
+    if chunks_count > 0 and embeddings_count != chunks_count:
+        issues.append(
+            f"EMBEDDING_GAP — {chunks_count} chunks but {embeddings_count} embeddings"
+        )
+
+    return {
+        "file_id": file_id,
+        "file_name": file_name,
+        "chunks_count": chunks_count,
+        "embeddings_count": embeddings_count,
+        "identifiers_learned": identifiers_learned,
+        "issues": issues,
+        "healthy": len(issues) == 0,
+    }
+
+
+@app.post("/admin/reindex/{file_id}")
+async def admin_reindex(
+    file_id: str,
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    if not getattr(settings, "INGESTION_VERIFICATION_ENABLED", False):
+        raise HTTPException(404, "Ingestion verification disabled")
+
+    from sqlalchemy import text as _sql_text
+    from backend.db.connection import engine as _engine
+
+    # Load existing chunk content + file name.
+    file_name: Optional[str] = None
+    combined_text_parts: List[str] = []
+    try:
+        with _engine.connect() as conn:
+            row = conn.execute(
+                _sql_text(
+                    "SELECT name FROM documents WHERE id::text = :fid LIMIT 1"
+                ),
+                {"fid": file_id},
+            ).mappings().first()
+            if not row:
+                raise HTTPException(404, f"File not found: {file_id}")
+            file_name = row["name"]
+
+            chunk_rows = conn.execute(
+                _sql_text(
+                    "SELECT COALESCE(contextualized_content, content) AS body "
+                    "FROM chunks WHERE document_id::text = :fid"
+                ),
+                {"fid": file_id},
+            ).mappings().all()
+            combined_text_parts = [r["body"] for r in chunk_rows if r.get("body")]
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("[admin/reindex] chunk read failed: %s", exc)
+        raise HTTPException(500, f"Reindex failed during chunk read: {exc}")
+
+    if not combined_text_parts:
+        return {
+            "status": "no_content",
+            "file_id": file_id,
+            "message": "No chunks found — nothing to re-learn from. Re-upload the file.",
+        }
+
+    combined_text = "\n".join(combined_text_parts)
+
+    try:
+        from backend.services.vocabulary_learner import (
+            learn_from_content,
+            persist as _vocab_persist,
+            reload_cache as _vocab_reload_cache,
+        )
+        learned = learn_from_content(combined_text, file_id)
+        rows = _vocab_persist(learned, file_id)
+        _vocab_reload_cache()
+    except Exception as exc:
+        logger.warning("[admin/reindex] vocab rebuild failed: %s", exc)
+        raise HTTPException(500, f"Reindex failed during vocab learn: {exc}")
+
+    return {
+        "status": "reindexed",
+        "file_id": file_id,
+        "file_name": file_name,
+        "chunks_scanned": len(combined_text_parts),
+        "vocab_rows_upserted": rows,
+        "identifiers": len(learned.get("identifiers", [])),
+        "field_names": len(learned.get("field_names", [])),
+        "enum_values": len(learned.get("enum_values", [])),
+    }
+
+
 @app.post("/upload", response_model=UploadResponse)
 @limiter.limit("100/minute")
 async def upload(
@@ -1760,6 +1975,140 @@ async def delete_all_sessions(user_id: Optional[str] = Depends(auth_dependency))
     owner_id = _normalize_owner_id(user_id)
     deleted_count = delete_all_chat_sessions(owner_id)
     return {"status": "cleared", "deleted_count": deleted_count}
+
+
+# ─────────────────────────────────────────────────────────────
+# Guided Workflow — session mode state endpoints (Sprint 1).
+# All three require an authenticated user and verify the session
+# belongs to that user via the existing get_chat_session pattern.
+# When GUIDED_WORKFLOW_ENABLED is False the endpoints still work
+# (so operators can test in staging), but the frontend won't call
+# them because its own flag is also off.
+# ─────────────────────────────────────────────────────────────
+class SetSessionModeRequest(BaseModel):
+    selected_mode: str
+    sub_mode: Optional[str] = None
+    form_data: Optional[Dict[str, Any]] = None
+
+
+class SessionModeResponse(BaseModel):
+    ok: bool
+    mode: Dict[str, Any]
+    reason: Optional[str] = None
+
+
+@app.get("/chat/sessions/{session_id}/mode", response_model=SessionModeResponse)
+async def api_get_session_mode(
+    session_id: str,
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    """Read the current mode-state snapshot for a session."""
+    owner_id = _normalize_owner_id(user_id)
+    session = get_chat_session(session_id, owner_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    snap = get_session_mode(session_id)
+    if not snap.is_valid:
+        return SessionModeResponse(ok=False, mode={}, reason="db_read_failed")
+    return SessionModeResponse(ok=True, mode=snap.to_dict())
+
+
+@app.post("/chat/sessions/{session_id}/mode", response_model=SessionModeResponse)
+async def api_set_session_mode(
+    session_id: str,
+    payload: SetSessionModeRequest,
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    """Lock a session to a selected mode (+ optional sub-mode / form data)."""
+    owner_id = _normalize_owner_id(user_id)
+    session = get_chat_session(session_id, owner_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    snap = set_session_mode(
+        session_id=session_id,
+        selected_mode=payload.selected_mode,
+        sub_mode=payload.sub_mode,
+        form_data=payload.form_data,
+    )
+    if not snap.is_valid:
+        return SessionModeResponse(
+            ok=False, mode={}, reason="invalid_mode_or_db_write_failed",
+        )
+    return SessionModeResponse(ok=True, mode=snap.to_dict())
+
+
+@app.post("/chat/sessions/{session_id}/context/reset", response_model=SessionModeResponse)
+async def api_reset_session_context(
+    session_id: str,
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    """Clear the mode-state for a session. Session itself is preserved."""
+    owner_id = _normalize_owner_id(user_id)
+    session = get_chat_session(session_id, owner_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    snap = reset_session_mode(session_id)
+    if not snap.is_valid:
+        return SessionModeResponse(ok=False, mode={}, reason="db_write_failed")
+    return SessionModeResponse(ok=True, mode=snap.to_dict())
+
+
+# ─────────────────────────────────────────────────────────────
+# Sprint 2 — Partial mode/form patch (customer form, tech form, etc.)
+# Gated behind LOGIQ_SPRINT2_BACKEND AND GUIDED_WORKFLOW_ENABLED.
+# Returns 403 when either flag is off so the frontend can fall back
+# cleanly. Whitelists the same fields as patch_session_mode.
+# ─────────────────────────────────────────────────────────────
+class PatchSessionFormRequest(BaseModel):
+    customer_name: Optional[str] = None
+    technology_domain: Optional[str] = None
+    ticket_id: Optional[str] = None
+    issue_summary: Optional[str] = None
+    form_data: Optional[Dict[str, Any]] = None
+
+
+@app.post(
+    "/chat/sessions/{session_id}/mode/form",
+    response_model=SessionModeResponse,
+)
+async def api_patch_session_form(
+    session_id: str,
+    payload: PatchSessionFormRequest,
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    """Apply a partial patch to mode-state fields (Sprint 2 forms)."""
+    if not (
+        getattr(settings, "LOGIQ_SPRINT2_BACKEND", False)
+        and getattr(settings, "GUIDED_WORKFLOW_ENABLED", False)
+    ):
+        raise HTTPException(status_code=403, detail="sprint2_flag_off")
+
+    owner_id = _normalize_owner_id(user_id)
+    session = get_chat_session(session_id, owner_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    updates: Dict[str, Any] = {}
+    for key in (
+        "customer_name", "technology_domain", "ticket_id", "issue_summary", "form_data",
+    ):
+        val = getattr(payload, key, None)
+        if val is not None:
+            updates[key] = val
+
+    if not updates:
+        snap = get_session_mode(session_id)
+        if not snap.is_valid:
+            return SessionModeResponse(ok=False, mode={}, reason="db_read_failed")
+        return SessionModeResponse(ok=True, mode=snap.to_dict(), reason="noop")
+
+    snap = patch_session_mode(session_id, updates)
+    if not snap.is_valid:
+        return SessionModeResponse(ok=False, mode={}, reason="db_write_failed")
+    return SessionModeResponse(ok=True, mode=snap.to_dict())
 
 
 @app.post("/ask", response_model=AnswerResponse)
@@ -2019,6 +2368,69 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         rewrite_confidence = 0.0
         rewrite_applied = False
 
+    # ── Sprint 2: Context-break detection (non-blocking signal) ──
+    # Piggybacks on the regex phrase detector + the existing triage
+    # verdict (zero new LLM calls). When both Sprint 1 and Sprint 2
+    # flags are on AND the session has an active locked mode, we emit
+    # a soft hint in context_stats so the UI can offer the Continue /
+    # Start-new modal. The user's turn still runs end-to-end — we never
+    # short-circuit the answer pipeline here.
+    _context_break_hit: Optional[Dict[str, Any]] = None
+    if (
+        getattr(settings, "LOGIQ_SPRINT2_BACKEND", False)
+        and getattr(settings, "GUIDED_WORKFLOW_ENABLED", False)
+    ):
+        try:
+            _cb_snap = get_session_mode(session_id)
+        except Exception:
+            _cb_snap = None
+        if (
+            _cb_snap is not None
+            and getattr(_cb_snap, "is_valid", False)
+            and getattr(_cb_snap, "conversation_context_active", False)
+        ):
+            try:
+                from backend.services.context_break_phrases import (
+                    detect_context_break as _detect_cb,
+                )
+                _cb_match = _detect_cb(req.q or "")
+            except Exception as _cb_exc:
+                logger.warning("[context_break] regex detect failed: %s", _cb_exc)
+                _cb_match = None
+            _cb_llm = False
+            _cb_llm_reason = ""
+            if (
+                _triage_result is not None
+                and getattr(_triage_result, "is_valid", False)
+                and getattr(settings, "CONTEXT_BREAK_LLM_HINT_ENABLED", False)
+            ):
+                _cb_llm = bool(getattr(_triage_result, "context_break", False))
+                _cb_llm_reason = str(getattr(_triage_result, "context_break_reason", "") or "")
+            if _cb_match is not None or _cb_llm:
+                _context_break_hit = {
+                    "detected": True,
+                    "source": (
+                        "phrase+llm" if (_cb_match is not None and _cb_llm)
+                        else ("phrase" if _cb_match is not None else "llm")
+                    ),
+                    "category": (
+                        getattr(_cb_match, "category", "")
+                        if _cb_match is not None else ""
+                    ),
+                    "matched_phrase": (
+                        getattr(_cb_match, "matched_phrase", "")
+                        if _cb_match is not None else ""
+                    ),
+                    "llm_reason": _cb_llm_reason,
+                    "active_mode": _cb_snap.selected_mode,
+                    "active_sub_mode": _cb_snap.sub_mode,
+                }
+                logger.info(
+                    "[context_break] hit source=%s mode=%s phrase=%r llm=%s",
+                    _context_break_hit["source"], _cb_snap.selected_mode,
+                    _context_break_hit["matched_phrase"], _cb_llm,
+                )
+
     active_file_ids = _get_active_indexed_file_ids(user_id)
 
     # ── Answer cache lookup (fail-safe: any error returns miss) ──
@@ -2249,6 +2661,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
 
     retrieval = orchestrator_retrieve(
         query=expanded.expanded_text,
+        raw_query=req.q,
         query_embedding=q_emb,
         owner_id=owner_id,
         allowed_file_ids=active_file_ids,
@@ -2411,6 +2824,10 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
                     _triage_conf = float(getattr(_triage_result, "confidence", 0.0) or 0.0)
             except Exception:
                 _triage_conf = None
+            # Sprint 2.7 Bug C — pass clarification-chain count so Clarifier
+            # caps the loop at one round per logical question. Count=1 when
+            # this /ask is the refined submission following a prior pick.
+            _session_clarif_count = 1 if _pattern_is_clarifier_refined else 0
             _clarify_res = _try_clarify(
                 query=effective_query,
                 ranked_chunks=doc_ranked,
@@ -2418,6 +2835,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
                 carried_identifiers=list(_carried_entities or []),
                 session_id=session_id,
                 recent_messages=recent_msgs_all,
+                session_clarif_count=_session_clarif_count,
             )
             if _clarify_res.needs_clarification:
                 _clarif_id = _store_clarification(
@@ -2558,6 +2976,22 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     # pattern insights. Every integration point is try/except wrapped so that
     # any failure here leaves the standard response pipeline untouched.
     pattern_context: Optional[Dict[str, Any]] = None
+    # Sprint 2 — wire the active session mode into pattern analytics so
+    # PATTERN_ANALYTICS_FORCE_ENABLE_IN_TROUBLESHOOTING_MODE can trigger.
+    # Gated: only read when both the workflow and Sprint 2 flags are on
+    # (soft dependency on Sprint 1).
+    _pattern_session_mode: Optional[str] = None
+    if (
+        getattr(settings, "LOGIQ_SPRINT2_BACKEND", False)
+        and getattr(settings, "GUIDED_WORKFLOW_ENABLED", False)
+    ):
+        try:
+            _mode_snap = get_session_mode(session_id)
+            if getattr(_mode_snap, "is_valid", False):
+                _pattern_session_mode = _mode_snap.selected_mode
+        except Exception as _mode_exc:
+            logger.warning("[session_mode] read failed in pattern path: %s", _mode_exc)
+            _pattern_session_mode = None
     try:
         from backend.services.pattern_analytics import enrich_if_needed as _pattern_enrich
         from backend.db.queries import load_similar_tickets_for_topic as _load_similar
@@ -2565,7 +2999,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         pattern_context = _pattern_enrich(
             query=effective_query,
             retrieved_chunks=doc_ranked,
-            session_mode=None,
+            session_mode=_pattern_session_mode,
             is_clarifier_refined=_pattern_is_clarifier_refined,
             organization_id=owner_id,
             similar_tickets_loader=_load_similar,
@@ -2671,6 +3105,21 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             logger.warning("build_step_retriever failed (%s) — agents will use global context", _sr_exc)
             step_retriever_fn = None
 
+        # Hotfix: derive session scope tokens from current query identifiers
+        # so the Analyst's per-step retriever can anchor multi-step plans on
+        # the same entities across steps instead of drifting.
+        _session_scope: Optional[List[str]] = None
+        if getattr(settings, "LOGIQ_HOTFIX_BACKEND", False):
+            try:
+                from backend.retrieval.orchestrator import (
+                    _extract_identifiers as _hf_extract,
+                )
+                _session_scope = [
+                    cid for cid, _t in (_hf_extract(effective_query) or [])
+                ]
+            except Exception:
+                _session_scope = None
+
         agent_result = run_agent_pipeline(
             query=effective_query,
             doc_context=doc_ctx,
@@ -2683,6 +3132,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             stage=stage_result.stage,
             unresolved_count=stage_result.unresolved_count,
             pattern_context=pattern_context,
+            session_scope=_session_scope,
         )
         raw_answer = agent_result.answer
 
@@ -2861,6 +3311,46 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         "guardrail_pii_matches": _pii_scrub_matches,
         "output_sanitizer_issues": output_sanitizer_issues,
     }
+
+    # ── Sprint 2: surface pattern + context-break signals in context_stats ──
+    # Strictly additive. Keys absent when Sprint 2 flag is off so the
+    # existing frontend continues to see pre-Sprint-2 payload shape.
+    if getattr(settings, "LOGIQ_SPRINT2_BACKEND", False):
+        try:
+            if pattern_context:
+                context_stats["pattern_active"] = bool(
+                    pattern_context.get("pattern_active", False)
+                )
+                context_stats["pattern_topic"] = pattern_context.get("pattern_topic") or ""
+                context_stats["pattern_data"] = pattern_context.get("pattern_data") or {}
+            else:
+                context_stats["pattern_active"] = False
+                context_stats["pattern_topic"] = ""
+                context_stats["pattern_data"] = {}
+        except Exception as _ps_exc:
+            logger.warning("[pattern_analytics] stats surface failed: %s", _ps_exc)
+            context_stats["pattern_active"] = False
+            context_stats["pattern_topic"] = ""
+            context_stats["pattern_data"] = {}
+
+        if _context_break_hit is not None:
+            context_stats["context_break"] = True
+            context_stats["context_break_source"] = _context_break_hit.get("source", "")
+            context_stats["context_break_category"] = _context_break_hit.get("category", "")
+            context_stats["context_break_matched_phrase"] = (
+                _context_break_hit.get("matched_phrase", "")
+            )
+            context_stats["context_break_active_mode"] = (
+                _context_break_hit.get("active_mode") or ""
+            )
+            context_stats["context_break_active_sub_mode"] = (
+                _context_break_hit.get("active_sub_mode") or ""
+            )
+        else:
+            context_stats["context_break"] = False
+
+        if _pattern_session_mode:
+            context_stats["session_mode"] = _pattern_session_mode
 
     # ── Store in answer cache (fail-safe; never blocks response) ──
     try:

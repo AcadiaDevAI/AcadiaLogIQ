@@ -73,17 +73,22 @@ export default function UploadPanel({ onUploadComplete }) {
     for (let i = 0; i < maxAttempts; i++) {
       try {
         const res = await getUploadStatus(jobId);
-        const { status } = res.data;
+        const { status, error } = res.data;
         if (status === "done") {
           setJobStatuses((s) => ({ ...s, [fileKey]: "done" }));
           dispatch({ type: "UPDATE_FILE_STATUS", payload: { id: fileId, status: "indexed" } });
           message.success("Indexed successfully");
           return;
         }
-        if (status === "failed") {
+        // Sprint 2.9 — "error" covers index_file_job exception path AND
+        // the new JSON-validator rejection path. When an error detail is
+        // present (e.g. "Invalid JSON at line 3 col 1: ..."), surface it
+        // in the toast so the admin doesn't have to hunt in logs.
+        if (status === "failed" || status === "error") {
           setJobStatuses((s) => ({ ...s, [fileKey]: "failed" }));
           dispatch({ type: "UPDATE_FILE_STATUS", payload: { id: fileId, status: "failed" } });
-          message.error("Indexing failed");
+          message.error(error ? `Indexing failed — ${error}` : "Indexing failed", 8);
+          onUploadComplete?.();
           return;
         }
       } catch { /* continue */ }

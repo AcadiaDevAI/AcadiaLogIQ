@@ -23,6 +23,11 @@ from backend.retrieval.keyword_search import (
 )
 from backend.retrieval.fusion import fuse_results, FusedResult
 from backend.retrieval.reranker import BaseReranker, create_reranker
+# Sprint 2.8 — regex-only aggregation detector used to raise the reranker
+# cap for list-style aggregation queries. Deterministic, no LLM cost, safe
+# to call on every retrieve(). When LOGIQ_COMPOUND_FILTER_BACKEND is off,
+# the result of this detection is ignored and the cap stays at RERANK_TOP_K.
+from backend.retrieval.metadata_sql import detect_aggregation_intent
 
 logger = logging.getLogger("acadia-log-iq")
 
@@ -89,6 +94,332 @@ def _extract_ticket_ids(query: str) -> List[str]:
 
 
 # ---------------------------------------------------------------------------
+# Sprint 2.5 — Hotfix identifier extraction (flag-gated)
+# ---------------------------------------------------------------------------
+# Broader patterns than settings.IDENTIFIER_PATTERNS so new customer formats
+# (INC-NEBULA-772, INC_546, raw 13-digit IDs) match without config changes.
+# Also consults learned_vocabulary so customer-specific tokens are preserved
+# even when they don't match any regex.
+_HOTFIX_IDENTIFIER_PATTERNS: List[Tuple[str, str]] = [
+    # Letter prefix + hyphen/underscore + alphanumeric segments:
+    # INC-10001, INC-NEBULA-772, INC_546, CHG-2024-001
+    (r"\b([A-Z]{2,})[-_]([A-Z0-9]+(?:[-_][A-Z0-9]+)*)\b", "identifier"),
+    # Long numeric IDs (>=10 digits) — raw ticket numbers
+    (r"\b(\d{10,})\b", "numeric_id"),
+    # Standard ticket-ish: letters + digits with optional space/hyphen
+    (r"\b([A-Z]{2,6})[- ]?(\d{3,})\b", "ticket_like"),
+]
+
+_HOTFIX_TOKEN_STRIP_RE = re.compile(r"^[\W_]+|[\W_]+$")
+
+
+def _extract_identifiers_hotfix(query: str) -> List[Tuple[str, str]]:
+    """Hotfix identifier extractor — broader patterns + vocabulary lookup.
+
+    Returns list of (canonical_id, id_type) tuples. Falls back to
+    learned_vocabulary for tokens classified as 'identifier' that don't
+    match any regex. Result is compatible with the downstream
+    identifier_exact_search signature.
+
+    v2 Bug #1: when IDENTIFIER_VOCAB_TYPE_CHECK is on, consult the learned
+    vocabulary before classifying a regex-matched candidate as an
+    identifier. If the vocabulary says the token is a 'field_name' or
+    'enum_value', drop it — so Resolution_Quality_Score (a JSON key) is
+    not mistakenly treated as a ticket number.
+    """
+    if not query:
+        return []
+
+    # Vocab lookup helper — single DB hit per token. Import at function
+    # scope so the module stays importable when the DB is unreachable.
+    _vocab_type_check = bool(getattr(settings, "IDENTIFIER_VOCAB_TYPE_CHECK", False))
+    try:
+        from backend.services.vocabulary_learner import (
+            get_token_type,
+            is_identifier_type,
+        )
+    except Exception:
+        def get_token_type(_tok: str) -> str:  # type: ignore
+            return "unknown"
+
+        def is_identifier_type(_tok: str) -> bool:  # type: ignore
+            return False
+
+    out: List[Tuple[str, str]] = []
+    seen: Set[Tuple[str, str]] = set()
+    covered: List[Tuple[int, int]] = []
+
+    # 1. Regex-based extraction (upper-cased for case-insensitive match).
+    upper_query = query.upper()
+    for pattern, id_type in _HOTFIX_IDENTIFIER_PATTERNS:
+        try:
+            regex = re.compile(pattern)
+        except re.error as exc:
+            logger.warning("[hotfix_ids] invalid pattern %r: %s", pattern, exc)
+            continue
+        for m in regex.finditer(upper_query):
+            span = m.span()
+            if any(s <= span[0] < e or s < span[1] <= e for s, e in covered):
+                continue
+            canonical = m.group(0)
+            key = (canonical, id_type)
+            if key in seen:
+                continue
+            # v2 Bug #1: vocabulary-based type filter. Compare using the
+            # original-cased span so field names stored as 'Resolution_Quality_Score'
+            # match their learned form. Fall back to the upper form when the
+            # case-preserved lookup misses.
+            if _vocab_type_check:
+                cased = query[span[0]:span[1]]
+                learned = get_token_type(cased)
+                if learned == "unknown":
+                    learned = get_token_type(canonical)
+                if learned in ("field_name", "enum_value"):
+                    logger.info(
+                        "[id_extract] skipping %s=%s (token=%s)",
+                        learned, canonical, cased,
+                    )
+                    covered.append(span)  # claim span so other patterns don't re-tag
+                    continue
+            seen.add(key)
+            out.append((canonical, id_type))
+            covered.append(span)
+
+    # 2. Vocabulary-backed fallback for tokens that weren't regex-captured.
+    for raw_tok in query.split():
+        core = _HOTFIX_TOKEN_STRIP_RE.sub("", raw_tok)
+        if not core or len(core) < 3:
+            continue
+        canon = core.upper()
+        if any(canon == c for c, _ in out):
+            continue
+        try:
+            if is_identifier_type(canon):
+                out.append((canon, "vocab_identifier"))
+        except Exception:
+            continue
+
+    return out
+
+
+# ---------------------------------------------------------------------------
+# v2 Bug #3 + #5 — Multi-column identifier lookup with suffix stripping
+# ---------------------------------------------------------------------------
+# Real-world data stores the same ticket under several metadata_json keys
+# (incident_number, vector_id, external_incident_id, ticket_number) and
+# vector pipelines often append suffixes like _SEMANTIC_UNIT / _CHUNK so
+# INC-ALPHA-001_SEMANTIC_UNIT never matches the raw INC-ALPHA-001 primary_id.
+# The helper below broadens the exact lookup to all identifier-bearing JSON
+# columns and retries with common suffixes stripped. keyword_search.py is in
+# the must-stay-untouched list, so the wider lookup lives here.
+
+_IDENTIFIER_SUFFIXES: Tuple[str, ...] = (
+    "_SEMANTIC_UNIT",
+    "_CHUNK",
+    "_EMBEDDING",
+    "_DOC",
+    "_ROOT",
+)
+
+_IDENTIFIER_METADATA_COLUMNS: Tuple[str, ...] = (
+    "primary_id",
+    "incident_number",
+    "vector_id",
+    "external_incident_id",
+    "ticket_number",
+)
+
+
+def _strip_identifier_suffixes(token: str) -> str:
+    """Strip known vector-pipeline suffixes (case-insensitive). Returns the
+    input unchanged when nothing matches."""
+    if not token:
+        return token
+    upper = token.upper()
+    for suf in _IDENTIFIER_SUFFIXES:
+        if upper.endswith(suf):
+            return token[: len(token) - len(suf)]
+    return token
+
+
+def _expand_identifier_candidates(
+    identifiers: List[Tuple[str, str]],
+) -> List[str]:
+    """Return the union of raw + suffix-stripped identifier strings
+    (upper-cased, deduped) for multi-column SQL lookup."""
+    out: List[str] = []
+    seen: Set[str] = set()
+    for cid, _itype in identifiers or []:
+        if not cid:
+            continue
+        raw = str(cid).strip().upper()
+        if raw and raw not in seen:
+            seen.add(raw)
+            out.append(raw)
+        if getattr(settings, "IDENTIFIER_SUFFIX_STRIP_ENABLED", False):
+            stripped = _strip_identifier_suffixes(raw).upper()
+            if stripped and stripped not in seen:
+                seen.add(stripped)
+                out.append(stripped)
+    return out
+
+
+def _multi_column_identifier_search(
+    identifiers: List[Tuple[str, str]],
+    allowed_file_ids: Optional[Set[str]],
+    n_results: int = 20,
+) -> List[Dict[str, Any]]:
+    """Exact-match lookup across multiple metadata_json identifier columns.
+
+    Covers primary_id, incident_number, vector_id, external_incident_id,
+    ticket_number. Retries with common suffixes stripped so variants such
+    as INC-ALPHA-001_SEMANTIC_UNIT resolve to INC-ALPHA-001. Returns rows
+    in the same dict shape identifier_exact_search uses so the caller can
+    plug them directly into the ranked list.
+    """
+    candidates = _expand_identifier_candidates(identifiers)
+    if not candidates:
+        return []
+
+    try:
+        from backend.db.connection import SessionLocal
+        from sqlalchemy import bindparam, text as _sql_text
+    except Exception as exc:
+        logger.warning("[multi_col_lookup] import failed: %s", exc)
+        return []
+
+    col_exprs = ", ".join(
+        f"c.metadata_json->>'{col}'" for col in _IDENTIFIER_METADATA_COLUMNS
+    )
+    sql = f"""
+        SELECT
+            c.id,
+            c.content,
+            c.contextualized_content,
+            c.summary,
+            c.section_heading,
+            c.chunk_type,
+            c.labels_json,
+            c.metadata_json,
+            d.id::text       AS file_id,
+            d.owner_id,
+            d.name           AS source,
+            d.file_type
+        FROM chunks c
+        JOIN documents d          ON d.id = c.document_id
+        JOIN document_versions dv ON dv.id = c.document_version_id
+        WHERE UPPER(COALESCE({col_exprs})) = ANY(:identifiers)
+          AND d.status = 'active'
+          AND dv.is_active = TRUE
+          AND d.current_version_id = dv.id
+    """
+
+    params: Dict[str, Any] = {
+        "identifiers": candidates,
+        "limit": int(n_results),
+    }
+    if allowed_file_ids:
+        sql += " AND d.id IN :allowed_ids"
+        params["allowed_ids"] = tuple(allowed_file_ids)
+    sql += " LIMIT :limit"
+
+    hits: List[Dict[str, Any]] = []
+    try:
+        with SessionLocal() as db:
+            stmt = _sql_text(sql)
+            if allowed_file_ids:
+                stmt = stmt.bindparams(bindparam("allowed_ids", expanding=True))
+            rows = db.execute(stmt, params).mappings().all()
+        for row in rows:
+            hits.append({
+                "id": row["id"],
+                "text": row["contextualized_content"] or row["content"],
+                "rank": 1.0,
+                "search_type": "identifier_multi_column",
+                "metadata": {
+                    "file_id": row["file_id"],
+                    "owner_id": row["owner_id"],
+                    "source": row["source"],
+                    "file_type": row["file_type"],
+                    "section_heading": row["section_heading"],
+                    "chunk_type": row["chunk_type"],
+                    "summary": row["summary"],
+                    "labels_json": row["labels_json"] or {},
+                    "metadata_json": row["metadata_json"] or {},
+                },
+            })
+    except Exception as exc:
+        logger.warning("[multi_col_lookup] query failed: %s", exc)
+        return []
+
+    logger.info(
+        "[multi_col_lookup] candidates=%s recovered=%d rows",
+        candidates, len(hits),
+    )
+    return hits
+
+
+def _fallback_like_scan(
+    tokens: List[str],
+    allowed_file_ids: Optional[Set[str]],
+    n_results: int = 20,
+) -> List[Dict[str, Any]]:
+    """Last-ditch LIKE scan over chunks.metadata_json for identifiers the
+    primary_id lookup missed (e.g. identifier stored in a nested field).
+
+    Returns rows in the same shape as identifier_exact_search so the caller
+    can plug them straight into the ranked list.
+    """
+    if not tokens:
+        return []
+    try:
+        from backend.db.connection import engine
+        from sqlalchemy import text as _sql_text
+    except Exception as exc:
+        logger.warning("[fallback_scan] engine import failed: %s", exc)
+        return []
+
+    params: Dict[str, Any] = {"limit": n_results}
+    like_clauses: List[str] = []
+    for i, tok in enumerate(tokens):
+        key = f"tok{i}"
+        params[key] = f"%{tok}%"
+        like_clauses.append(f"metadata_json::text ILIKE :{key}")
+
+    where_clauses = ["(" + " OR ".join(like_clauses) + ")"]
+    if allowed_file_ids:
+        params["document_ids"] = list(allowed_file_ids)
+        where_clauses.append("document_id = ANY(:document_ids)")
+
+    sql = (
+        "SELECT id, content, metadata_json, document_id "
+        "FROM chunks WHERE " + " AND ".join(where_clauses) +
+        " LIMIT :limit"
+    )
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(_sql_text(sql), params).mappings().fetchall()
+    except Exception as exc:
+        logger.warning("[fallback_scan] query failed: %s", exc)
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for r in rows:
+        meta = dict(r.get("metadata_json") or {})
+        meta["document_id"] = r.get("document_id")
+        out.append({
+            "id": r["id"],
+            "text": r.get("content") or "",
+            "metadata": {"metadata_json": meta, **meta},
+            "rank": 0.75,
+        })
+    logger.info(
+        "[fallback_scan] tokens=%s recovered=%d rows", tokens, len(out),
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Result container returned by the orchestrator
 # ---------------------------------------------------------------------------
 @dataclass
@@ -134,6 +465,7 @@ def retrieve(
     embed_fn: Callable = None,
     bm25_search_fn: Callable = None,
     vector_search_fn: Callable = None,
+    raw_query: Optional[str] = None,
 ) -> RetrievalResult:
     """
     Main retrieval entry point. Runs the full Phase 3 pipeline:
@@ -173,7 +505,28 @@ def retrieve(
     # settings.IDENTIFIER_PATTERNS, answer from an exact JSONB lookup on
     # primary_id and skip the four parallel channels entirely. Deterministic,
     # ~1ms, schema-agnostic (tickets, Jira issue keys, KB articles, ...).
-    requested_identifiers = _extract_identifiers(query)
+    if getattr(settings, "LOGIQ_HOTFIX_BACKEND", False):
+        # Prefer the raw, pre-normalization query when the caller supplied one
+        # — required so dash/underscore identifiers (INC-NEBULA-772, INC_546)
+        # are visible to the regex + vocab extractor. expand_query normalizes
+        # dashes to spaces, which corrupts letter-prefix identifier matching.
+        extract_source = raw_query if raw_query else query
+        logger.info(
+            "[retrieve] extraction source=%s len=%d",
+            "raw" if raw_query else "normalized",
+            len(extract_source or ""),
+        )
+        requested_identifiers = _extract_identifiers_hotfix(extract_source)
+        # Union with the legacy extractor so canonical ticket_number matches
+        # (needed by identifier_exact_search) are not lost. Legacy extractor
+        # also runs on the raw source when available.
+        legacy_ids = _extract_identifiers(extract_source)
+        seen_keys = {(c.upper(), t) for c, t in requested_identifiers}
+        for cid, itype in legacy_ids:
+            if (cid.upper(), itype) not in seen_keys:
+                requested_identifiers.append((cid, itype))
+    else:
+        requested_identifiers = _extract_identifiers(query)
     logger.info("[retrieve] extracted identifiers=%s", requested_identifiers)
     # Legacy alias for any downstream reader still expecting ticket IDs.
     requested_ticket_ids = [
@@ -261,9 +614,78 @@ def retrieve(
                 )
                 return result
             else:
-                # Zero rows = identifier(s) genuinely not indexed. Do NOT
-                # fall through — return a clean signal so the caller can
-                # say "not found" rather than hallucinating.
+                # Zero rows = identifier(s) genuinely not indexed by primary_id.
+                # v2 Bug #3 + #5: retry against all identifier-bearing JSON
+                # columns (incident_number, vector_id, external_incident_id,
+                # ticket_number) with common vector-pipeline suffixes stripped
+                # before falling back to the LIKE scan.
+                recovered: List[Dict[str, Any]] = []
+                multi_col_used = False
+                if (
+                    getattr(settings, "LOGIQ_HOTFIX_BACKEND", False)
+                    and getattr(settings, "IDENTIFIER_MULTI_COLUMN_LOOKUP", False)
+                ):
+                    try:
+                        recovered = _multi_column_identifier_search(
+                            identifiers=requested_identifiers,
+                            allowed_file_ids=allowed_file_ids,
+                            n_results=max(settings.RERANK_TOP_K, 20),
+                        )
+                        multi_col_used = True
+                    except Exception as exc:
+                        logger.warning("[multi_col_lookup] raised: %s", exc)
+                        recovered = []
+
+                if not recovered and getattr(settings, "LOGIQ_HOTFIX_BACKEND", False):
+                    try:
+                        recovered = _fallback_like_scan(
+                            tokens=[cid for cid, _ in requested_identifiers],
+                            allowed_file_ids=allowed_file_ids,
+                            n_results=max(settings.RERANK_TOP_K, 20),
+                        )
+                    except Exception as exc:
+                        logger.warning("[fallback_scan] raised: %s", exc)
+                        recovered = []
+
+                if recovered:
+                    ranked: List[FusedResult] = []
+                    for row in recovered:
+                        meta = row.get("metadata", {}) or {}
+                        ranked.append(
+                            (
+                                row["id"],
+                                row["text"],
+                                meta,
+                                float(row.get("rank") or 0.75),
+                            )
+                        )
+                    mode_label = (
+                        "identifier_multi_column"
+                        if multi_col_used and any(
+                            r.get("search_type") == "identifier_multi_column"
+                            for r in recovered
+                        )
+                        else "identifier_fallback_like"
+                    )
+                    result.intent = QueryIntent(
+                        strategy="keyword",
+                        reason=f"{mode_label}: {requested_identifiers}",
+                    )
+                    result.ranked = ranked[: settings.RERANK_TOP_K]
+                    elapsed_ms = int((time.perf_counter() - t_start) * 1000)
+                    result.stats = {
+                        "search_mode": mode_label,
+                        "requested_identifiers": requested_identifiers,
+                        "requested_ticket_ids": requested_ticket_ids,
+                        "matched_count": len(ranked),
+                        "timing_total_ms": elapsed_ms,
+                    }
+                    logger.info(
+                        "Retrieval short-circuit: %s for %s → %d chunks (%dms)",
+                        mode_label, requested_identifiers, len(ranked), elapsed_ms,
+                    )
+                    return result
+
                 result.intent = QueryIntent(
                     strategy="keyword",
                     reason=f"identifier not found: {requested_identifiers}",
@@ -523,17 +945,37 @@ def retrieve(
         bool(getattr(settings, "SKIP_RERANK_ON_TINY_RESULTS_ENABLED", False))
         and len(fused) < int(getattr(settings, "RERANK_MIN_CHUNKS", 3))
     )
+    # Sprint 2.8 — aggregation queries need higher recall. List-style
+    # queries must surface all matching tickets, not just the top-10
+    # "answer this one question"-optimal chunks. Detect aggregation
+    # intent locally via the regex-only fast-path (no LLM cost) and
+    # raise the reranker cap for those queries only. Flag-off keeps
+    # the cap at RERANK_TOP_K (byte-identical pre-2.8 behavior).
+    _rerank_cap = settings.RERANK_TOP_K
+    if getattr(settings, "LOGIQ_COMPOUND_FILTER_BACKEND", False):
+        try:
+            _agg_intent_probe = detect_aggregation_intent(raw_query or query)
+        except Exception as exc:
+            logger.warning("[rerank] aggregation probe failed: %s", exc)
+            _agg_intent_probe = None
+        if _agg_intent_probe is not None:
+            _rerank_cap = int(getattr(settings, "RERANK_TOP_K_AGGREGATION", 40))
+            logger.info(
+                "[rerank] aggregation intent detected (op=%s) → cap raised to %d",
+                _agg_intent_probe.operation, _rerank_cap,
+            )
+
     if _skip_rerank_tiny:
         logger.info(
             "[rerank] skipped — only %d chunks retrieved (threshold=%d)",
             len(fused), int(settings.RERANK_MIN_CHUNKS),
         )
-        ranked = fused[: settings.RERANK_TOP_K]
+        ranked = fused[: _rerank_cap]
     elif fused and generate_fn:
         reranker = _get_reranker(generate_fn)
-        ranked = reranker.rerank(query, fused, top_k=settings.RERANK_TOP_K)
+        ranked = reranker.rerank(query, fused, top_k=_rerank_cap)
     else:
-        ranked = fused[: settings.RERANK_TOP_K]
+        ranked = fused[: _rerank_cap]
 
     t_rerank = time.perf_counter()
 

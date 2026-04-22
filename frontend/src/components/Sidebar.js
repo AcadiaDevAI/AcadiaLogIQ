@@ -23,6 +23,7 @@ import {
   deleteAllSessions,
   listFiles,
   deleteFile,
+  resetSessionContext,
 } from "../services/api";
 import UploadPanel from "./UploadPanel";
 import UserProfile from "./UserProfile";
@@ -107,6 +108,19 @@ export default function Sidebar() {
       dispatch({ type: "NEW_CHAT" });
       message.success("All chats cleared");
     } catch { message.error("Failed to clear"); }
+  };
+
+  const handleChangeContext = async () => {
+    try {
+      if (state.sessionId) {
+        await resetSessionContext(state.sessionId);
+      }
+    } catch {
+      // Swallow network error — still reset client-side so the user is
+      // never stuck in a mode. Backend write can retry on next mode-set.
+    }
+    dispatch({ type: "RESET_MODE_STATE" });
+    message.success("Context cleared — pick a new mode.");
   };
 
   const handleDeleteFile = async (fileId, fileName) => {
@@ -197,16 +211,37 @@ export default function Sidebar() {
             groupByVersionFamily(state.uploadedFiles).map(({ key, versions }) => {
               if (versions.length === 1) {
                 const f = versions[0];
+                // Sprint 2.9 — red-dot indicator for files rejected at ingestion
+                // (malformed JSON). Backend sets ingestion_status="invalid_json"
+                // and populates ingestion_error with a line-number + reason.
+                const isInvalid = f.ingestion_status === "invalid_json";
+                const invalidTooltip = f.ingestion_error || "Invalid JSON structure";
                 return (
-                  <div key={f.id} className="group flex items-center justify-between px-3 py-2 rounded-lg t-bg-tertiary border" style={{ borderColor: "var(--border-color)" }}>
+                  <div key={f.id} className="group flex items-center justify-between px-3 py-2 rounded-lg t-bg-tertiary border" style={{ borderColor: isInvalid ? "#ef4444" : "var(--border-color)" }}>
                     <div className="flex items-center gap-2 min-w-0 flex-1">
-                      <FileOutlined style={{ color: "#6366f1" }} />
+                      {isInvalid ? (
+                        <Tooltip title={invalidTooltip}>
+                          <span
+                            aria-label="Invalid file"
+                            style={{
+                              display: "inline-block",
+                              width: 10,
+                              height: 10,
+                              borderRadius: "50%",
+                              background: "#ef4444",
+                              flexShrink: 0,
+                            }}
+                          />
+                        </Tooltip>
+                      ) : (
+                        <FileOutlined style={{ color: "#6366f1" }} />
+                      )}
                       <div className="min-w-0">
-                        <p className="text-xs t-text truncate max-w-[140px]">{f.name}</p>
+                        <p className="text-xs t-text truncate max-w-[140px]" style={isInvalid ? { color: "#ef4444" } : undefined}>{f.name}</p>
                         <p className="text-[10px] t-text-muted">
                           {f.size_mb != null ? `${f.size_mb.toFixed(1)}MB · ` : ""}
-                          <span style={{ color: f.status === "indexed" ? "#10b981" : f.status === "failed" ? "#ef4444" : "#f59e0b" }}>
-                            {f.status}
+                          <span style={{ color: isInvalid ? "#ef4444" : f.status === "indexed" ? "#10b981" : f.status === "failed" ? "#ef4444" : "#f59e0b" }}>
+                            {isInvalid ? "invalid_json" : f.status}
                           </span>
                         </p>
                       </div>
@@ -352,6 +387,17 @@ export default function Sidebar() {
 
       {/* Footer */}
       <div className="px-3 py-3 border-t" style={{ borderColor: "var(--border-color)" }}>
+        {state.selectedMode && (
+          <Button
+            type="text"
+            block
+            size="small"
+            onClick={handleChangeContext}
+            className="t-text-muted text-xs mb-1"
+          >
+            Change Context
+          </Button>
+        )}
         <Popconfirm title="Clear all chat history?" onConfirm={handleClearAll} okText="Clear" cancelText="Cancel" okButtonProps={{ danger: true }}>
           <Button type="text" icon={<ClearOutlined />} block size="small" className="t-text-muted text-xs">
             Clear All History

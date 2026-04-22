@@ -12,6 +12,27 @@ const initialState = {
   sidebarOpen: true,
   sidebarTab: "chat",
   userRole: "admin",  // "admin" | "user" — controls upload visibility
+
+  // ── Guided workflow (Sprint 1) ──────────────────────
+  // Null when the user has not picked a mode yet. When a
+  // mode is selected on the landing page, these hold the
+  // canonical values and the chat UI becomes mode-aware.
+  selectedMode: null,
+  subMode: null,
+  conversationContextActive: false,
+  customerName: null,
+  technologyDomain: null,
+  ticketId: null,
+  issueSummary: null,
+  formData: null,
+
+  // ── Sprint 2 ────────────────────────────────────────
+  // pendingContextBreak: populated when /ask returns a
+  // context_break signal. Null when no modal should show.
+  // Shape (mirrors context_stats keys):
+  //   { source, category, matched_phrase, active_mode,
+  //     active_sub_mode, triggering_query }
+  pendingContextBreak: null,
 };
 
 function reducer(state, action) {
@@ -42,10 +63,36 @@ function reducer(state, action) {
               msg.context_stats?.semantic_cache_id || msg.semanticCacheId || null,
           };
         }),
+        // ── Pull mode fields from the session payload if backend
+        //    attaches them (Sprint 2 will start populating these).
+        //    Safe fall-through to current state when fields are absent.
+        selectedMode: action.payload.selected_mode ?? state.selectedMode,
+        subMode: action.payload.sub_mode ?? state.subMode,
+        conversationContextActive:
+          action.payload.conversation_context_active ?? state.conversationContextActive,
+        customerName: action.payload.customer_name ?? state.customerName,
+        technologyDomain: action.payload.technology_domain ?? state.technologyDomain,
+        ticketId: action.payload.ticket_id ?? state.ticketId,
+        issueSummary: action.payload.issue_summary ?? state.issueSummary,
+        formData: action.payload.form_data ?? state.formData,
       };
 
     case "NEW_CHAT":
-      return { ...state, sessionId: null, messages: [] };
+      return {
+        ...state,
+        sessionId: null,
+        messages: [],
+        // Guided workflow: NEW_CHAT always returns to the landing page.
+        selectedMode: null,
+        subMode: null,
+        conversationContextActive: false,
+        customerName: null,
+        technologyDomain: null,
+        ticketId: null,
+        issueSummary: null,
+        formData: null,
+        pendingContextBreak: null,
+      };
 
     case "ADD_USER_MESSAGE":
       return {
@@ -93,6 +140,13 @@ function reducer(state, action) {
             clarificationOptions: action.payload.clarification_options || null,
             clarificationContext: action.payload.clarification_context || null,
             clarificationSelectedId: null,
+
+            // Sprint 2 — pattern response fields. Null when the
+            // backend didn't attach pattern data (pre-flag shape
+            // unchanged).
+            patternActive: !!action.payload.context_stats?.pattern_active,
+            patternTopic: action.payload.context_stats?.pattern_topic || null,
+            patternData: action.payload.context_stats?.pattern_data || null,
           },
         ],
       };
@@ -107,6 +161,41 @@ function reducer(state, action) {
             : msg
         ),
       };
+
+    // ── Guided workflow reducer cases (Sprint 1) ────────
+    case "SET_MODE":
+      return {
+        ...state,
+        selectedMode: action.payload.selectedMode || null,
+        subMode: action.payload.subMode || null,
+        conversationContextActive: !!action.payload.selectedMode,
+      };
+
+    case "SET_SUB_MODE":
+      return { ...state, subMode: action.payload || null };
+
+    case "SET_FORM_DATA":
+      return { ...state, formData: action.payload || null };
+
+    case "RESET_MODE_STATE":
+      return {
+        ...state,
+        selectedMode: null,
+        subMode: null,
+        conversationContextActive: false,
+        customerName: null,
+        technologyDomain: null,
+        ticketId: null,
+        issueSummary: null,
+        formData: null,
+        pendingContextBreak: null,
+      };
+
+    // ── Sprint 2 ──────────────────────────────────────
+    // Set to a payload dict to surface the context-break
+    // modal; set to null to dismiss.
+    case "SET_PENDING_CONTEXT_BREAK":
+      return { ...state, pendingContextBreak: action.payload || null };
 
     // ── Persist like/dislike on a specific message ───────
     // Called after user clicks thumbs up or down.

@@ -41,6 +41,8 @@ Return a JSON object with ONLY these keys:
 - min_count: integer (N+1 for "more than N") | null
 - rework_detected: true (rework/reopened/redone) | false (clean/first-time) | null
 - numeric_field: "resolution_quality_score" | "time_to_first_response_seconds" | null
+- numeric_filter_field: "resolution_quality_score" | "time_to_first_response_seconds" | null   # Sprint 2.6
+- numeric_filter_value: integer | null                                                         # Sprint 2.6
 - confidence: a float 0.0-1.0 indicating how confident you are in the classification
 
 Rules for operation:
@@ -153,7 +155,13 @@ Query: "What's the average quality score for Nebula-Corp tickets?"
 JSON: {"is_aggregation": true, "operation": "avg", "customer_name": "Nebula-Corp", "priority": null, "sla_met": null, "component": null, "ranking_field": null, "ranking_direction": null, "numeric_field": "resolution_quality_score", "confidence": 0.95}
 
 Query: "What's the total time to first response across all P1 tickets?"
-JSON: {"is_aggregation": true, "operation": "sum", "customer_name": null, "priority": "P1", "sla_met": null, "component": null, "ranking_field": null, "ranking_direction": null, "numeric_field": "time_to_first_response_seconds", "confidence": 0.92}"""
+JSON: {"is_aggregation": true, "operation": "sum", "customer_name": null, "priority": "P1", "sla_met": null, "component": null, "ranking_field": null, "ranking_direction": null, "numeric_field": "time_to_first_response_seconds", "confidence": 0.92}
+
+Query: "List tickets where Resolution_Quality_Score equals 5"
+JSON: {"is_aggregation": true, "operation": "list", "customer_name": null, "priority": null, "sla_met": null, "component": null, "ranking_field": null, "ranking_direction": null, "numeric_field": null, "numeric_filter_field": "resolution_quality_score", "numeric_filter_value": 5, "confidence": 0.95}
+
+Query: "Show me Aetheris Corp tickets with score of 5"
+JSON: {"is_aggregation": true, "operation": "list", "customer_name": "Aetheris Corp", "priority": null, "sla_met": null, "component": null, "ranking_field": null, "ranking_direction": null, "numeric_field": null, "numeric_filter_field": "resolution_quality_score", "numeric_filter_value": 5, "confidence": 0.93}"""
 
 
 _ALLOWED_OPERATIONS = {
@@ -188,6 +196,9 @@ class ClassifierResult:
     rework_detected: Optional[bool] = None
     # Bug 4B — numeric_field names the column avg/sum/min/max run over.
     numeric_field: Optional[str] = None
+    # Sprint 2.6 — equality filter on a whitelisted numeric field.
+    numeric_filter_field: Optional[str] = None
+    numeric_filter_value: Optional[int] = None
 
 
 def _sentinel(raw_response: str = "") -> ClassifierResult:
@@ -205,6 +216,9 @@ def _sentinel(raw_response: str = "") -> ClassifierResult:
         min_count=None,
         rework_detected=None,
         numeric_field=None,
+        # Sprint 2.6
+        numeric_filter_field=None,
+        numeric_filter_value=None,
     )
 
 
@@ -307,6 +321,27 @@ def _parse_payload(data: Dict[str, Any], raw: str) -> ClassifierResult:
     else:
         numeric_field = None
 
+    # Sprint 2.6 — numeric equality filter.
+    nff = data.get("numeric_filter_field")
+    nfv = data.get("numeric_filter_value")
+    if isinstance(nff, str):
+        nff = nff.strip() or None
+        if nff not in _ALLOWED_NUMERIC_FIELDS:
+            nff = None
+            nfv = None
+    else:
+        nff = None
+    if nfv is not None:
+        try:
+            nfv = int(nfv)
+        except (ValueError, TypeError):
+            nff = None
+            nfv = None
+    # If either is None, drop both — the filter only makes sense as a pair.
+    if nff is None or nfv is None:
+        nff = None
+        nfv = None
+
     return ClassifierResult(
         is_aggregation=is_aggregation,
         operation=operation,
@@ -321,6 +356,8 @@ def _parse_payload(data: Dict[str, Any], raw: str) -> ClassifierResult:
         min_count=min_count,
         rework_detected=rework_detected,
         numeric_field=numeric_field,
+        numeric_filter_field=nff,   # Sprint 2.6
+        numeric_filter_value=nfv,   # Sprint 2.6
     )
 
 
@@ -488,9 +525,12 @@ def classify_aggregation_intent(query: str) -> ClassifierResult:
 
     logger.info(
         "[agg_classifier] op=%s customer=%s priority=%s sla_met=%s "
-        "min_count=%s rework_detected=%s numeric_field=%s confidence=%.2f query=%r",
+        "min_count=%s rework_detected=%s numeric_field=%s "
+        "numeric_filter_field=%s numeric_filter_value=%s "
+        "confidence=%.2f query=%r",
         result.operation, result.customer_name, result.priority,
         result.sla_met, result.min_count, result.rework_detected,
-        result.numeric_field, result.confidence, query[:120],
+        result.numeric_field, result.numeric_filter_field,
+        result.numeric_filter_value, result.confidence, query[:120],
     )
     return result

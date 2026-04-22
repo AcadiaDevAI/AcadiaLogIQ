@@ -55,6 +55,15 @@ class AggIntent:
     # Bug 4B — numeric_field drives avg/sum/min/max operations.
     numeric_field: Optional[str] = None
     raw_query: str = ""
+    # Sprint 2.6 — equality filter on a whitelisted numeric field.
+    # Shape: (field_name, value). None = no filter.
+    # field_name must be in _NUMERIC_EQUALITY_FIELDS below.
+    numeric_equals: Optional[Tuple[str, int]] = None
+    # Sprint 2.8 — content terms extracted deterministically from the
+    # query after stopword + metadata subtraction. Empty list = no
+    # content filter applied. Populated only when
+    # LOGIQ_COMPOUND_FILTER_BACKEND is on; otherwise always [].
+    content_terms: List[str] = field(default_factory=list)
 
 
 @dataclass
@@ -303,6 +312,187 @@ def _extract_customer(q: str) -> Optional[str]:
     return None
 
 
+# Sprint 2.6 — equality filter regex. Accepts:
+#   "resolution_quality_score of 5", "quality score = 5", "score equals 5",
+#   "score: 5", "score is 5"
+_SCORE_EQUALITY_RE = re.compile(
+    r"""
+    \b(?:resolution[_\s]?quality[_\s]?score
+        | quality[_\s]?score
+        | resolution[_\s]?score
+        | score)
+    \b
+    \s*
+    (?: =| ==| equals?| of| :| is)
+    \s*
+    (\d{1,3})   # the value
+    \b
+    """,
+    re.I | re.X,
+)
+
+
+def _extract_numeric_equality(q: str) -> Optional[Tuple[str, int]]:
+    """Sprint 2.6 — pull (field, value) equality filter from a query.
+    Returns (canonical_field_name, int_value) or None."""
+    if not getattr(settings, "LOGIQ_NUMERIC_FILTER_BACKEND", False):
+        return None
+    m = _SCORE_EQUALITY_RE.search(q or "")
+    if not m:
+        return None
+    try:
+        value = int(m.group(1))
+    except ValueError:
+        return None
+    # All phrasings in the regex currently map to quality score.
+    # (time_to_first_response phrasings would need their own regex branch.)
+    return ("resolution_quality_score", value)
+
+
+# Sprint 2.8 — English stopwords. Grammar-level only, NOT a NOC
+# vocabulary list. This set is bounded and stable — it does NOT grow
+# when new technical terms appear in the corpus. Generic aggregation
+# verbs / nouns ("tickets", "list", "show") are included as query-shape
+# fillers so they subtract out of the content-term candidate pool.
+_DYNAMIC_STOPWORDS = frozenset({
+    # articles / determiners
+    "a", "an", "the", "this", "that", "these", "those",
+    # prepositions
+    "of", "in", "on", "at", "to", "for", "with", "by", "from", "as",
+    "about", "into", "over", "under", "between", "through",
+    # conjunctions
+    "and", "or", "but", "nor", "so", "yet",
+    # pronouns
+    "i", "me", "my", "we", "us", "our", "you", "your",
+    "he", "she", "it", "its", "they", "them", "their",
+    # auxiliary verbs
+    "is", "are", "was", "were", "be", "been", "being",
+    "do", "does", "did", "done", "has", "have", "had", "having",
+    "can", "could", "should", "would", "may", "might", "will", "shall",
+    # common query-shape fillers (aggregation verbs / nouns)
+    "show", "list", "find", "give", "present", "tell", "get", "fetch",
+    "what", "which", "who", "when", "where", "why", "how",
+    "any", "all", "each", "every", "some",
+    "many", "much", "more", "most", "less", "least", "few", "several",
+    "tickets", "ticket", "incidents", "incident", "issues", "issue",
+    "cases", "case", "records", "record", "entries", "entry",
+    "related", "regarding", "concerning",
+    "equals", "equal",
+    "please", "thanks", "thank",
+    # common English verbs of observation / query framing — these are
+    # query mechanics, not content. Without them, prose-heavy queries
+    # like "historical issues we've seen" leak non-content tokens into
+    # the ILIKE chain and over-filter real matches.
+    "see", "saw", "seen", "seeing", "look", "looked", "looking",
+    "want", "wanted", "need", "needed", "know", "known",
+    "got", "getting",
+    # general-English temporal / descriptive qualifiers
+    "historical", "historically", "history",
+    "past", "prior", "previous", "previously",
+    "recent", "recently", "current", "currently", "existing",
+    "today", "yesterday", "lately",
+})
+
+
+# Sprint 2.8 — list of metadata field names the system knows about.
+# These get ignored when they appear verbatim in the query (the user
+# is naming the field, not a content term).
+_METADATA_FIELD_NAMES = frozenset({
+    "customer_name", "customer",
+    "priority",
+    "sla_target_met", "sla_met", "sla",
+    "component_category", "component",
+    "rework_detected", "rework",
+    "resolution_quality_score", "quality_score", "score",
+    "time_to_first_response_seconds", "ttl", "ttr",
+    "incident_number", "primary_id",
+    "status", "state",
+})
+
+
+def _tokenize_query_for_content(query: str) -> List[str]:
+    """Sprint 2.8 — split on whitespace + punctuation, preserving
+    dashes and underscores so identifiers and snake_case field names
+    stay intact."""
+    if not query:
+        return []
+    cleaned = re.sub(r'[,.;:?!"\'()\[\]{}/\\]', ' ', query)
+    return [t for t in cleaned.split() if t]
+
+
+def _extract_content_terms(
+    *,
+    query: str,
+    already_claimed: Set[str],
+) -> List[str]:
+    """Sprint 2.8 — deterministic extraction of content-filter terms
+    from the raw query, AFTER classifier and regex have claimed their
+    structured metadata.
+
+    `already_claimed` is the set of lowercased tokens that correspond
+    to metadata already captured in the AggIntent (customer name parts,
+    priority, numeric field names + values, etc.). These are subtracted
+    from the candidate pool so they don't double-match.
+
+    Returns up to 4 lowercase content terms, empty list when the query
+    has no remaining content signal (e.g., pure metadata queries).
+    Flag-off always returns []."""
+    if not getattr(settings, "LOGIQ_COMPOUND_FILTER_BACKEND", False):
+        return []
+
+    tokens = _tokenize_query_for_content(query)
+    # Sprint 2.8.1 — diagnostic. When the runtime log shows content_terms=[]
+    # on a query that visibly contains a content token (e.g. BGP), this
+    # breakdown shows exactly which reject bucket consumed it. Remove or
+    # downgrade to DEBUG once the runtime bug is confirmed resolved.
+    rejected: Dict[str, List[str]] = {
+        "stopword": [],
+        "metadata_name": [],
+        "claimed": [],
+        "too_short": [],
+        "numeric": [],
+    }
+    out: List[str] = []
+    seen: Set[str] = set()
+
+    for raw_tok in tokens:
+        t = raw_tok.lower().strip()
+        if not t:
+            continue
+        # Length guard — 1/2-char tokens are too noisy for ILIKE.
+        if len(t) < 3:
+            rejected["too_short"].append(t)
+            continue
+        # Pure numeric token (already captured as numeric_equals value).
+        if t.isdigit():
+            rejected["numeric"].append(t)
+            continue
+        # English stopwords and query-shape fillers.
+        if t in _DYNAMIC_STOPWORDS:
+            rejected["stopword"].append(t)
+            continue
+        # Already claimed as structured metadata.
+        if t in already_claimed:
+            rejected["claimed"].append(t)
+            continue
+        # The user named a metadata FIELD, not a content term.
+        if t in _METADATA_FIELD_NAMES:
+            rejected["metadata_name"].append(t)
+            continue
+        if t in seen:
+            continue
+        seen.add(t)
+        out.append(t)
+        if len(out) >= 4:
+            break
+
+    logger.info(
+        "[content_terms] query=%r tokens=%d out=%s rejected=%s claimed=%s",
+        query[:120], len(tokens), out, rejected, sorted(already_claimed)[:10],
+    )
+    return out
+
+
 def detect_aggregation_intent(query: str) -> Optional[AggIntent]:
     """
     Return an AggIntent if the query is an aggregation over tickets,
@@ -448,6 +638,11 @@ def detect_aggregation_intent(query: str) -> Optional[AggIntent]:
         elif _REWORK_DETECTED_RE.search(q):
             intent.rework_detected = True
 
+    # Sprint 2.6 — attach numeric equality filter when present.
+    eq = _extract_numeric_equality(q)
+    if eq is not None:
+        intent.numeric_equals = eq
+
     # A bare "how many tickets?" with no filters is still a valid aggregation —
     # it's just "count all allowed tickets".
     return intent
@@ -488,9 +683,35 @@ def detect_aggregation_intent_v2(query: str) -> Optional[AggIntent]:
     # Tier 1 — regex
     regex_hit = detect_aggregation_intent(q)
     if regex_hit is not None:
+        # Sprint 2.8 — populate content_terms on the regex-path AggIntent
+        # so compound queries routed through the fast-path (e.g. "BGP
+        # tickets with score of 5") still get their content filter.
+        if getattr(settings, "LOGIQ_COMPOUND_FILTER_BACKEND", False):
+            claimed: Set[str] = set()
+            if regex_hit.customer_name:
+                for part in regex_hit.customer_name.lower().split():
+                    claimed.add(part)
+            if regex_hit.priority:
+                claimed.add(regex_hit.priority.lower())
+            if regex_hit.numeric_equals is not None:
+                field_name, field_value = regex_hit.numeric_equals
+                claimed.add(field_name.lower())
+                claimed.add(str(field_value))
+            if regex_hit.component:
+                for part in regex_hit.component.lower().split():
+                    claimed.add(part)
+            for raw_tok in _tokenize_query_for_content(q):
+                if re.match(r"^[A-Z]+-[A-Z0-9]+-[0-9]+$", raw_tok, re.I):
+                    claimed.add(raw_tok.lower())
+                    for part in raw_tok.lower().split("-"):
+                        claimed.add(part)
+            regex_hit.content_terms = _extract_content_terms(
+                query=q,
+                already_claimed=claimed,
+            )
         logger.info(
-            "[aggregation] routed via=regex op=%s customer=%s",
-            regex_hit.operation, regex_hit.customer_name,
+            "[aggregation] routed via=regex op=%s customer=%s content_terms=%s",
+            regex_hit.operation, regex_hit.customer_name, regex_hit.content_terms,
         )
         return regex_hit
 
@@ -551,9 +772,59 @@ def detect_aggregation_intent_v2(query: str) -> Optional[AggIntent]:
         ql = q.lower()
         if "quality" in ql or "score" in ql:
             intent.numeric_field = "resolution_quality_score"
+
+    # Sprint 2.6 — carry classifier's numeric equality filter (if any).
+    if (
+        getattr(settings, "LOGIQ_NUMERIC_FILTER_BACKEND", False)
+        and getattr(result, "numeric_filter_field", None)
+        and getattr(result, "numeric_filter_value", None) is not None
+    ):
+        intent.numeric_equals = (
+            result.numeric_filter_field,
+            int(result.numeric_filter_value),
+        )
+
+    # Sprint 2.6 — even in classifier path, opportunistically extract
+    # numeric equality from the raw query. If the classifier already
+    # filled intent.numeric_equals, this is a no-op.
+    if intent.numeric_equals is None:
+        eq = _extract_numeric_equality(q)
+        if eq is not None:
+            intent.numeric_equals = eq
+
+    # Sprint 2.8 — after all structured metadata has been claimed,
+    # diff what's left of the query to get deterministic content terms.
+    # Runs only when the master flag is on; _extract_content_terms
+    # returns [] unconditionally when flag is off (double-guarded).
+    if getattr(settings, "LOGIQ_COMPOUND_FILTER_BACKEND", False):
+        claimed: Set[str] = set()
+        if intent.customer_name:
+            for part in intent.customer_name.lower().split():
+                claimed.add(part)
+        if intent.priority:
+            claimed.add(intent.priority.lower())
+        if intent.numeric_equals is not None:
+            field_name, field_value = intent.numeric_equals
+            claimed.add(field_name.lower())
+            claimed.add(str(field_value))
+        if intent.component:
+            for part in intent.component.lower().split():
+                claimed.add(part)
+        # Identifier tokens (INC-FOO-123) are handled by the identifier
+        # short-circuit, not by content filtering — claim them out.
+        for raw_tok in _tokenize_query_for_content(q):
+            if re.match(r"^[A-Z]+-[A-Z0-9]+-[0-9]+$", raw_tok, re.I):
+                claimed.add(raw_tok.lower())
+                for part in raw_tok.lower().split("-"):
+                    claimed.add(part)
+        intent.content_terms = _extract_content_terms(
+            query=q,
+            already_claimed=claimed,
+        )
+
     logger.info(
-        "[aggregation] routed via=classifier op=%s confidence=%.2f",
-        intent.operation, result.confidence,
+        "[aggregation] routed via=classifier op=%s confidence=%.2f content_terms=%s",
+        intent.operation, result.confidence, intent.content_terms,
     )
     return intent
 
@@ -597,6 +868,63 @@ def _build_prose_summary(intent: AggIntent, incident_numbers: List[str]) -> str:
 _RANKABLE_INT_FIELDS = {"resolution_quality_score"}
 
 
+# Sprint 2.6 — numeric fields eligible for equality filter.
+# Extend here as NOC workflow needs surface new filterable scores.
+_NUMERIC_EQUALITY_FIELDS: Dict[str, str] = {
+    "resolution_quality_score": "resolution_quality_score",
+    "time_to_first_response_seconds": "time_to_first_response_seconds",
+}
+
+
+# ---------------------------------------------------------------------------
+# Sprint 2.5 — Flat-column → JSONB fallback
+# ---------------------------------------------------------------------------
+def _field_variants(name: str) -> List[str]:
+    """Return ordered, de-duplicated casing/style variants for a field name.
+
+    Covers the common shapes customers use in their JSON: exact, lower,
+    PascalCase, snake_case, Title_Snake_Case.
+    """
+    if not name:
+        return []
+    parts = re.split(r"[_\s-]+", name)
+    parts = [p for p in parts if p]
+    pascal = "".join(w[:1].upper() + w[1:].lower() for w in parts) if parts else name
+    snake = "_".join(p.lower() for p in parts) if parts else name.lower()
+    title_snake = "_".join(p[:1].upper() + p[1:].lower() for p in parts) if parts else name
+    variants = [name, name.lower(), pascal, snake, title_snake, name.upper()]
+    seen: List[str] = []
+    for v in variants:
+        if v and v not in seen:
+            seen.append(v)
+    return seen
+
+
+def _resolve_field_to_sql(
+    field_name: str,
+    *,
+    table_alias: str = "c",
+    cast: Optional[str] = None,
+) -> str:
+    """Return a SQL fragment that reads `field_name` from metadata_json.
+
+    Hotfix (flag on): COALESCE across casing variants so 'customer_name'
+    resolves whether the ingested JSON stored it as 'customer_name',
+    'CustomerName', 'Customer_Name', etc. Cast (e.g. '::boolean', '::int')
+    is applied to every branch so the callers' comparisons stay sound.
+
+    Flag off: byte-identical to the original single-extract.
+    """
+    safe = re.sub(r"[^A-Za-z0-9_]", "", field_name or "")
+    if not getattr(settings, "LOGIQ_HOTFIX_BACKEND", False):
+        expr = f"{table_alias}.metadata_json->>'{safe}'"
+        return f"({expr}){cast}" if cast else expr
+    variants = _field_variants(safe)
+    exprs = [f"{table_alias}.metadata_json->>'{v}'" for v in variants]
+    coalesced = "COALESCE(" + ", ".join(exprs) + ")"
+    return f"({coalesced}){cast}" if cast else coalesced
+
+
 def _build_ticket_scope_clauses(
     *,
     owner_id: str,
@@ -613,13 +941,14 @@ def _build_ticket_scope_clauses(
 
     Recognized filter keys: customer_name, priority, sla_met, component.
     """
+    incident_expr = _resolve_field_to_sql("incident_number")
     clauses = [
         "d.owner_id = :owner_id",
         "LOWER(d.file_type) IN ('ticket', 'tickets', 'incident')",
         "d.status = 'active'",
         "dv.is_active = TRUE",
         "d.current_version_id = dv.id",
-        "(c.metadata_json->>'incident_number') IS NOT NULL",
+        f"({incident_expr}) IS NOT NULL",
     ]
     params: Dict[str, Any] = {"owner_id": owner_id}
 
@@ -629,22 +958,54 @@ def _build_ticket_scope_clauses(
 
     cn = filters.get("customer_name")
     if cn is not None:
-        clauses.append("LOWER(c.metadata_json->>'customer_name') = LOWER(:customer_name)")
-        params["customer_name"] = cn
+        expr = _resolve_field_to_sql("customer_name")
+        if getattr(settings, "LOGIQ_COMPOUND_FILTER_BACKEND", False):
+            # Sprint 2.8 Bug F — "Aetheris" and "Aetheris Corp" and
+            # "Aetheris Corporation" should all match the same customer.
+            # Strip common corporate suffixes to derive a stable prefix,
+            # then match EITHER exact OR LIKE prefix. Short names
+            # (<5 chars after strip) fall back to exact to avoid
+            # catch-all "A%" matches.
+            cn_core = cn.strip().lower()
+            _CORP_SUFFIXES = (
+                " corp", " corporation", " inc", " inc.",
+                " llc", " ltd", " ltd.", " group", " co", " co.",
+            )
+            for suf in _CORP_SUFFIXES:
+                if cn_core.endswith(suf):
+                    cn_core = cn_core[: -len(suf)].strip()
+                    break
+            if len(cn_core) >= 5:
+                clauses.append(
+                    f"(LOWER({expr}) = LOWER(:customer_name) "
+                    f"OR LOWER({expr}) LIKE LOWER(:customer_name_prefix))"
+                )
+                params["customer_name"] = cn
+                params["customer_name_prefix"] = f"{cn_core}%"
+            else:
+                clauses.append(f"LOWER({expr}) = LOWER(:customer_name)")
+                params["customer_name"] = cn
+        else:
+            # Flag off — pre-2.8 exact-match behavior.
+            clauses.append(f"LOWER({expr}) = LOWER(:customer_name)")
+            params["customer_name"] = cn
 
     pr = filters.get("priority")
     if pr is not None:
-        clauses.append("UPPER(c.metadata_json->>'priority') = UPPER(:priority)")
+        expr = _resolve_field_to_sql("priority")
+        clauses.append(f"UPPER({expr}) = UPPER(:priority)")
         params["priority"] = pr
 
     sm = filters.get("sla_met")
     if sm is not None:
-        clauses.append("(c.metadata_json->>'sla_target_met')::boolean = :sla_met")
+        expr = _resolve_field_to_sql("sla_target_met", cast="::boolean")
+        clauses.append(f"{expr} = :sla_met")
         params["sla_met"] = bool(sm)
 
     comp = filters.get("component")
     if comp is not None:
-        clauses.append("LOWER(c.metadata_json->>'component') = LOWER(:component)")
+        expr = _resolve_field_to_sql("component")
+        clauses.append(f"LOWER({expr}) = LOWER(:component)")
         params["component"] = comp
 
     # Bug 3 — rework filter. Reads from metadata_json->>'rework_detected',
@@ -653,13 +1014,47 @@ def _build_ticket_scope_clauses(
     # filters to zero tickets — no false positives.
     rw = filters.get("rework_detected")
     if rw is not None:
+        expr = _resolve_field_to_sql("rework_detected")
         clauses.append(
-            "COALESCE(LOWER(c.metadata_json->>'rework_detected'), '') IN "
+            f"COALESCE(LOWER({expr}), '') IN "
             "(CASE WHEN :rework THEN 'true' ELSE 'false' END, "
             " CASE WHEN :rework THEN 'yes' ELSE 'no' END, "
             " CASE WHEN :rework THEN '1' ELSE '0' END)"
         )
         params["rework"] = bool(rw)
+
+    # Sprint 2.6 — numeric equality filter (score = N, etc).
+    # Value comes in as a tuple (field, int); field must be whitelisted.
+    ne = filters.get("numeric_equals")
+    if ne is not None and getattr(settings, "LOGIQ_NUMERIC_FILTER_BACKEND", False):
+        field_name, field_value = ne
+        if field_name in _NUMERIC_EQUALITY_FIELDS:
+            expr = _resolve_field_to_sql(_NUMERIC_EQUALITY_FIELDS[field_name])
+            # Stored as text in metadata_json; cast value to text for match.
+            clauses.append(f"{expr} = :numeric_equals_value")
+            params["numeric_equals_value"] = str(field_value)
+
+    # Sprint 2.8 — dynamic content-term compound filter.
+    # Each term becomes a SELF-contained OR clause across both the raw
+    # chunk content column and the component_category metadata field —
+    # catches terms that appear ONLY in ticket body (e.g. BGP mentioned
+    # in narrative) AND terms that are component labels. All terms are
+    # AND'd together (strict recall — every term must appear somewhere
+    # in each matching ticket). Capped at 4 terms to keep the AND chain
+    # manageable. Flag-off = no clause emitted.
+    ct = filters.get("content_terms")
+    if (
+        ct
+        and isinstance(ct, list)
+        and getattr(settings, "LOGIQ_COMPOUND_FILTER_BACKEND", False)
+    ):
+        for idx, term in enumerate(ct[:4]):
+            p_term = f"ct_term_{idx}"
+            clauses.append(
+                f"(c.content ILIKE :{p_term}_pat "
+                f"OR c.metadata_json->>'component_category' ILIKE :{p_term}_pat)"
+            )
+            params[f"{p_term}_pat"] = f"%{term}%"
 
     return " AND ".join(clauses), params
 
@@ -694,6 +1089,12 @@ def _run_ranking(
             ranking_filters["component"] = intent.component
         if intent.rework_detected is not None:
             ranking_filters["rework_detected"] = intent.rework_detected
+        # Sprint 2.6 — equality on whitelisted numeric field.
+        if intent.numeric_equals is not None:
+            ranking_filters["numeric_equals"] = intent.numeric_equals
+        # Sprint 2.8 — compound content-term filter.
+        if intent.content_terms:
+            ranking_filters["content_terms"] = intent.content_terms
 
     where_sql, params = _build_ticket_scope_clauses(
         owner_id=owner_id,
@@ -783,6 +1184,12 @@ def _run_group_by_customer(
             group_filters["component"] = intent.component
         if intent.rework_detected is not None:
             group_filters["rework_detected"] = intent.rework_detected
+        # Sprint 2.6 — equality on whitelisted numeric field.
+        if intent.numeric_equals is not None:
+            group_filters["numeric_equals"] = intent.numeric_equals
+        # Sprint 2.8 — compound content-term filter.
+        if intent.content_terms:
+            group_filters["content_terms"] = intent.content_terms
 
     where_sql, params = _build_ticket_scope_clauses(
         owner_id=owner_id,
@@ -1041,6 +1448,10 @@ def run_aggregation(
             "sla_met": None,
             "component": None,
             "rework_detected": None,
+            # Sprint 2.6 — null out numeric equality too for total_count.
+            "numeric_equals": None,
+            # Sprint 2.8 — total_count ignores content terms by design.
+            "content_terms": None,
         }
     else:
         filters = {
@@ -1051,6 +1462,10 @@ def run_aggregation(
             # Bug 3 — include rework_detected so SLA+rework compound queries
             # don't silently drop the rework half of the filter.
             "rework_detected": intent.rework_detected,
+            # Sprint 2.6 — equality on whitelisted numeric field.
+            "numeric_equals": intent.numeric_equals,
+            # Sprint 2.8 — dynamic content-term compound filter (list or []).
+            "content_terms": intent.content_terms,
         }
 
     # Per-chunk rows may duplicate `incident_number` across multiple chunks of

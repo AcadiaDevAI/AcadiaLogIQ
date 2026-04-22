@@ -496,6 +496,92 @@ def _is_gold_ticket_json(file_bytes: bytes) -> bool:
     return bool(first.get("Executive_Sharable_RCA")) or bool(first.get("ITIL_5_Why"))
 
 
+# Sprint 2.9 — JSON structure diagnosis.
+# Goal: distinguish
+#   (a) "file is JSON and parses" → let downstream schemas handle it
+#   (b) "file LOOKS like JSON but is malformed" → REJECT with detail
+#   (c) "file is not JSON at all" → skip, proceed to PDF/DOCX/text path
+# This is called BEFORE STRUCTURED_SCHEMAS iteration in process_document().
+
+_JSON_LEADING_BYTES = ("{", "[")
+
+
+def _looks_like_json(file_bytes: bytes) -> bool:
+    """True if the file's first non-whitespace byte is { or [.
+
+    Why: only signal used to decide whether JSON validation applies —
+    file extension is NOT consulted, so a .txt containing JSON and a
+    .json containing JSON are treated identically, and a PDF is never
+    considered.
+    """
+    if not file_bytes:
+        return False
+    sample = file_bytes[:512].lstrip(b" \t\r\n\xef\xbb\xbf")
+    if not sample:
+        return False
+    return sample[:1].decode("ascii", errors="replace") in _JSON_LEADING_BYTES
+
+
+def _diagnose_json_structure(file_bytes: bytes) -> Dict[str, Any]:
+    """Sprint 2.9 — structural diagnosis for JSON-looking files.
+
+    Returns one of:
+      {"kind": "not_json"}              → first byte ≠ {/[, proceed normal path
+      {"kind": "valid_json", "data": parsed_obj}  → valid JSON of any shape
+      {"kind": "malformed_json", "line": N, "col": M, "reason": msg}
+                                        → REJECT ingestion
+    """
+    if not getattr(settings, "LOGIQ_JSON_VALIDATOR_BACKEND", False):
+        return {"kind": "not_json"}
+
+    if not _looks_like_json(file_bytes):
+        return {"kind": "not_json"}
+
+    try:
+        text = file_bytes.decode("utf-8", errors="replace")
+    except Exception as exc:
+        return {
+            "kind": "malformed_json",
+            "line": 1,
+            "col": 1,
+            "reason": f"Unable to decode file as UTF-8: {exc}",
+        }
+
+    try:
+        data = json.loads(text)
+        return {"kind": "valid_json", "data": data}
+    except json.JSONDecodeError as exc:
+        line = getattr(exc, "lineno", 1) or 1
+        col = getattr(exc, "colno", 1) or 1
+        msg = getattr(exc, "msg", "unknown parse error") or "unknown parse error"
+
+        lower_msg = msg.lower()
+        hint = ""
+        if "expecting ',' delimiter" in lower_msg or "expecting value" in lower_msg:
+            hint = (
+                " — looks like missing ',' between objects. "
+                "If this file contains multiple tickets, wrap them in "
+                "a top-level array: [ {...}, {...}, ... ]"
+            )
+        elif "extra data" in lower_msg:
+            hint = (
+                " — trailing data after the first JSON value. "
+                "Multiple top-level objects concatenated? Wrap them in a "
+                "top-level array: [ {...}, {...}, ... ]"
+            )
+        elif "expecting property name" in lower_msg:
+            hint = " — missing or malformed key in object near this position."
+        elif "unterminated" in lower_msg:
+            hint = " — unterminated string (missing closing quote)."
+
+        return {
+            "kind": "malformed_json",
+            "line": int(line),
+            "col": int(col),
+            "reason": f"{msg}{hint}",
+        }
+
+
 def _is_empty(value: Any) -> bool:
     """True if the value carries no signal (None, blank string, empty dict/list)."""
     if value is None:
@@ -1212,6 +1298,30 @@ def process_document(
         file_bytes = b""
 
     if file_bytes:
+        # Sprint 2.9 — JSON structure validation. Runs BEFORE schema
+        # detection so malformed JSON files are rejected with a specific
+        # error instead of silently falling through to text chunking.
+        diag = _diagnose_json_structure(file_bytes)
+        if diag["kind"] == "malformed_json":
+            logger.warning(
+                "[json_validator] REJECT file=%r line=%d col=%d reason=%s",
+                filename, diag["line"], diag["col"], diag["reason"],
+            )
+            return {
+                "status": "rejected",
+                "ingestion_status": "invalid_json",
+                "error_kind": "malformed_json",
+                "error_line": diag["line"],
+                "error_col": diag["col"],
+                "error_reason": diag["reason"],
+                "filename": filename,
+                "chunks_created": 0,
+            }
+        # kind == "valid_json" → proceed through schema loop (fast-path
+        #   will re-parse and route to gold-ticket ingest).
+        # kind == "not_json"   → skip validator, proceed to PDF/DOCX/text
+        #   pipeline as before.
+
         for schema_cls in STRUCTURED_SCHEMAS:
             try:
                 if not schema_cls.detect(file_bytes):
@@ -1418,6 +1528,7 @@ def process_document(
 
     # ── Extract glossary/abbreviations from document content ──
     doc_glossary = {}
+    full_text = ""
     try:
         full_text = "\n".join(chunk.text for chunk in chunks)
         doc_glossary = extract_glossary_from_text(full_text)
@@ -1428,6 +1539,20 @@ def process_document(
             )
     except Exception as e:
         logger.warning("Glossary extraction during ingestion failed (non-fatal): %s", e)
+
+    # Hotfix: learn customer-specific vocabulary (identifiers, field names,
+    # enum values) from the ingested text so query_expansion preserves these
+    # tokens verbatim. Flag-gated, fail-safe — must never block ingestion.
+    if getattr(settings, "LOGIQ_HOTFIX_BACKEND", False) and full_text:
+        try:
+            from backend.services.vocabulary_learner import (
+                learn_from_content,
+                persist as _vocab_persist,
+            )
+            learned = learn_from_content(full_text, filename)
+            _vocab_persist(learned, filename)
+        except Exception as e:
+            logger.warning("[vocab_learner] ingestion hook failed (non-fatal): %s", e)
 
     doc_metadata = {
         "title": doc_title,

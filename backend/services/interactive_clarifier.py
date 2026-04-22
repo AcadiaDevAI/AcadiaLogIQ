@@ -383,6 +383,7 @@ def try_clarify(
     carried_identifiers: Optional[Sequence[str]],
     session_id: Optional[str],
     recent_messages: Optional[List[Dict[str, Any]]],
+    session_clarif_count: int = 0,
 ) -> ClarificationResult:
     """
     Main entry. Returns ClarificationResult.
@@ -391,12 +392,32 @@ def try_clarify(
       - If needs_clarification=False, caller proceeds normally.
 
     Never raises. Any error -> skip_reason set, needs_clarification=False.
+
+    Sprint 2.7 Bug C — `session_clarif_count` is a hard per-chain cap:
+    when the hotfix flag is on and count >= 1, skip clarification regardless
+    of ambiguity score. Prevents the "double loop" UX where a user picks an
+    option, submits the refined query, and gets asked more questions.
     """
     result = ClarificationResult()
 
     try:
         if not getattr(settings, "INTERACTIVE_CLARIFIER_ENABLED", False):
             result.skip_reason = "disabled"
+            return result
+
+        # Sprint 2.7 Bug C — at most one clarification round per logical
+        # question chain. Caller passes count=1 on the refined /ask that
+        # followed an earlier clarification selection.
+        if (
+            getattr(settings, "LOGIQ_ACCURACY_HOTFIX_BACKEND", False)
+            and session_clarif_count >= 1
+        ):
+            result.skip_reason = "chain_cap_reached"
+            logger.info(
+                "[interactive_clarifier] skip reason=chain_cap_reached "
+                "session_clarif_count=%d",
+                session_clarif_count,
+            )
             return result
 
         # Hard-skip checks (cheap, no LLM)

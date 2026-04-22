@@ -6,6 +6,8 @@ import Sidebar from "./components/Sidebar";
 import ChatArea from "./components/ChatArea";
 import MobileHeader from "./components/MobileHeader";
 import AuthGate from "./components/AuthGate";
+import LandingPage from "./components/LandingPage";
+import { settings as clientSettings } from "./config/clientSettings";
 
 function BuildStamp() {
   return (
@@ -30,6 +32,12 @@ function BuildStamp() {
 function AppLayout() {
   const { state, dispatch } = useChat();
 
+  // When guided workflow is enabled and the user hasn't picked a mode yet,
+  // show the LandingPage instead of the ChatArea. Sidebar stays visible so
+  // past sessions remain reachable.
+  const showLanding =
+    clientSettings.GUIDED_WORKFLOW_ENABLED && !state.selectedMode;
+
   return (
     <div className="flex h-screen overflow-hidden t-bg-primary">
       {/* Sidebar - desktop */}
@@ -53,7 +61,7 @@ function AppLayout() {
       {/* Main area */}
       <div className="flex-1 flex flex-col min-w-0">
         <MobileHeader />
-        <ChatArea />
+        {showLanding ? <LandingPage /> : <ChatArea />}
       </div>
 
       <BuildStamp />

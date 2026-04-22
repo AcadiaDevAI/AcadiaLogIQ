@@ -1522,6 +1522,55 @@ def get_user_by_clerk_id(clerk_id: str) -> dict | None:
         ).mappings().first()
         return dict(row) if row else None
     
+def insert_rejected_document_row(
+    *,
+    document_id: str,
+    owner_id: str,
+    filename: str,
+    file_type: str,
+    ingestion_status: str,
+    ingestion_error: str,
+) -> None:
+    """Sprint 2.9 — persist a documents row for a rejected upload.
+
+    The row has no version / no chunks / no embeddings. Its only job is
+    to make the rejected file visible in the admin file list with an
+    ingestion_status the frontend can render as a red-dot badge.
+    """
+    with SessionLocal() as db:
+        db.execute(
+            text(
+                """
+                INSERT INTO documents(
+                    id, owner_id, name, normalized_name, file_type, source_type,
+                    status, current_version_id, created_at, updated_at,
+                    version_family_key, duplicate_status,
+                    ingestion_status, ingestion_error
+                )
+                VALUES (
+                    :document_id, :owner_id, :filename, :filename, :file_type, 'file',
+                    'active', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
+                    :filename, 'unique',
+                    :ingestion_status, :ingestion_error
+                )
+                ON CONFLICT (id) DO UPDATE SET
+                    ingestion_status = EXCLUDED.ingestion_status,
+                    ingestion_error  = EXCLUDED.ingestion_error,
+                    updated_at       = CURRENT_TIMESTAMP
+                """
+            ),
+            {
+                "document_id": document_id,
+                "owner_id": owner_id,
+                "filename": filename,
+                "file_type": file_type,
+                "ingestion_status": ingestion_status,
+                "ingestion_error": ingestion_error,
+            },
+        )
+        db.commit()
+
+
 def list_active_files_all() -> list:
     """
     List ALL active files across ALL users.
@@ -1544,6 +1593,8 @@ def list_active_files_all() -> list:
                     d.created_at,
                     d.normalized_name,
                     d.version_family_key,
+                    COALESCE(d.ingestion_status, 'ok') AS ingestion_status,
+                    d.ingestion_error,
                     dv.id::text AS version_id,
                     dv.version_label,
                     dv.version_rank,
@@ -1598,6 +1649,8 @@ def list_active_files_all() -> list:
                 "version_family_key": row["version_family_key"],
                 "version_label": row["version_label"],
                 "version_rank": version_rank_val,
+                "ingestion_status": row["ingestion_status"],
+                "ingestion_error": row["ingestion_error"],
             }
         )
     return results

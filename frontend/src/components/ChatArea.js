@@ -2,8 +2,14 @@ import React, { useRef, useEffect, useCallback } from "react";
 import { message } from "antd";
 import { useChat } from "../hooks/ChatContext";
 import { askQuestion, listSessions } from "../services/api";
+import { settings as clientSettings } from "../config/clientSettings";
 import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
+import ModeBadge from "./ModeBadge";
+import CustomerForm from "./CustomerForm";
+import TechForm from "./TechForm";
+import PatternResponseCard from "./PatternResponseCard";
+import ContextBreakModal from "./ContextBreakModal";
 
 function TypingIndicator() {
   return (
@@ -77,6 +83,27 @@ export default function ChatArea() {
         });
         dispatch({ type: "SET_LOADING", payload: false });
 
+        // Sprint 2 — surface context-break modal if the backend emitted the
+        // hint. Gated on the frontend flag + Sprint 1 flag so no-op when
+        // either is off, matching the backend gate.
+        if (
+          clientSettings.LOGIQ_SPRINT2_FRONTEND &&
+          clientSettings.GUIDED_WORKFLOW_ENABLED &&
+          data.context_stats?.context_break === true
+        ) {
+          dispatch({
+            type: "SET_PENDING_CONTEXT_BREAK",
+            payload: {
+              source: data.context_stats.context_break_source || "",
+              category: data.context_stats.context_break_category || "",
+              matched_phrase: data.context_stats.context_break_matched_phrase || "",
+              active_mode: data.context_stats.context_break_active_mode || "",
+              active_sub_mode: data.context_stats.context_break_active_sub_mode || "",
+              triggering_query: question,
+            },
+          });
+        }
+
         // Fire-and-forget sessions refresh — does not block UI or loading state
         listSessions()
           .then((sessRes) =>
@@ -148,6 +175,24 @@ export default function ChatArea() {
         });
         dispatch({ type: "SET_LOADING", payload: false });
 
+        if (
+          clientSettings.LOGIQ_SPRINT2_FRONTEND &&
+          clientSettings.GUIDED_WORKFLOW_ENABLED &&
+          data.context_stats?.context_break === true
+        ) {
+          dispatch({
+            type: "SET_PENDING_CONTEXT_BREAK",
+            payload: {
+              source: data.context_stats.context_break_source || "",
+              category: data.context_stats.context_break_category || "",
+              matched_phrase: data.context_stats.context_break_matched_phrase || "",
+              active_mode: data.context_stats.context_break_active_mode || "",
+              active_sub_mode: data.context_stats.context_break_active_sub_mode || "",
+              triggering_query: userFacingText,
+            },
+          });
+        }
+
         listSessions()
           .then((sessRes) =>
             dispatch({ type: "SET_SESSIONS", payload: sessRes.data.sessions || [] })
@@ -165,6 +210,30 @@ export default function ChatArea() {
     },
     [state.messages, state.sessionId, dispatch]
   );
+
+  // Sprint 2 — pre-message form gating. Only renders when both flags are
+  // on, the session has no messages yet, and the selected sub-mode has a
+  // form component. Pre-flag shape unchanged: EmptyState still renders.
+  const showSprint2Form =
+    clientSettings.LOGIQ_SPRINT2_FRONTEND &&
+    clientSettings.GUIDED_WORKFLOW_ENABLED &&
+    state.messages.length === 0 &&
+    state.selectedMode === "troubleshooting" &&
+    (state.subMode === "customer_specific" ||
+      state.subMode === "technology_specific");
+
+  const renderEmptyArea = () => {
+    if (!showSprint2Form) {
+      return <EmptyState />;
+    }
+    if (state.subMode === "customer_specific") {
+      return <CustomerForm onSeed={handleSend} />;
+    }
+    if (state.subMode === "technology_specific") {
+      return <TechForm onSeed={handleSend} />;
+    }
+    return <EmptyState />;
+  };
 
   return (
     <div className="flex flex-col h-screen flex-1 t-bg-primary relative">
@@ -188,19 +257,34 @@ export default function ChatArea() {
       )}
 
       <div ref={scrollRef} className="flex-1 overflow-y-auto relative" style={{ zIndex: 10 }}>
+        {state.selectedMode && (
+          <div className="px-4 pt-3 md:px-8 lg:px-16 xl:px-24">
+            <ModeBadge mode={state.selectedMode} subMode={state.subMode} />
+          </div>
+        )}
         {state.messages.length === 0 ? (
-          <EmptyState />
+          renderEmptyArea()
         ) : (
           <div className="pb-4">
             {state.messages.map((msg, i) => (
-              <ChatMessage
-                key={i}
-                msg={msg}
-                index={i}
-                sessionId={state.sessionId}
-                onClarificationSelect={handleClarificationSelect}
-                clarificationDisabled={state.isLoading}
-              />
+              <React.Fragment key={i}>
+                <ChatMessage
+                  msg={msg}
+                  index={i}
+                  sessionId={state.sessionId}
+                  onClarificationSelect={handleClarificationSelect}
+                  clarificationDisabled={state.isLoading}
+                />
+                {clientSettings.LOGIQ_SPRINT2_FRONTEND &&
+                  msg.role === "assistant" &&
+                  msg.patternActive &&
+                  msg.patternData && (
+                    <PatternResponseCard
+                      topic={msg.patternTopic}
+                      data={msg.patternData}
+                    />
+                  )}
+              </React.Fragment>
             ))}
             {state.isLoading &&
               state.messages.length > 0 &&
@@ -212,6 +296,9 @@ export default function ChatArea() {
       </div>
 
       <ChatInput onSend={handleSend} />
+
+      {clientSettings.LOGIQ_SPRINT2_FRONTEND &&
+        clientSettings.GUIDED_WORKFLOW_ENABLED && <ContextBreakModal />}
     </div>
   );
 }

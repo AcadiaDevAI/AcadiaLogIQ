@@ -38,4 +38,18 @@ export const settings = {
     process.env.REACT_APP_CODE_INLINE_DETECTION_ENABLED,
     true,
   ),
+
+  // Guided workflow — when true, LandingPage gates entry to ChatArea.
+  // Must match backend GUIDED_WORKFLOW_ENABLED for consistent UX.
+  GUIDED_WORKFLOW_ENABLED: parseBool(
+    process.env.REACT_APP_GUIDED_WORKFLOW_ENABLED,
+    false,
+  ),
+
+  // Sprint 2 — forms, modal, pattern card rendering.
+  // Must match backend LOGIQ_SPRINT2_BACKEND for consistent UX.
+  LOGIQ_SPRINT2_FRONTEND: parseBool(
+    process.env.REACT_APP_LOGIQ_SPRINT2_FRONTEND,
+    false,
+  ),
 };

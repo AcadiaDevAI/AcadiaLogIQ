@@ -206,6 +206,50 @@ class PipelineRetrievalCache:
             }
 
 
+def _wrap_step_retriever_with_session_scope(
+    original_fn: Optional[Callable[[str], Any]],
+    session_scope: Optional[List[str]],
+) -> Optional[Callable[[str], Any]]:
+    """Hotfix: prepend session-scope tokens (customer, product, identifier)
+    to each analyst step's retrieval text so cross-step context doesn't drift.
+
+    Byte-identical behavior when LOGIQ_HOTFIX_BACKEND is off OR session_scope
+    is empty OR original_fn is None.
+    """
+    if original_fn is None:
+        return None
+    if not getattr(settings, "LOGIQ_HOTFIX_BACKEND", False):
+        return original_fn
+    tokens = [t for t in (session_scope or []) if t]
+    if not tokens:
+        return original_fn
+    prefix = " ".join(tokens)
+
+    def _scoped(step_text: str) -> Any:
+        try:
+            # Only inject when the step doesn't already mention a scope token.
+            lower_step = (step_text or "").lower()
+            missing = [t for t in tokens if t.lower() not in lower_step]
+            if missing:
+                enriched = f"{' '.join(missing)} {step_text or ''}".strip()
+            else:
+                enriched = step_text
+            # Sprint 2.7 Bug A — pass ORIGINAL step text as raw_query so
+            # retrieve()'s Sprint 2.5 raw-query extraction fires on the
+            # dash-preserving form (INC-TITAN-812), not the scope-enriched
+            # text. Fall back if the underlying fn doesn't accept raw_query.
+            if getattr(settings, "LOGIQ_ACCURACY_HOTFIX_BACKEND", False):
+                try:
+                    return original_fn(enriched, raw_query=step_text)
+                except TypeError:
+                    return original_fn(enriched)
+            return original_fn(enriched)
+        except Exception:
+            return original_fn(step_text)
+
+    return _scoped
+
+
 def _wrap_step_retriever_with_cache(
     original_fn: Optional[Callable[[str], Any]],
     cache: PipelineRetrievalCache,
@@ -233,7 +277,17 @@ def _wrap_step_retriever_with_cache(
             if cached is not None:
                 return cached
 
-        result = original_fn(step_text)
+        # Sprint 2.7 Bug A — pass step text as raw_query so the retriever's
+        # Sprint 2.5 raw-query extraction fires on analyst sub-steps and
+        # preserves dash-delimited identifiers (INC-TITAN-812). Fall back
+        # to single-arg invocation if underlying fn doesn't accept kwarg.
+        if getattr(settings, "LOGIQ_ACCURACY_HOTFIX_BACKEND", False):
+            try:
+                result = original_fn(step_text, raw_query=step_text)
+            except TypeError:
+                result = original_fn(step_text)
+        else:
+            result = original_fn(step_text)
 
         if ids and result is not None:
             cache.put(ids, result)
@@ -435,6 +489,7 @@ def run_agent_pipeline(
     stage: Optional[str] = None,
     unresolved_count: int = 0,
     pattern_context: Optional[Dict[str, Any]] = None,
+    session_scope: Optional[List[str]] = None,
 ) -> AgentPipelineResult:
     """
     Run the full multi-agent pipeline: Planner → Analyst → Composer.
@@ -472,6 +527,11 @@ def run_agent_pipeline(
     pipeline_retrieval_cache = PipelineRetrievalCache()
     step_retriever_fn = _wrap_step_retriever_with_cache(
         step_retriever_fn, pipeline_retrieval_cache,
+    )
+    # Hotfix: session-scope anchoring. Wrap after the cache wrapper so cache
+    # keys remain identifier-based; scope just enriches step text.
+    step_retriever_fn = _wrap_step_retriever_with_session_scope(
+        step_retriever_fn, session_scope,
     )
 
     try:
@@ -658,6 +718,29 @@ def run_agent_pipeline(
                 step_count, computed, dynamic_max,
             )
 
+        # Hotfix: composer starvation on multi-step non-pattern queries.
+        # Reserve an explicit slice for the Composer regardless of whether
+        # the query hit pattern_context or the analytical path, so the
+        # synthesis step isn't "Skipped (budget exhausted)" on 3+ step plans.
+        if (
+            getattr(settings, "LOGIQ_HOTFIX_BACKEND", False)
+            and not pattern_context
+            and plan_steps
+            and len(plan_steps) >= 2
+        ):
+            composer_reserve = int(getattr(
+                settings, "HOTFIX_COMPOSER_RESERVE_TOKENS", 5000,
+            ))
+            needed = budget.used + composer_reserve + 1000
+            if budget.max_total < needed:
+                logger.info(
+                    "[agents] hotfix composer reserve: bumping budget from %d to %d "
+                    "(used=%d reserve=%d steps=%d)",
+                    budget.max_total, needed, budget.used, composer_reserve,
+                    len(plan_steps),
+                )
+                budget.max_total = needed
+
         # Check timeout
         elapsed = time.perf_counter() - t_start
         if elapsed > settings.AGENT_TIMEOUT_SECONDS:
@@ -698,6 +781,33 @@ def run_agent_pipeline(
         # ==================================================================
         # Step 3: COMPOSER — synthesize findings into final answer
         # ==================================================================
+        # v2 Bug #4: two-pool budget architecture. The Analyst phase may
+        # legitimately burn through budget.max_total on deep multi-step
+        # work; without a reservation the Composer would be skipped
+        # ("budget exhausted"). When AGENT_BUDGET_SEPARATE_COMPOSER_POOL is
+        # on, extend max_total by a fresh composer pool right before the
+        # synthesis call so the Composer always gets a guaranteed slice
+        # regardless of Analyst overrun.
+        _two_pool_on = (
+            getattr(settings, "LOGIQ_HOTFIX_BACKEND", False)
+            and getattr(settings, "AGENT_BUDGET_SEPARATE_COMPOSER_POOL", False)
+        )
+        if _two_pool_on:
+            composer_pool = int(getattr(
+                settings, "HOTFIX_COMPOSER_RESERVE_TOKENS",
+                getattr(settings, "AGENT_BUDGET_COMPOSER_TOKENS", 5000),
+            ))
+            analyst_used = budget.used
+            prior_max = budget.max_total
+            new_max = max(prior_max, analyst_used + composer_pool)
+            if new_max > prior_max:
+                logger.info(
+                    "[budget_two_pool] analyst_used=%d composer_pool=%d "
+                    "prior_max=%d new_max=%d",
+                    analyst_used, composer_pool, prior_max, new_max,
+                )
+                budget.max_total = new_max
+
         if not budget.exhausted:
             reasoning_log.append(f"[Composer] Synthesizing {len(findings)} findings into answer")
 
