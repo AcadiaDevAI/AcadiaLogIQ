@@ -831,6 +831,28 @@ class Settings(BaseSettings):
     LOGIQ_SPRINT3E_BACKEND: bool = False
 
     # ─────────────────────────────────────────────────────────────
+    # Sprint 4 — Fingerprint-First Expert Copilot
+    # Flag-off path: fingerprint endpoints 404, LandingRouter falls
+    # through to the Sprint 1 LandingPage, GIN indexes sit unused, new
+    # chat_sessions columns stay NULL. Flag-on: FingerprintInputScreen
+    # is the first screen; /fingerprint/lookup runs GIN-indexed exact-
+    # match retrieval on chunks.metadata_json -> Metadata -> Fingerprints
+    # and composes via voice_override="expert_copilot".
+    #
+    # FINGERPRINT_REGEX — relaxed to accept any non-empty string. The
+    # original anchored UPPERCASE-with-hyphen pattern was rejecting
+    # inputs we now want to pass straight through to the SQL exact-
+    # match (e.g., "%BGP-5-ADJCHANGE"), so the gate has been loosened
+    # to "any non-empty". The JSONB `?` operator in retrieve_by_fingerprint
+    # will simply return no rows on shapes that don't exist in
+    # chunks.metadata_json -> Metadata -> Fingerprints, which is the
+    # correct behavior for a miss — no need to fail fast on shape.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_SPRINT4_BACKEND: bool = False
+    FINGERPRINT_REGEX: ClassVar[str] = r".+"
+    FINGERPRINT_MIN_QUALITY_SCORE: int = 3
+
+    # ─────────────────────────────────────────────────────────────
     # Sprint 2.9 — JSON Structure Validator
     # Rejects uploads whose CONTENT looks like JSON (first non-whitespace
     # byte is { or [) but fails strict parse. Flag-off = byte-identical

@@ -2139,6 +2139,248 @@ async def api_patch_session_form(
     return SessionModeResponse(ok=True, mode=snap.to_dict())
 
 
+# ─────────────────────────────────────────────────────────────
+# Sprint 4 — Fingerprint-First Expert Copilot
+#
+# Two endpoints gated behind LOGIQ_SPRINT4_BACKEND. When the flag is off
+# BOTH return 404 so the frontend (when someone rebuilds with 4 on while
+# backend has it off) can detect the mismatch and fall through to the
+# normal landing page.
+#
+#   POST /fingerprint/lookup
+#     Body: { session_id, fingerprint }
+#     - Validates fingerprint against FINGERPRINT_REGEX (422 on mismatch).
+#     - Calls retrieve_by_fingerprint — on miss returns {match: false}.
+#     - On hit: builds findings from the gold-ticket metadata_json and
+#       calls run_composer with voice_override="expert_copilot". Writes
+#       entered_via='fingerprint' + original_fingerprint to the session
+#       and saves both the user "turn" and assistant answer to chat
+#       history so the transcript is coherent.
+#
+#   POST /fingerprint/skip
+#     Body: { session_id }
+#     - Marks entered_via='skip'. Leaves selected_mode NULL so the
+#       frontend can then show the normal mode picker.
+# ─────────────────────────────────────────────────────────────
+class FingerprintLookupRequest(BaseModel):
+    # session_id may be empty on the user's first interaction — the
+    # endpoint will create a new session via save_message_to_session
+    # (same pattern as /ask). Callers should treat the session_id
+    # returned in the response as authoritative.
+    session_id: Optional[str] = None
+    fingerprint: str
+
+
+class FingerprintSkipRequest(BaseModel):
+    session_id: Optional[str] = None
+
+
+class FingerprintLookupResponse(BaseModel):
+    match: bool
+    session_id: Optional[str] = None
+    answer: Optional[str] = None
+    fingerprint: Optional[str] = None
+    reason: Optional[str] = None
+
+
+def _build_fingerprint_findings(metadata_json: Dict[str, Any]) -> List[str]:
+    """Render the gold-ticket rich metadata into findings blocks that the
+    Expert Copilot voice can structure into its Phase 1/2/3 sections.
+
+    We intentionally split by section so the Composer can cite each one
+    (the voice's branching-diagnostics block needs Symptom_Solution_Mapping
+    verbatim; the Phase 3 RaC snippet comes from remediation_payload)."""
+    import json as _json
+
+    parts: List[str] = []
+    meta = metadata_json.get("Metadata") or {}
+    if meta:
+        header = metadata_json.get("Header") or meta.get("Header") or ""
+        parts.append(
+            "[Gold ticket header]\n"
+            + (header or "(no header)")
+            + "\nFingerprints: "
+            + ", ".join(meta.get("Fingerprints") or [])
+        )
+    ssm = metadata_json.get("Symptom_Solution_Mapping")
+    if isinstance(ssm, dict) and ssm:
+        parts.append(
+            "[Symptom_Solution_Mapping]\n" + _json.dumps(ssm, indent=2, ensure_ascii=False)
+        )
+    sop = metadata_json.get("Operational_SOP")
+    if isinstance(sop, dict) and sop:
+        parts.append(
+            "[Operational_SOP]\n" + _json.dumps(sop, indent=2, ensure_ascii=False)
+        )
+    kb = metadata_json.get("Knowledge_Base")
+    if kb:
+        parts.append(
+            "[Knowledge_Base]\n" + _json.dumps(kb, indent=2, ensure_ascii=False)
+        )
+    rem = metadata_json.get("remediation_payload")
+    if isinstance(rem, dict) and rem:
+        parts.append(
+            "[remediation_payload]\n" + _json.dumps(rem, indent=2, ensure_ascii=False)
+        )
+    return parts or ["[No rich metadata available for this fingerprint]"]
+
+
+@app.post("/fingerprint/lookup", response_model=FingerprintLookupResponse)
+@limiter.limit("30/minute")
+async def api_fingerprint_lookup(
+    request: Request,
+    payload: FingerprintLookupRequest,
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    """Sprint 4 landing-screen handler: resolve a fingerprint code to the
+    Expert Copilot answer for its highest-quality gold ticket."""
+    if not getattr(settings, "LOGIQ_SPRINT4_BACKEND", False):
+        raise HTTPException(status_code=404, detail="sprint4_flag_off")
+
+    # Pass-through: the regex gate has been intentionally removed so the
+    # raw trimmed input reaches retrieve_by_fingerprint and the JSONB `?`
+    # exact-match lookup. Non-existent shapes just return a miss, same as
+    # any other no-match fingerprint. An empty body still short-circuits
+    # as 422 since there is nothing to look up.
+    fp_raw = (payload.fingerprint or "").strip()
+    if not fp_raw:
+        raise HTTPException(status_code=422, detail="fingerprint_empty")
+
+    owner_id = _normalize_owner_id(user_id)
+
+    # Existing-session case: verify ownership. First-interaction case
+    # (session_id empty): skip the check — save_message_to_session will
+    # create a new session on the user's first turn below (same pattern
+    # /ask uses).
+    incoming_sid = (payload.session_id or "").strip() or None
+    if incoming_sid:
+        session = get_chat_session(incoming_sid, owner_id)
+        if not session:
+            raise HTTPException(status_code=404, detail="Session not found")
+
+    # Import here to dodge any import-order surprises and keep the
+    # retrieval package optional at startup.
+    from backend.retrieval.orchestrator import retrieve_by_fingerprint
+
+    metadata_json = retrieve_by_fingerprint(fp_raw)
+
+    # Persist the user-authored "turn" FIRST so a new session gets
+    # created on the miss path too (the transcript will just show the
+    # fingerprint probe with no assistant reply, which is intentional —
+    # the frontend routes the user to the "no match" screen next).
+    user_turn = f"[Fingerprint lookup] {fp_raw}"
+    session_id = save_message_to_session(
+        session_id=incoming_sid,
+        role="user",
+        content=user_turn,
+        owner_id=owner_id,
+    )
+
+    if metadata_json is None:
+        # Mark the session as having attempted fingerprint entry so the
+        # audit trail still records the user's path, even on miss.
+        patch_session_mode(
+            session_id,
+            {"entered_via": "fingerprint", "original_fingerprint": fp_raw},
+        )
+        return FingerprintLookupResponse(
+            match=False,
+            session_id=session_id,
+            fingerprint=fp_raw,
+            reason="no_gold_ticket_match",
+        )
+
+    # Lock the session to troubleshooting-mode + audit columns so /ask
+    # follow-ups keep the Expert Copilot context. Done BEFORE the compose
+    # call so the composer reads the updated session_mode snapshot.
+    patch_session_mode(
+        session_id,
+        {
+            "selected_mode": "troubleshooting",
+            "entered_via": "fingerprint",
+            "original_fingerprint": fp_raw,
+        },
+    )
+    session_mode_snap = get_session_mode(session_id)
+
+    from backend.agents.base import TokenBudget
+    from backend.agents.composer import run_composer
+
+    budget = TokenBudget(max_total=settings.AGENT_MAX_TOTAL_TOKENS)
+    findings = _build_fingerprint_findings(metadata_json)
+    header_name = (metadata_json.get("Header") or fp_raw)[:120]
+
+    try:
+        compose_result = run_composer(
+            query=f"Walk me through resolving fingerprint {fp_raw}.",
+            findings=findings,
+            source_names=[header_name],
+            budget=budget,
+            generate_fn=safe_generate,
+            bedrock_client=bedrock,
+            session_mode=session_mode_snap,
+            voice_override="expert_copilot",
+        )
+        answer = (compose_result.output or "").strip()
+    except Exception as exc:
+        logger.exception("[fingerprint_lookup] compose failed fp=%s: %s", fp_raw, exc)
+        return FingerprintLookupResponse(
+            match=True,
+            session_id=session_id,
+            fingerprint=fp_raw,
+            answer="",
+            reason="compose_failed",
+        )
+
+    save_message_to_session(
+        session_id=session_id,
+        role="assistant",
+        content=answer,
+        owner_id=owner_id,
+    )
+
+    return FingerprintLookupResponse(
+        match=True,
+        session_id=session_id,
+        fingerprint=fp_raw,
+        answer=answer,
+    )
+
+
+@app.post("/fingerprint/skip", response_model=SessionModeResponse)
+async def api_fingerprint_skip(
+    payload: FingerprintSkipRequest,
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    """Sprint 4: user clicked Skip on the landing screen. Records the
+    audit trail and returns the refreshed mode snapshot (selected_mode
+    stays NULL so the frontend shows the regular mode picker next).
+
+    If no session_id is passed (user hasn't created a session yet), the
+    endpoint returns ok=True with an empty mode payload — the audit
+    write will happen when the eventual mode-selector write creates the
+    session. This keeps Skip cheap and idempotent."""
+    if not getattr(settings, "LOGIQ_SPRINT4_BACKEND", False):
+        raise HTTPException(status_code=404, detail="sprint4_flag_off")
+
+    incoming_sid = (payload.session_id or "").strip() or None
+    if not incoming_sid:
+        return SessionModeResponse(ok=True, mode={}, reason="no_session_yet")
+
+    owner_id = _normalize_owner_id(user_id)
+    session = get_chat_session(incoming_sid, owner_id)
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+
+    snap = patch_session_mode(
+        incoming_sid,
+        {"entered_via": "skip", "original_fingerprint": None},
+    )
+    if not snap.is_valid:
+        return SessionModeResponse(ok=False, mode={}, reason="db_write_failed")
+    return SessionModeResponse(ok=True, mode=snap.to_dict())
+
+
 @app.post("/ask", response_model=AnswerResponse)
 @limiter.limit("30/minute")
 async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(auth_dependency)):

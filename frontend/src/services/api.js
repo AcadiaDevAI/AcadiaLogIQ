@@ -221,4 +221,17 @@ export const resetSessionContext = (sessionId) =>
 export const patchSessionForm = (sessionId, fields) =>
   api.post(`/chat/sessions/${sessionId}/mode/form`, fields || {});
 
+// ─── Sprint 4 — Fingerprint-First Expert Copilot ──────────
+// Both endpoints return 404 when LOGIQ_SPRINT4_BACKEND is off.
+// Callers must treat 404 as "feature disabled" and fall through
+// to the classic LandingPage, not surface as an error.
+export const fingerprintLookup = (sessionId, fingerprint) =>
+  api.post("/fingerprint/lookup", {
+    session_id: sessionId,
+    fingerprint,
+  });
+
+export const fingerprintSkip = (sessionId) =>
+  api.post("/fingerprint/skip", { session_id: sessionId });
+
 export default api;

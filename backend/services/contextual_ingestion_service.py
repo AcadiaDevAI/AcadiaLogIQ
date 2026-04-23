@@ -854,6 +854,39 @@ def _ingest_gold_ticket_json(
             "operational_context": "ticket",
         }
 
+        # Sprint 4 — Fingerprint-First Expert Copilot. Copy the rich
+        # gold-ticket sections into metadata_json so the GIN indexes on
+        # Fingerprints / Domain_Type / full jsonb_path_ops can match
+        # them at retrieval time. These keys are passed through verbatim
+        # — the Expert Copilot composer reads the raw JSON structure
+        # directly, so we must not flatten or rename them.
+        #
+        # The ingestion is schema-tolerant: missing sections are simply
+        # skipped (no KeyError, no placeholder). When
+        # LOGIQ_SPRINT4_BACKEND=False, these fields still get written
+        # — the retrieval layer ignores them, and rollback is just a
+        # flag flip (no re-ingest required).
+        if getattr(settings, "LOGIQ_SPRINT4_BACKEND", False):
+            # Top-level "Metadata" block carries Fingerprints AND
+            # Dynamic_Domain_Payload.Domain_Type — both are indexed.
+            if isinstance(ticket.get("Metadata"), dict):
+                row_metadata_json["Metadata"] = ticket["Metadata"]
+            if isinstance(ticket.get("Symptom_Solution_Mapping"), dict):
+                row_metadata_json["Symptom_Solution_Mapping"] = ticket[
+                    "Symptom_Solution_Mapping"
+                ]
+            if isinstance(ticket.get("Operational_SOP"), dict):
+                row_metadata_json["Operational_SOP"] = ticket["Operational_SOP"]
+            # Knowledge_Base is a list of sections in the sample schema.
+            if isinstance(ticket.get("Knowledge_Base"), (list, dict)):
+                row_metadata_json["Knowledge_Base"] = ticket["Knowledge_Base"]
+            if isinstance(ticket.get("remediation_payload"), dict):
+                row_metadata_json["remediation_payload"] = ticket[
+                    "remediation_payload"
+                ]
+            if isinstance(ticket.get("Header"), str):
+                row_metadata_json["Header"] = ticket["Header"]
+
         enriched_rows.append(
             {
                 "chunk_index": idx,

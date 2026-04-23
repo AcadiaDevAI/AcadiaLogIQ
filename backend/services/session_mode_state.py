@@ -83,6 +83,11 @@ class SessionMode:
     last_recommendation: Optional[Dict[str, Any]] = None
     form_data: Optional[Dict[str, Any]] = None
     mode_set_at: Optional[datetime] = None
+    # Sprint 4 — audit trail of how the session was entered. Both remain
+    # None for pre-Sprint-4 rows AND when LOGIQ_SPRINT4_BACKEND is off at
+    # session start. entered_via ∈ {'fingerprint', 'skip', None}.
+    entered_via: Optional[str] = None
+    original_fingerprint: Optional[str] = None
     is_valid: bool = True
 
     def to_dict(self) -> Dict[str, Any]:
@@ -152,7 +157,9 @@ def get_session_mode(session_id: str) -> SessionMode:
                         issue_summary,
                         last_recommendation,
                         form_data,
-                        mode_set_at
+                        mode_set_at,
+                        entered_via,
+                        original_fingerprint
                     FROM chat_sessions
                     WHERE id = :sid
                     LIMIT 1
@@ -179,6 +186,8 @@ def get_session_mode(session_id: str) -> SessionMode:
         last_recommendation=_as_dict(row["last_recommendation"]),
         form_data=_as_dict(row["form_data"]),
         mode_set_at=row["mode_set_at"],
+        entered_via=row.get("entered_via"),
+        original_fingerprint=row.get("original_fingerprint"),
         is_valid=True,
     )
 
@@ -306,6 +315,9 @@ def patch_session_mode(
     allowed_scalar = {
         "selected_mode", "sub_mode", "conversation_context_active",
         "customer_name", "technology_domain", "ticket_id", "issue_summary",
+        # Sprint 4 — audit trail columns. Writes go through here so the
+        # fingerprint endpoints don't need their own UPDATE statements.
+        "entered_via", "original_fingerprint",
     }
     allowed_jsonb = {"last_recommendation", "form_data"}
 

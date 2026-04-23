@@ -178,6 +178,13 @@ function reducer(state, action) {
         ),
       };
 
+    // Sprint 4 — set the session_id after /fingerprint/lookup creates
+    // one on the user's first interaction. Does not touch messages or
+    // mode state; the subsequent ADD_USER_MESSAGE / ADD_ASSISTANT_MESSAGE
+    // dispatches append to the newly-attached session.
+    case "SET_SESSION_ID":
+      return { ...state, sessionId: action.payload || null };
+
     // ── Guided workflow reducer cases (Sprint 1) ────────
     case "SET_MODE":
       return {

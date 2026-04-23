@@ -52,4 +52,13 @@ export const settings = {
     process.env.REACT_APP_LOGIQ_SPRINT2_FRONTEND,
     false,
   ),
+
+  // Sprint 4 — Fingerprint-First Expert Copilot landing flow.
+  // When true AND GUIDED_WORKFLOW_ENABLED is also true, LandingRouter
+  // replaces the plain LandingPage so the first screen is the
+  // fingerprint input. Must match backend LOGIQ_SPRINT4_BACKEND.
+  LOGIQ_SPRINT4_FRONTEND: parseBool(
+    process.env.REACT_APP_LOGIQ_SPRINT4_FRONTEND,
+    false,
+  ),
 };

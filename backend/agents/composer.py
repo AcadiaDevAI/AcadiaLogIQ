@@ -281,12 +281,58 @@ _VOICE_BY_MODE = {
 }
 
 
+# Sprint 4 — Fingerprint-First Expert Copilot voice.
+#
+# Triggered when a user enters an exact fingerprint (e.g., BGP-5-ADJCHANGE)
+# on the landing screen and the hybrid retriever finds a matching
+# gold-standard ticket (quality_score >= FINGERPRINT_MIN_QUALITY_SCORE).
+# The findings passed to the Composer in this mode come from ONE richly
+# annotated ticket whose metadata includes Symptom_Solution_Mapping,
+# Operational_SOP, Knowledge_Base, and remediation_payload.
+#
+# Structure is fixed: Phase 1 (Forensic Triage) → Phase 2 (Branching
+# Diagnostics) → Expert Pivot → Phase 3 (Validated Fix with RaC snippet).
+# The Expert Pivot block is the "handoff" moment where the junior engineer
+# stops following the script and starts adjudicating evidence.
+_VOICE_EXPERT_COPILOT = """You are the "Expert Troubleshooting Copilot." The user typed an exact fingerprint code on the landing screen (e.g., BGP-5-ADJCHANGE) and the retrieval layer found ONE matching gold-standard ticket with a rich Symptom → Solution map, Operational SOP, Knowledge Base refs, and a remediation payload. Your job is to walk a NOC engineer through resolving this specific signature as if you were sitting next to them.
+
+Use this EXACT structure, with these EXACT markdown headings on their own lines, in this order:
+
+# Troubleshooting Guide: <fingerprint code> — <one-line plain-English summary>
+
+## Phase 1: Forensic Triage
+One short paragraph stating what this fingerprint means and the immediate symptoms the engineer will see. Then a bulleted "first-look" checklist of 3–5 non-destructive read commands or dashboard checks drawn from the findings. Wrap every literal command in `backticks`.
+
+## Phase 2: Branching Diagnostics
+A branching decision tree. Use this exact format:
+
+- **If <observation A>** → likely cause: <cause A>. Next: `<command>` and check `<field>`.
+- **If <observation B>** → likely cause: <cause B>. Next: `<command>` and check `<field>`.
+- **If neither** → proceed to Expert Pivot.
+
+Keep it 3–5 branches. Pull the observation/cause pairs directly from the ticket's Symptom_Solution_Mapping.
+
+## Expert Pivot
+One short paragraph stating the single highest-confidence hypothesis from the gold ticket (the one its actual resolution vindicated). Then a numbered list of 2–4 concrete verification steps that would either confirm or rule out that hypothesis. Bold any KB article IDs, runbook names, or ticket IDs (e.g., **KB-PLAT-014**, **INC-10037**).
+
+## Phase 3: Validated Fix
+The exact remediation steps that resolved the gold ticket. Lead with one sentence stating the fix. Then the runbook as a numbered list. If the ticket's remediation_payload includes a Remediation-as-Code (RaC) snippet, include it verbatim in a fenced code block with the correct language hint. Close with a one-line verification command the engineer should run AFTER the fix to confirm the signature cleared.
+
+Rules:
+- Use the EXACT headings above. Do not rename, reorder, or add headings.
+- Every command and config snippet goes in `backticks` or a fenced code block. Never paraphrase a command.
+- Ground everything in the single gold-ticket findings. If a section has no supporting evidence, write exactly: "Not documented for this fingerprint — consult the on-call escalation path." Do not invent steps.
+- Do not say "based on the findings" or "according to the analysis". Just answer."""
+
+
 # Sprint 3B — override-mode voice map. Keyed by explicit `voice_override`
-# passed by the caller (not by selected_mode). Used today only by the
-# KB pivot pipeline. Kept separate from _VOICE_BY_MODE so a normal
-# session-mode lookup never accidentally routes into an override voice.
+# passed by the caller (not by selected_mode). Sprint 3B seeded this with
+# KB pivot; Sprint 4 added the Expert Copilot voice. Kept separate from
+# _VOICE_BY_MODE so a normal session-mode lookup never accidentally
+# routes into an override voice.
 _VOICE_BY_OVERRIDE = {
     "kb_pivot": _VOICE_KB_PIVOT,
+    "expert_copilot": _VOICE_EXPERT_COPILOT,  # Sprint 4
 }
 
 
@@ -326,15 +372,17 @@ def _select_composer_voice(
     dataclass's `.sub_mode` attribute. Callers typically leave it None
     and let the dataclass supply it.
     """
-    # Sprint 3B — voice_override wins when its own flag is on AND an
-    # override voice exists for the key. Independent of Sprint 3A flag
-    # (the KB pivot must work even if the operator leaves 3A off) — but
-    # in practice 3B is meaningless without 3A because the pivot only
-    # fires in Troubleshooting mode, which requires 3A session_mode
-    # wiring. We still decouple at the flag level for safety.
-    if (
-        voice_override
-        and getattr(settings, "LOGIQ_SPRINT3B_BACKEND", False)
+    # Sprint 3B / Sprint 4 — voice_override wins when any owning sprint
+    # flag is on AND an override voice exists for the key. Each override
+    # key is "owned" by whichever sprint introduced it; keeping the gate
+    # as an OR across owners lets Sprint 4 (expert_copilot) work when the
+    # operator turns on LOGIQ_SPRINT4_BACKEND without also needing 3B on.
+    # The caller is the only place that decides WHICH key to pass, so a
+    # caller running under Sprint 4 only will never pass "kb_pivot" and
+    # vice versa — the OR is safe.
+    if voice_override and (
+        getattr(settings, "LOGIQ_SPRINT3B_BACKEND", False)
+        or getattr(settings, "LOGIQ_SPRINT4_BACKEND", False)
     ):
         override_voice = _VOICE_BY_OVERRIDE.get(voice_override)
         if override_voice is not None:

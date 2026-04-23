@@ -1062,3 +1062,114 @@ def retrieve(
     )
 
     return result
+
+
+# ---------------------------------------------------------------------------
+# Sprint 4 — Fingerprint-First Expert Copilot
+# ---------------------------------------------------------------------------
+# Exact-match lookup on the gold-ticket Fingerprints array (JSONB). This
+# is intentionally NOT a hybrid retrieval: fingerprints are
+# system-generated error codes (e.g., BGP-5-ADJCHANGE) — exact match
+# is the only signal that matters. The `?` operator on a JSONB array
+# uses the narrow GIN index created in migration 035.
+#
+# Flag-off returns None immediately. No SQL is executed.
+# ---------------------------------------------------------------------------
+def retrieve_by_fingerprint(
+    fingerprint: str,
+    *,
+    min_quality_score: Optional[int] = None,
+    limit: int = 1,
+) -> Optional[Dict[str, Any]]:
+    """Return the single best gold-ticket metadata_json for an exact
+    fingerprint match, or None if no match / flag off / invalid format.
+
+    Sprint 4 contract:
+      - Only runs when LOGIQ_SPRINT4_BACKEND is True.
+      - Validates against settings.FINGERPRINT_REGEX (UPPERCASE, hyphen
+        required). API layer also validates before calling, but the
+        defensive check here lets tests call this directly.
+      - Orders by Resolution_Quality_Score DESC, then created_at DESC,
+        so the "best" historical record is returned when multiple
+        tickets share the same fingerprint.
+      - Returns a plain dict (not the SQLA row proxy) so callers can
+        pass it directly into run_composer as a JSON finding.
+    """
+    if not getattr(settings, "LOGIQ_SPRINT4_BACKEND", False):
+        return None
+
+    fp = (fingerprint or "").strip()
+    if not re.match(getattr(settings, "FINGERPRINT_REGEX", r"^$"), fp):
+        return None
+
+    if min_quality_score is None:
+        min_quality_score = int(
+            getattr(settings, "FINGERPRINT_MIN_QUALITY_SCORE", 3)
+        )
+
+    try:
+        from backend.db.connection import engine
+        from sqlalchemy import text
+    except Exception as exc:
+        logger.warning("[fingerprint_lookup] engine import failed: %s", exc)
+        return None
+
+    # Correction note (see SPRINT_4 correction log): the spec queries the
+    # `documents` table, but gold-ticket JSON is stored one-row-per-ticket
+    # on `chunks.metadata_json` (see _ingest_gold_ticket_json). The `?`
+    # operator on the narrow Fingerprints sub-path uses the
+    # idx_chunks_fingerprints GIN index from migration 035.
+    sql = text(
+        """
+        SELECT
+            id,
+            document_id,
+            metadata_json,
+            created_at,
+            COALESCE(
+              (metadata_json->'Metadata'->>'Resolution_Quality_Score')::int,
+              (metadata_json->>'resolution_quality_score')::int,
+              0
+            ) AS qscore
+        FROM chunks
+        WHERE metadata_json -> 'Metadata' -> 'Fingerprints' ? :fp
+          AND COALESCE(
+            (metadata_json->'Metadata'->>'Resolution_Quality_Score')::int,
+            (metadata_json->>'resolution_quality_score')::int,
+            0
+          ) >= :min_score
+        ORDER BY qscore DESC NULLS LAST, created_at DESC
+        LIMIT :lim
+        """
+    )
+
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                sql,
+                {"fp": fp, "min_score": int(min_quality_score), "lim": int(limit)},
+            ).mappings().first()
+    except Exception as exc:
+        logger.warning("[fingerprint_lookup] query failed fp=%s: %s", fp, exc)
+        return None
+
+    if not row:
+        logger.info("[fingerprint_lookup] miss fp=%s", fp)
+        return None
+
+    metadata_json = row["metadata_json"]
+    # psycopg3 returns dict; older drivers may return str. Normalize.
+    if isinstance(metadata_json, str):
+        try:
+            import json as _json
+            metadata_json = _json.loads(metadata_json)
+        except Exception:
+            metadata_json = {}
+    elif not isinstance(metadata_json, dict):
+        metadata_json = dict(metadata_json) if metadata_json else {}
+
+    logger.info(
+        "[fingerprint_lookup] hit fp=%s chunk_id=%s doc_id=%s qscore=%d",
+        fp, row["id"], row["document_id"], int(row["qscore"] or 0),
+    )
+    return metadata_json
