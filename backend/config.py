@@ -853,6 +853,22 @@ class Settings(BaseSettings):
     FINGERPRINT_MIN_QUALITY_SCORE: int = 3
 
     # ─────────────────────────────────────────────────────────────
+    # Sprint 5 — Template-First Expert Copilot + Answer Cache
+    # Flag-off path: /fingerprint/lookup runs the full Sprint 4 LLM
+    # pipeline end-to-end (byte-identical). Flag-on + gold-schema JSON
+    # ticket: template-render Phase 2, Phase 3, header, KB citations
+    # deterministically; LLM is asked only for Phase 1 narrative +
+    # Expert Pivot; final rendered answer is cached on the chunk row
+    # so repeat lookups skip the LLM entirely. Non-gold-schema
+    # retrievals (PDFs, Word, KBs, contacts, partial tickets) ALWAYS
+    # use the full LLM path regardless of this flag. Cache is
+    # invalidated automatically because Sprint 2.9 ingestion
+    # DELETEs + re-INSERTs the chunk row on re-upload.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_SPRINT5_BACKEND: bool = False
+    EXPERT_COPILOT_CACHE_TTL_DAYS: int = 30
+
+    # ─────────────────────────────────────────────────────────────
     # Sprint 2.9 — JSON Structure Validator
     # Rejects uploads whose CONTENT looks like JSON (first non-whitespace
     # byte is { or [) but fails strict parse. Flag-off = byte-identical

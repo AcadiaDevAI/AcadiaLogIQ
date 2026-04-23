@@ -1080,7 +1080,8 @@ def retrieve_by_fingerprint(
     *,
     min_quality_score: Optional[int] = None,
     limit: int = 1,
-) -> Optional[Dict[str, Any]]:
+    return_chunk_id: bool = False,
+) -> Optional[Any]:
     """Return the single best gold-ticket metadata_json for an exact
     fingerprint match, or None if no match / flag off / invalid format.
 
@@ -1094,13 +1095,21 @@ def retrieve_by_fingerprint(
         tickets share the same fingerprint.
       - Returns a plain dict (not the SQLA row proxy) so callers can
         pass it directly into run_composer as a JSON finding.
+
+    Sprint 5 extension (additive, fully backward-compatible):
+      - When return_chunk_id=True, returns a (metadata_json, chunk_id)
+        tuple on hit and (None, None) on miss. The chunk_id is the
+        cache key for the per-chunk Expert Copilot answer cache added
+        by migration 037. Existing callers (Sprint 4 + tests) do NOT
+        pass this kwarg and still receive the original Optional[Dict]
+        return — byte-identical behavior.
     """
     if not getattr(settings, "LOGIQ_SPRINT4_BACKEND", False):
-        return None
+        return (None, None) if return_chunk_id else None
 
     fp = (fingerprint or "").strip()
     if not re.match(getattr(settings, "FINGERPRINT_REGEX", r"^$"), fp):
-        return None
+        return (None, None) if return_chunk_id else None
 
     if min_quality_score is None:
         min_quality_score = int(
@@ -1112,7 +1121,7 @@ def retrieve_by_fingerprint(
         from sqlalchemy import text
     except Exception as exc:
         logger.warning("[fingerprint_lookup] engine import failed: %s", exc)
-        return None
+        return (None, None) if return_chunk_id else None
 
     # Correction note (see SPRINT_4 correction log): the spec queries the
     # `documents` table, but gold-ticket JSON is stored one-row-per-ticket
@@ -1151,11 +1160,11 @@ def retrieve_by_fingerprint(
             ).mappings().first()
     except Exception as exc:
         logger.warning("[fingerprint_lookup] query failed fp=%s: %s", fp, exc)
-        return None
+        return (None, None) if return_chunk_id else None
 
     if not row:
         logger.info("[fingerprint_lookup] miss fp=%s", fp)
-        return None
+        return (None, None) if return_chunk_id else None
 
     metadata_json = row["metadata_json"]
     # psycopg3 returns dict; older drivers may return str. Normalize.
@@ -1172,4 +1181,6 @@ def retrieve_by_fingerprint(
         "[fingerprint_lookup] hit fp=%s chunk_id=%s doc_id=%s qscore=%d",
         fp, row["id"], row["document_id"], int(row["qscore"] or 0),
     )
+    if return_chunk_id:
+        return metadata_json, row["id"]
     return metadata_json

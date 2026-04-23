@@ -46,8 +46,23 @@ services:
         # Sprint 3A — mode-aware prompts + post-👍 action chips
         REACT_APP_LOGIQ_SPRINT3A_FRONTEND: ${REACT_APP_LOGIQ_SPRINT3A_FRONTEND:-true}
 
+        # Sprint 3B — 👎 KB pivot + confidence banner (backend-driven UI)
+        REACT_APP_LOGIQ_SPRINT3B_FRONTEND: ${REACT_APP_LOGIQ_SPRINT3B_FRONTEND:-true}
+
+        # Sprint 3C — Escalation mode contact card chips
+        REACT_APP_LOGIQ_SPRINT3C_FRONTEND: ${REACT_APP_LOGIQ_SPRINT3C_FRONTEND:-true}
+
+        # Sprint 3D — Ticket Handling sub-mode chips
+        REACT_APP_LOGIQ_SPRINT3D_FRONTEND: ${REACT_APP_LOGIQ_SPRINT3D_FRONTEND:-true}
+
+        # Sprint 3E — Vendor/OEM mode chips
+        REACT_APP_LOGIQ_SPRINT3E_FRONTEND: ${REACT_APP_LOGIQ_SPRINT3E_FRONTEND:-true}
+
         # Sprint 3-PREP-B — bulk ingestion doc_kind dropdown + sidebar badge
         REACT_APP_LOGIQ_BULK_INGEST_FRONTEND: ${REACT_APP_LOGIQ_BULK_INGEST_FRONTEND:-false}
+
+        # Sprint 4 — Fingerprint-First Expert Copilot landing screen
+        REACT_APP_LOGIQ_SPRINT4_FRONTEND: ${REACT_APP_LOGIQ_SPRINT4_FRONTEND:-true}
 
         # BUILD_TIMESTAMP is exported by redeploy.sh before build.
         # Changing this arg invalidates the build stage cache and

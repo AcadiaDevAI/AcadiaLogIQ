@@ -2262,7 +2262,14 @@ async def api_fingerprint_lookup(
     # retrieval package optional at startup.
     from backend.retrieval.orchestrator import retrieve_by_fingerprint
 
-    metadata_json = retrieve_by_fingerprint(fp_raw)
+    # Sprint 5 — request the chunk_id alongside the metadata so the
+    # Expert Copilot answer cache (keyed by chunks.id) is reachable.
+    # The tuple form is additive; when flag-off the chunk_id is simply
+    # ignored below. Sprint 4 contract for other callers of
+    # retrieve_by_fingerprint is unchanged (they don't pass the kwarg).
+    metadata_json, chunk_id = retrieve_by_fingerprint(
+        fp_raw, return_chunk_id=True,
+    )
 
     # Persist the user-authored "turn" FIRST so a new session gets
     # created on the miss path too (the transcript will just show the
@@ -2304,33 +2311,94 @@ async def api_fingerprint_lookup(
     session_mode_snap = get_session_mode(session_id)
 
     from backend.agents.base import TokenBudget
-    from backend.agents.composer import run_composer
+    from backend.agents.composer import run_composer, run_hybrid_expert_pipeline
+    from backend.agents.expert_copilot_template import (
+        is_gold_schema_ticket,
+        render_header_and_fingerprints,
+        render_kb_citations,
+        render_phase_2_branching,
+        render_phase_3_remediation,
+    )
+    from backend.vector_store import (
+        get_cached_expert_answer,
+        set_cached_expert_answer,
+    )
 
     budget = TokenBudget(max_total=settings.AGENT_MAX_TOTAL_TOKENS)
     findings = _build_fingerprint_findings(metadata_json)
     header_name = (metadata_json.get("Header") or fp_raw)[:120]
 
-    try:
-        compose_result = run_composer(
-            query=f"Walk me through resolving fingerprint {fp_raw}.",
-            findings=findings,
-            source_names=[header_name],
-            budget=budget,
-            generate_fn=safe_generate,
-            bedrock_client=bedrock,
-            session_mode=session_mode_snap,
-            voice_override="expert_copilot",
-        )
-        answer = (compose_result.output or "").strip()
-    except Exception as exc:
-        logger.exception("[fingerprint_lookup] compose failed fp=%s: %s", fp_raw, exc)
-        return FingerprintLookupResponse(
-            match=True,
-            session_id=session_id,
-            fingerprint=fp_raw,
-            answer="",
-            reason="compose_failed",
-        )
+    # ── Sprint 5 — Template-First Expert Copilot + Answer Cache ──
+    # Applies ONLY to gold-schema JSON tickets. Non-gold retrievals
+    # (PDFs, Word, KBs, contacts, partial tickets) ALWAYS fall through
+    # to the Sprint 4 run_composer path below regardless of flag state.
+    sprint5_on = getattr(settings, "LOGIQ_SPRINT5_BACKEND", False)
+    gold_schema = is_gold_schema_ticket(metadata_json) if sprint5_on else False
+    answer: Optional[str] = None
+
+    if sprint5_on and gold_schema:
+        try:
+            # Cache check — fast path. chunk_id may be None if the
+            # retriever couldn't identify the row; in that case skip
+            # straight to the hybrid render (no cache write either).
+            cached = get_cached_expert_answer(chunk_id) if chunk_id else None
+            if cached:
+                logger.info(
+                    "[sprint5] cache_hit chunk_id=%s fp=%s chars=%d",
+                    chunk_id, fp_raw, len(cached),
+                )
+                answer = cached
+            else:
+                pre_rendered = {
+                    "header": render_header_and_fingerprints(metadata_json),
+                    "phase_2": render_phase_2_branching(metadata_json),
+                    "phase_3": render_phase_3_remediation(metadata_json),
+                    "kb_citations": render_kb_citations(metadata_json),
+                }
+                answer = run_hybrid_expert_pipeline(
+                    json_ticket=metadata_json,
+                    pre_rendered_sections=pre_rendered,
+                    budget=budget,
+                    generate_fn=safe_generate,
+                    bedrock_client=bedrock,
+                )
+                if chunk_id and answer:
+                    set_cached_expert_answer(chunk_id, answer)
+                logger.info(
+                    "[sprint5] cache_miss chunk_id=%s fp=%s cached_answer_chars=%d",
+                    chunk_id, fp_raw, len(answer or ""),
+                )
+        except Exception as exc:
+            # Any Sprint 5 failure degrades to the Sprint 4 LLM path so
+            # the user still gets an answer. No user-visible error.
+            logger.exception(
+                "[sprint5] hybrid pipeline failed, falling back to Sprint 4: %s",
+                exc,
+            )
+            answer = None
+
+    if not answer:
+        try:
+            compose_result = run_composer(
+                query=f"Walk me through resolving fingerprint {fp_raw}.",
+                findings=findings,
+                source_names=[header_name],
+                budget=budget,
+                generate_fn=safe_generate,
+                bedrock_client=bedrock,
+                session_mode=session_mode_snap,
+                voice_override="expert_copilot",
+            )
+            answer = (compose_result.output or "").strip()
+        except Exception as exc:
+            logger.exception("[fingerprint_lookup] compose failed fp=%s: %s", fp_raw, exc)
+            return FingerprintLookupResponse(
+                match=True,
+                session_id=session_id,
+                fingerprint=fp_raw,
+                answer="",
+                reason="compose_failed",
+            )
 
     save_message_to_session(
         session_id=session_id,

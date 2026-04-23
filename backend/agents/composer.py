@@ -7,8 +7,9 @@ rules so the final answer stays document-faithful.
 
 from __future__ import annotations
 
+import json
 import logging
-from typing import Any, Callable, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from backend.config import settings
 from backend.agents.base import AgentStepResult, TokenBudget, invoke_llm
@@ -605,3 +606,114 @@ FINAL ANSWER:"""
     )
 
     return step_result
+
+
+# ─────────────────────────────────────────────────────────────
+# Sprint 5 — Hybrid LLM pipeline for gold-schema JSON tickets
+#
+# Templates render Phase 2, Phase 3, Header, Fingerprints, KB citations
+# deterministically (expert_copilot_template.py, zero LLM). The LLM is
+# asked ONLY for the two sections that genuinely need synthesis:
+#   - Phase 1: Forensic Triage (narrative + dependency analysis)
+#   - Expert Pivot (mental pivot + red herrings + invisible triggers)
+#
+# Prompt payload shrinks from ~40KB to ~8KB. Latency drops ~5x vs the
+# Sprint 4 full-JSON path. Output structure (4 sections) is unchanged
+# — the user sees the same Expert Copilot guide they saw in Sprint 4.
+# ─────────────────────────────────────────────────────────────
+def run_hybrid_expert_pipeline(
+    *,
+    json_ticket: Dict[str, Any],
+    pre_rendered_sections: Dict[str, str],
+    budget: TokenBudget,
+    generate_fn: Callable,
+    bedrock_client: Any,
+) -> str:
+    """Sprint 5 hybrid pipeline.
+
+    Args:
+        json_ticket: the full gold-schema ticket dict (Metadata +
+            Symptom_Solution_Mapping + Operational_SOP +
+            remediation_payload + Knowledge_Base + Header).
+        pre_rendered_sections: dict keyed by "header", "phase_2",
+            "phase_3", "kb_citations" (the last is optional). Values
+            are markdown strings produced by expert_copilot_template.
+        budget: a TokenBudget sized like the Sprint 4 path
+            (AGENT_MAX_TOTAL_TOKENS default).
+        generate_fn: the shared safe_generate callable.
+        bedrock_client: shared Bedrock client.
+
+    Returns the stitched final markdown answer — the string saved to
+    chat history AND to the chunk cache.
+    """
+    ssm = json_ticket.get("Symptom_Solution_Mapping") or {}
+    meta = json_ticket.get("Metadata") or {}
+    kb_list = json_ticket.get("Knowledge_Base") or []
+    kb_excerpt = kb_list[0] if isinstance(kb_list, list) and kb_list else {}
+
+    focused_context = {
+        "header": json_ticket.get("Header"),
+        "incident_number": meta.get("Incident_Number"),
+        "target_service": meta.get("Target_Service"),
+        "affected_assets": meta.get("Affected_Assets"),
+        "customer_name": meta.get("customer_name") or meta.get("Customer_Name"),
+        "detected_symptom": ssm.get("Detected_Symptom") if isinstance(ssm, dict) else None,
+        "origin_event": ssm.get("Origin_Event") if isinstance(ssm, dict) else None,
+        "fingerprints": meta.get("Fingerprints"),
+        "knowledge_base_primary": kb_excerpt,
+    }
+
+    prompt = (
+        "You are the Expert Troubleshooting Copilot. Generate ONLY two "
+        "sections of a troubleshooting guide:\n\n"
+        "1. **Phase 1: Forensic Triage** — 3-4 sentences establishing "
+        "what the fingerprint(s) technically imply, plus a "
+        "'First-look checklist' with 3-5 initial verification commands.\n\n"
+        "2. **Expert Pivot** — 2-3 paragraphs capturing the single "
+        "highest-confidence hypothesis (the 'mental pivot') and 2-4 "
+        "verification steps to confirm it.\n\n"
+        "Do NOT generate Phase 2, Phase 3, headers, fingerprint lists, "
+        "or remediation code — those are rendered separately.\n\n"
+        "Context (JSON):\n"
+        f"{json.dumps(focused_context, indent=2, ensure_ascii=False)}\n\n"
+        "Output ONLY the two sections requested, with their markdown "
+        "headers. Nothing else."
+    )
+
+    step_result = invoke_llm(
+        prompt=prompt,
+        model=settings.AGENT_COMPOSER_MODEL,
+        max_tokens=1200,
+        budget=budget,
+        agent_name="expert_copilot_hybrid",
+        generate_fn=generate_fn,
+        bedrock_client=bedrock_client,
+    )
+
+    llm_output = (step_result.output or "").strip() if step_result.success else ""
+
+    parts = [
+        pre_rendered_sections.get("header", ""),
+        "",
+        "---",
+        "",
+        llm_output,
+        "",
+        "---",
+        "",
+        pre_rendered_sections.get("phase_2", ""),
+        "",
+        "---",
+        "",
+        pre_rendered_sections.get("phase_3", ""),
+    ]
+    kb_cite = pre_rendered_sections.get("kb_citations")
+    if kb_cite:
+        parts.extend(["", "---", "", kb_cite])
+
+    stitched = "\n".join(p for p in parts if p is not None)
+    logger.info(
+        "[sprint5_hybrid] llm_chars=%d final_chars=%d model=%s",
+        len(llm_output), len(stitched), step_result.model_used,
+    )
+    return stitched

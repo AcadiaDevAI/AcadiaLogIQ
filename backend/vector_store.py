@@ -1662,3 +1662,74 @@ def list_active_files_all() -> list:
             }
         )
     return results
+
+
+# ============================================================================
+# Sprint 5 — Expert Copilot answer cache
+# ============================================================================
+# Thin DB helpers over the chunks.cached_expert_answer / cached_expert_answer_at
+# columns added by migration 037. Invalidation is AUTOMATIC: Sprint 2.9's
+# _ingest_gold_ticket_json DELETEs + re-INSERTs the chunk row on re-upload,
+# so a fresh chunk starts with NULL in these columns.
+#
+# These helpers are callable regardless of LOGIQ_SPRINT5_BACKEND — the flag
+# gate lives in the /fingerprint/lookup branch in api.py. When the migration
+# has not been applied yet, the UPDATE/SELECT will raise; callers in the
+# handler wrap both in try/except and fall through to the LLM path.
+
+
+def get_cached_expert_answer(chunk_id: str) -> Optional[str]:
+    """Return the cached Expert Copilot answer for a chunk, or None if
+    no cache row exists, the columns are NULL, or the lookup fails.
+
+    Never raises — a cache miss and a broken cache must both degrade to
+    the LLM path in the handler."""
+    if not chunk_id:
+        return None
+    try:
+        from backend.db.connection import engine as _engine
+        with _engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    """
+                    SELECT cached_expert_answer
+                    FROM chunks
+                    WHERE id = :cid
+                      AND cached_expert_answer IS NOT NULL
+                    """
+                ),
+                {"cid": chunk_id},
+            ).first()
+    except Exception as exc:
+        logger.warning("[sprint5_cache] get failed chunk_id=%s: %s", chunk_id, exc)
+        return None
+    return row[0] if row else None
+
+
+def set_cached_expert_answer(chunk_id: str, answer: str) -> bool:
+    """Write the rendered Expert Copilot answer to the chunk cache.
+
+    Returns True on success, False on any failure (missing column,
+    unknown chunk, DB error). Failure is non-fatal for the caller — the
+    answer is already served to the user; the cache write is
+    opportunistic."""
+    if not chunk_id or not answer:
+        return False
+    try:
+        from backend.db.connection import engine as _engine
+        with _engine.begin() as conn:
+            conn.execute(
+                text(
+                    """
+                    UPDATE chunks
+                    SET cached_expert_answer = :a,
+                        cached_expert_answer_at = NOW()
+                    WHERE id = :cid
+                    """
+                ),
+                {"a": answer, "cid": chunk_id},
+            )
+        return True
+    except Exception as exc:
+        logger.warning("[sprint5_cache] set failed chunk_id=%s: %s", chunk_id, exc)
+        return False
