@@ -575,6 +575,8 @@ def insert_document_and_chunks(
     file_size_mb: Optional[float] = None,
     metadata: Optional[Dict[str, Any]] = None,
     version_decision: Optional[Dict[str, Any]] = None,
+    doc_kind: str = "ticket",                 # Sprint 3-PREP-A
+    doc_kind_confidence: float = 1.0,         # Sprint 3-PREP-A
 ):
     version_decision = version_decision or {
         "decision": "new_document",
@@ -607,12 +609,14 @@ def insert_document_and_chunks(
                     INSERT INTO documents(
                         id, owner_id, name, normalized_name, file_type, source_type,
                         status, current_version_id, created_at, updated_at,
-                        version_family_key, duplicate_status, latest_effective_at
+                        version_family_key, duplicate_status, latest_effective_at,
+                        doc_kind, doc_kind_confidence
                     )
                     VALUES (
                         :document_id, :owner_id, :filename, :normalized_name, :file_type, 'file',
                         'active', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
-                        :version_family_key, 'unique', :latest_effective_at
+                        :version_family_key, 'unique', :latest_effective_at,
+                        :doc_kind, :doc_kind_confidence
                     )
                     """
                 ),
@@ -631,6 +635,8 @@ def insert_document_and_chunks(
                         or version_decision.get("document_date")
                         or version_decision.get("created_date")
                     ),
+                    "doc_kind": doc_kind,
+                    "doc_kind_confidence": doc_kind_confidence,
                 },
             )
 
@@ -1595,6 +1601,7 @@ def list_active_files_all() -> list:
                     d.version_family_key,
                     COALESCE(d.ingestion_status, 'ok') AS ingestion_status,
                     d.ingestion_error,
+                    COALESCE(d.doc_kind, 'ticket') AS doc_kind,
                     dv.id::text AS version_id,
                     dv.version_label,
                     dv.version_rank,
@@ -1651,6 +1658,7 @@ def list_active_files_all() -> list:
                 "version_rank": version_rank_val,
                 "ingestion_status": row["ingestion_status"],
                 "ingestion_error": row["ingestion_error"],
+                "doc_kind": row["doc_kind"],
             }
         )
     return results

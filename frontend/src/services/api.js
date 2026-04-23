@@ -123,9 +123,15 @@ api.interceptors.response.use(
 export const healthCheck = () => api.get("/health");
 export const getCurrentUser = () => api.get("/me");
 
-export const uploadFile = (file, fileType, onProgress) => {
+export const uploadFile = (file, fileType, onProgress, docKind) => {
   const form = new FormData();
   form.append("file", file);
+  // Sprint 3-PREP-B — optional doc_kind form field. Backend silently
+  // coerces missing / unknown values to 'ticket' so pre-PREP-B callers
+  // (which don't pass the 4th arg) keep identical behavior.
+  if (docKind) {
+    form.append("doc_kind", docKind);
+  }
   return api.post(`/upload?file_type=${fileType}`, form, {
     headers: { "Content-Type": "multipart/form-data" },
     timeout: 300000,
@@ -159,12 +165,25 @@ export const deleteAllSessions = () => api.delete("/chat/sessions");
 export const resetAll = () => api.post("/reset", {}, { timeout: 30000 });
 
 // ─── Feedback ─────────────────────────────────────────────
-export const saveFeedbackState = (sessionId, messageIndex, feedbackType, semanticCacheId = null) =>
+// Sprint 3B — `sessionMode` and `originalQuery` are optional; when a user
+// 👎s a troubleshooting answer, passing them lets the backend run the
+// KB/runbook pivot and return a `pivot` block the caller can render.
+// Backward-compatible: any existing 4-arg callsite works unchanged.
+export const saveFeedbackState = (
+  sessionId,
+  messageIndex,
+  feedbackType,
+  semanticCacheId = null,
+  sessionMode = null,
+  originalQuery = null,
+) =>
   api.post("/feedback/state", {
     session_id: sessionId,
     message_index: messageIndex,
     feedback_type: feedbackType,
     semantic_cache_id: semanticCacheId,
+    session_mode: sessionMode,
+    original_query: originalQuery,
   });
 
 export const submitFeedback = (data) => api.post("/feedback/submit", data);

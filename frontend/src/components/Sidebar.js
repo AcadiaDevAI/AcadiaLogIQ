@@ -29,6 +29,43 @@ import UploadPanel from "./UploadPanel";
 import UserProfile from "./UserProfile";
 import VersionGroup from "./VersionGroup";
 
+// Sprint 3-PREP-B — doc_kind badge rendered next to each filename.
+// Flag-gated via REACT_APP_LOGIQ_BULK_INGEST_FRONTEND so flag-off = no
+// badge (byte-identical post-PREP-A UI).
+const KIND_LABELS = {
+  ticket: "tickets",
+  sop: "sop",
+  kb: "kb",
+  contact_customer: "cust",
+  contact_vendor: "vnd",
+  vendor_case: "case",
+};
+const KIND_COLORS = {
+  ticket: "#3b82f6",
+  sop: "#10b981",
+  kb: "#8b5cf6",
+  contact_customer: "#f59e0b",
+  contact_vendor: "#ef4444",
+  vendor_case: "#ec4899",
+};
+const BULK_INGEST_ENABLED =
+  (process.env.REACT_APP_LOGIQ_BULK_INGEST_FRONTEND || "false").toLowerCase() === "true";
+
+function DocKindBadge({ kind }) {
+  if (!BULK_INGEST_ENABLED) return null;
+  const label = KIND_LABELS[kind];
+  if (!label) return null;
+  return (
+    <span
+      className="text-[9px] px-1.5 py-0.5 rounded flex-shrink-0"
+      style={{ backgroundColor: KIND_COLORS[kind] || "#64748b", color: "#fff" }}
+      title={`doc_kind: ${kind}`}
+    >
+      {label}
+    </span>
+  );
+}
+
 // Group files by (normalized_name || version_family_key || name), sort
 // each group descending by version_rank so the newest version is first.
 function groupByVersionFamily(files) {
@@ -237,7 +274,10 @@ export default function Sidebar() {
                         <FileOutlined style={{ color: "#6366f1" }} />
                       )}
                       <div className="min-w-0">
-                        <p className="text-xs t-text truncate max-w-[140px]" style={isInvalid ? { color: "#ef4444" } : undefined}>{f.name}</p>
+                        <div className="flex items-center gap-1.5">
+                          <p className="text-xs t-text truncate max-w-[140px]" style={isInvalid ? { color: "#ef4444" } : undefined}>{f.name}</p>
+                          <DocKindBadge kind={f.doc_kind} />
+                        </div>
                         <p className="text-[10px] t-text-muted">
                           {f.size_mb != null ? `${f.size_mb.toFixed(1)}MB · ` : ""}
                           <span style={{ color: isInvalid ? "#ef4444" : f.status === "indexed" ? "#10b981" : f.status === "failed" ? "#ef4444" : "#f59e0b" }}>

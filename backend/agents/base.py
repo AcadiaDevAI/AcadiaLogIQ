@@ -88,6 +88,11 @@ class AgentPipelineResult:
     total_tokens: int = 0
     total_ms: int = 0
     reasoning_summary: str = ""  # internal log only, never exposed to user
+    # Sprint 3B — 👎 KB pivot signal. True when the KB/runbook retrieval
+    # returned zero chunks so the caller can render "No matching KB
+    # content found. Consider escalation." Stays False on the default
+    # pipeline path — pre-3B shape preserved for normal /ask.
+    kb_pivot_empty: bool = False
 
 
 # ---------------------------------------------------------------------------

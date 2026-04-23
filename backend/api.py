@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple, TypedDict, Set
 import boto3
 from botocore.config import Config as BotoConfig
 from fastapi import (
-    BackgroundTasks, Depends, FastAPI, File, Header,
+    BackgroundTasks, Depends, FastAPI, File, Form, Header,
     HTTPException, Query, Request, UploadFile, status,
 )
 from fastapi import FastAPI
@@ -66,7 +66,11 @@ from backend.retrieval.metadata_sql import (
 )
 from backend.routing.model_router import route_and_generate
 from backend.vector_store import get_recent_session_messages
-from backend.agents.orchestrator import should_escalate_to_agents, run_agent_pipeline
+from backend.agents.orchestrator import (
+    should_escalate_to_agents,
+    run_agent_pipeline,
+    resolve_mode_doc_kinds,
+)
 from backend.agents.mode_selector import resolve_mode, MODE_AUTO, MODE_HYBRID, MODE_MULTI_AGENT
 from backend.agents.step_retriever import build_step_retriever
 from backend.routing.complexity_classifier import classify_complexity
@@ -568,6 +572,12 @@ class AnswerResponse(BaseModel):
     clarification_id: Optional[str] = None
     clarification_options: Optional[List[ClarificationOptionDTO]] = None
     clarification_context: Optional[str] = None
+    # Sprint 3B — "low" when the top ticket-history chunk score is below
+    # LOW_SIMILARITY_THRESHOLD, "normal" otherwise. Omitted (None) when
+    # Sprint 3B flag is off OR retrieval wasn't applicable (e.g. cached
+    # and trivial-short-circuit paths). Frontend tolerates None → no
+    # banner. Pre-3B shape preserved byte-identical in the off path.
+    confidence_band: Optional[str] = None
     model_config = ConfigDict(extra="ignore")
 
 
@@ -1231,6 +1241,7 @@ async def index_file_job(
     file_id: str,
     owner_id: Optional[str],
     file_size_mb: float,
+    doc_kind: str = "ticket",   # Sprint 3-PREP-B
 ):
     owner_id = _normalize_owner_id(owner_id)
     update_ingestion_job(job_id, status="running")
@@ -1256,6 +1267,7 @@ async def index_file_job(
             fingerprint=file_hash,
             exact_duplicate_lookup=find_duplicate_by_hash,
             version_candidate_lookup=find_version_candidates,
+            doc_kind=doc_kind,                          # Sprint 3-PREP-B
         )
 
         t_parse_end = _time.perf_counter()
@@ -1408,6 +1420,7 @@ async def index_file_job(
             file_size_mb=file_size_mb,
             metadata=processed["document_metadata"],
             version_decision=processed["version_decision"],
+            doc_kind=processed.get("doc_kind", "ticket"),   # Sprint 3-PREP-A
         )
 
         t_db_end = _time.perf_counter()
@@ -1850,11 +1863,25 @@ async def upload(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     file_type: str = Query(default="kb", pattern="^(kb)$"),
+    doc_kind: str = Form(default="ticket"),   # Sprint 3-PREP-B
     user_id: Optional[str] = Depends(auth_dependency),
 ):
     ext = Path(file.filename).suffix[1:].lower() if file.filename else ""
     if not ext or ext not in settings.ALLOWED_FILE_TYPES:
         raise HTTPException(400, f"Type '{ext}' not allowed. Allowed: {settings.ALLOWED_FILE_TYPES}")
+
+    # Sprint 3-PREP-B — validate doc_kind against the whitelist. When
+    # LOGIQ_BULK_INGEST_BACKEND is off we still accept the field but
+    # silently coerce unknowns to 'ticket', which matches post-PREP-A
+    # default behavior. When the flag is on, the caller is expected to
+    # supply a valid kind; an invalid kind still coerces (no 400), so
+    # the /upload contract stays backward-compatible for any client
+    # that hasn't yet shipped the dropdown.
+    _raw_kind = (doc_kind or "").strip().lower()
+    if _raw_kind in settings.VALID_DOC_KINDS:
+        resolved_doc_kind = _raw_kind
+    else:
+        resolved_doc_kind = "ticket"
 
     owner_id = _normalize_owner_id(user_id)
     job_id = uuid.uuid4().hex
@@ -1887,6 +1914,7 @@ async def upload(
         file_id,
         owner_id,
         size_mb,
+        resolved_doc_kind,           # Sprint 3-PREP-B — thread to process_document
     )
 
     return UploadResponse(
@@ -2659,6 +2687,21 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     if not q_emb:
         raise HTTPException(500, "Embedding failed")
 
+    # Sprint 3C — escalation mode routes retrieval to the contact_customer
+    # corpus. resolve_mode_doc_kinds returns None when the 3C flag is off
+    # or when the active mode is not "escalation", preserving the default
+    # all-corpora behavior for every other code path.
+    _sprint3c_doc_kinds: Optional[List[str]] = None
+    try:
+        _sprint3c_mode_snap = get_session_mode(session_id)
+    except Exception as _sm3c_exc:
+        logger.warning("[sprint3c] session_mode read failed: %s", _sm3c_exc)
+        _sprint3c_mode_snap = None
+    if _sprint3c_mode_snap is not None and getattr(
+        _sprint3c_mode_snap, "is_valid", False
+    ):
+        _sprint3c_doc_kinds = resolve_mode_doc_kinds(_sprint3c_mode_snap)
+
     retrieval = orchestrator_retrieve(
         query=expanded.expanded_text,
         raw_query=req.q,
@@ -2669,6 +2712,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         generate_fn=safe_generate,
         bm25_search_fn=bm25.search if bm25 and bm25.size > 0 else None,
         vector_search_fn=pgvector_search,
+        doc_kinds=_sprint3c_doc_kinds,
     )
 
     # ── Clean "not found" short-circuit when an identifier was asked for
@@ -3120,6 +3164,20 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             except Exception:
                 _session_scope = None
 
+        # Sprint 3A — read the session mode (independent of Sprint 1/2 gates,
+        # which restrict their own reads to the guided-workflow feature) and
+        # thread it into the agent pipeline so the Composer can select a
+        # mode-tuned voice. Flag-off inside the composer: the pipeline still
+        # accepts the kwarg, but the selector returns _composer_rules by
+        # identity → byte-identical prompt.
+        _sprint3a_session_mode = None
+        if getattr(settings, "LOGIQ_SPRINT3A_BACKEND", False):
+            try:
+                _sprint3a_session_mode = get_session_mode(session_id)
+            except Exception as _sm_exc:
+                logger.warning("[sprint3a] session_mode read failed: %s", _sm_exc)
+                _sprint3a_session_mode = None
+
         agent_result = run_agent_pipeline(
             query=effective_query,
             doc_context=doc_ctx,
@@ -3133,6 +3191,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             unresolved_count=stage_result.unresolved_count,
             pattern_context=pattern_context,
             session_scope=_session_scope,
+            session_mode=_sprint3a_session_mode,
         )
         raw_answer = agent_result.answer
 
@@ -3427,6 +3486,28 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         except Exception as _sem_exc:
             logger.warning("Semantic cache put wrapper failed: %s", _sem_exc)
 
+    # Sprint 3B — low-similarity banner. Populate confidence_band only
+    # when the flag is on AND we actually ran ticket-history retrieval
+    # (doc_ranked is the ranked list of (id, text, meta, score) tuples).
+    # Flag-off path and cached/trivial paths leave this None so the
+    # frontend omits the banner — byte-identical pre-3B shape.
+    _confidence_band: Optional[str] = None
+    if getattr(settings, "LOGIQ_SPRINT3B_BACKEND", False):
+        try:
+            _top_score = float(doc_ranked[0][3]) if doc_ranked else 0.0
+            _confidence_band = (
+                "low" if _top_score < settings.LOW_SIMILARITY_THRESHOLD else "normal"
+            )
+            context_stats["confidence_band"] = _confidence_band
+            context_stats["top_chunk_score"] = round(_top_score, 4)
+            logger.info(
+                "[confidence_band] top_score=%.4f threshold=%.2f band=%s",
+                _top_score, settings.LOW_SIMILARITY_THRESHOLD, _confidence_band,
+            )
+        except Exception as _cb_exc:
+            logger.warning("[confidence_band] compute failed: %s", _cb_exc)
+            _confidence_band = None
+
     return AnswerResponse(
         answer=answer,
         sources=doc_src,
@@ -3434,6 +3515,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         processing_time_ms=ms,
         session_id=session_id,
         context_stats=context_stats,
+        confidence_band=_confidence_band,
     )
 
 
@@ -3452,7 +3534,38 @@ class FeedbackStateRequest(BaseModel):
     message_index: int
     feedback_type: str = Field(pattern="^(like|dislike|none)$")
     semantic_cache_id: Optional[str] = None
+    # Sprint 3B — optional context carried by the frontend on 👎 so the
+    # backend can run the KB pivot pipeline. Both fields are ignored
+    # unless LOGIQ_SPRINT3B_BACKEND is on AND feedback_type == "dislike"
+    # AND session_mode == "troubleshooting". Missing fields short-circuit
+    # to the pre-3B behavior path.
+    session_mode: Optional[str] = None
+    original_query: Optional[str] = None
     model_config = ConfigDict(extra="ignore")
+
+
+# Sprint 3B — KB pivot dedupe window. An in-process dict keyed by
+# (session_id, message_index) → timestamp. Subsequent 👎s within
+# _KB_PIVOT_DEDUPE_SECONDS of the first are skipped with kind="dedupe".
+# Fine for single-instance; move to Redis when horizontally scaled.
+_KB_PIVOT_DEDUPE: Dict[Tuple[str, int], float] = {}
+_KB_PIVOT_DEDUPE_SECONDS: float = 60.0
+
+
+def _kb_pivot_recent(session_id: str, message_index: int) -> bool:
+    """Return True if a KB pivot already ran for this (session, msg) within
+    the dedupe window. Also prunes stale entries opportunistically."""
+    now = _time.time()
+    key = (session_id, int(message_index))
+    # Opportunistic prune of stale entries (cap O(n) work).
+    for k, ts in list(_KB_PIVOT_DEDUPE.items())[:32]:
+        if now - ts > _KB_PIVOT_DEDUPE_SECONDS:
+            _KB_PIVOT_DEDUPE.pop(k, None)
+    last = _KB_PIVOT_DEDUPE.get(key)
+    if last is not None and (now - last) <= _KB_PIVOT_DEDUPE_SECONDS:
+        return True
+    _KB_PIVOT_DEDUPE[key] = now
+    return False
 
 
 @app.post("/feedback/state")
@@ -3479,11 +3592,68 @@ async def save_feedback_state(
         except Exception as _inv_exc:
             logger.warning("[semantic_cache] invalidate wrapper failed: %s", _inv_exc)
 
-    return {
+    # Sprint 3B — 👎 KB/Runbook pivot. Only fires in troubleshooting mode,
+    # with the flag on, and only when the frontend sent `original_query`.
+    # Dedupes repeated 👎s on the same message within a 60s window.
+    pivot_payload: Optional[Dict[str, Any]] = None
+    _should_pivot = (
+        req.feedback_type == "dislike"
+        and getattr(settings, "LOGIQ_SPRINT3B_BACKEND", False)
+        and (req.session_mode or "").lower() == "troubleshooting"
+        and bool((req.original_query or "").strip())
+    )
+    if _should_pivot:
+        if _kb_pivot_recent(req.session_id, req.message_index):
+            logger.info(
+                "[kb_pivot] dedupe hit session=%s msg_idx=%s — skipping",
+                req.session_id, req.message_index,
+            )
+            pivot_payload = {"kind": "dedupe"}
+        else:
+            try:
+                from backend.agents.orchestrator import run_kb_pivot_pipeline
+                _active_file_ids = _get_active_indexed_file_ids(user_id)
+                _mode_snap = get_session_mode(req.session_id)
+
+                pivot_result = run_kb_pivot_pipeline(
+                    query=(req.original_query or "").strip(),
+                    session_mode=_mode_snap,
+                    generate_fn=safe_generate,
+                    bedrock_client=bedrock,
+                    embed_fn=safe_embed,
+                    owner_id=owner or "",
+                    allowed_file_ids=set(_active_file_ids or []),
+                    bm25_search_fn=(
+                        bm25.search if bm25 and bm25.size > 0 else None
+                    ),
+                    vector_search_fn=pgvector_search,
+                )
+
+                if pivot_result.kb_pivot_empty or not (pivot_result.answer or "").strip():
+                    pivot_payload = {
+                        "kind": "no_kb_match",
+                        "message": (
+                            "No matching KB/runbook content found for this issue. "
+                            "Consider escalation to the appropriate team."
+                        ),
+                    }
+                else:
+                    pivot_payload = {
+                        "kind": "kb_guidance",
+                        "answer": pivot_result.answer,
+                    }
+            except Exception as _piv_exc:
+                logger.warning("[kb_pivot] pipeline wrapper failed: %s", _piv_exc)
+                pivot_payload = None
+
+    response: Dict[str, Any] = {
         "status": "saved",
         "feedback_type": req.feedback_type,
         "semantic_cache_invalidated": invalidated,
     }
+    if pivot_payload is not None:
+        response["pivot"] = pivot_payload
+    return response
 
 
 @app.post("/feedback/submit")

@@ -466,6 +466,7 @@ def retrieve(
     bm25_search_fn: Callable = None,
     vector_search_fn: Callable = None,
     raw_query: Optional[str] = None,
+    doc_kinds: Optional[List[str]] = None,   # Sprint 3-PREP-A
 ) -> RetrievalResult:
     """
     Main retrieval entry point. Runs the full Phase 3 pipeline:
@@ -497,6 +498,55 @@ def retrieve(
     result = RetrievalResult()
 
     logger.info("[retrieve] entry — query=%r", query[:200])
+
+    # =====================================================================
+    # Sprint 3-PREP-A — mode→corpus filter.
+    # =====================================================================
+    # When LOGIQ_DOC_KIND_BACKEND is ON and the caller has requested one or
+    # more doc_kinds, narrow allowed_file_ids to documents matching those
+    # kinds BEFORE any channel runs. This reuses the existing access-filter
+    # plumbing — every search channel (vector, BM25, keyword, metadata,
+    # identifier exact) already honors allowed_file_ids, so the filter
+    # propagates with zero channel-level changes.
+    #
+    # Flag-off path: doc_kinds is ignored even when passed, matching §7
+    # rollback semantics. No SQL is issued, no logs are emitted beyond
+    # the existing [retrieve] entry line.
+    _apply_kind_filter = (
+        getattr(settings, "LOGIQ_DOC_KIND_BACKEND", False)
+        and bool(doc_kinds)
+    )
+    if _apply_kind_filter:
+        _candidates_before = len(allowed_file_ids or set())
+        try:
+            from backend.db.connection import SessionLocal
+            from sqlalchemy import bindparam, text as _kind_sql_text
+            stmt = _kind_sql_text(
+                """
+                SELECT d.id::text AS id
+                FROM documents d
+                WHERE d.status = 'active'
+                  AND d.doc_kind IN :kinds
+                """
+            ).bindparams(bindparam("kinds", expanding=True))
+            with SessionLocal() as db:
+                rows = db.execute(stmt, {"kinds": list(doc_kinds)}).mappings().all()
+            kind_matched_ids = {r["id"] for r in rows}
+            if allowed_file_ids:
+                allowed_file_ids = set(allowed_file_ids) & kind_matched_ids
+            else:
+                allowed_file_ids = kind_matched_ids
+        except Exception as exc:
+            # Fail-open: if the filter query blows up, skip it rather than
+            # breaking retrieval. Logged so downstream sprints can see it.
+            logger.warning("[doc_kind_filter] filter query failed (%s) — bypassing", exc)
+        _candidates_after = len(allowed_file_ids or set())
+        logger.info(
+            "[doc_kind_filter] kinds=%s candidates_before=%d candidates_after=%d",
+            list(doc_kinds),
+            _candidates_before,
+            _candidates_after,
+        )
 
     # =====================================================================
     # Step 0 (Goal 2): Identifier exact-match short-circuit

@@ -7,6 +7,10 @@ RUN npm install --legacy-peer-deps && \
     npm install ajv@8.17.1 --legacy-peer-deps
 COPY . .
 
+# ─── Build-time env vars (React bakes these into the JS bundle) ─────
+# Any REACT_APP_* the UI code reads MUST be declared as ARG here,
+# otherwise docker build drops them even if set in the shell.
+
 # API_BASE is set at build time; defaults to relative /api proxied by nginx
 ARG REACT_APP_API_BASE=http://localhost:8000
 ENV REACT_APP_API_BASE=$REACT_APP_API_BASE
@@ -14,6 +18,26 @@ ENV REACT_APP_API_BASE=$REACT_APP_API_BASE
 # Clerk publishable key (safe to embed in frontend — it's a PUBLIC key)
 ARG REACT_APP_CLERK_PUBLISHABLE_KEY=
 ENV REACT_APP_CLERK_PUBLISHABLE_KEY=$REACT_APP_CLERK_PUBLISHABLE_KEY
+
+# Optional API key (empty unless deployment uses it)
+ARG REACT_APP_API_KEY=
+ENV REACT_APP_API_KEY=$REACT_APP_API_KEY
+
+# Sprint 1 — Guided Workflow landing page + mode state
+ARG REACT_APP_GUIDED_WORKFLOW_ENABLED=true
+ENV REACT_APP_GUIDED_WORKFLOW_ENABLED=$REACT_APP_GUIDED_WORKFLOW_ENABLED
+
+# Sprint 2 — context-break detection + pattern cards
+ARG REACT_APP_LOGIQ_SPRINT2_FRONTEND=true
+ENV REACT_APP_LOGIQ_SPRINT2_FRONTEND=$REACT_APP_LOGIQ_SPRINT2_FRONTEND
+
+# Sprint 3A — mode-aware prompts + post-👍 action chips
+ARG REACT_APP_LOGIQ_SPRINT3A_FRONTEND=false
+ENV REACT_APP_LOGIQ_SPRINT3A_FRONTEND=$REACT_APP_LOGIQ_SPRINT3A_FRONTEND
+
+# Sprint 3-PREP-B — bulk ingestion doc_kind dropdown + sidebar badge
+ARG REACT_APP_LOGIQ_BULK_INGEST_FRONTEND=false
+ENV REACT_APP_LOGIQ_BULK_INGEST_FRONTEND=$REACT_APP_LOGIQ_BULK_INGEST_FRONTEND
 
 # Accept build timestamp for cache-busting and version stamping
 ARG BUILD_TIMESTAMP=unknown

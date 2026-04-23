@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Upload, Button, Progress, message, Tag } from "antd";
+import { Upload, Button, Progress, message, Tag, Select } from "antd";
 import {
   InboxOutlined,
   BookOutlined,
@@ -14,11 +14,30 @@ const { Dragger } = Upload;
 
 const DOC_ACCEPT = ".txt,.md,.json,.pdf,.docx,.log";
 
+// Sprint 3-PREP-B — doc_kind dropdown options. Values MUST match the
+// backend VALID_DOC_KINDS frozenset in backend/config.py. When the
+// frontend flag is off, the dropdown is disabled and defaults to
+// 'ticket' so behavior is byte-identical to post-PREP-A.
+const DOC_KIND_OPTIONS = [
+  { value: "ticket",           label: "Ticket history (JSON)" },
+  { value: "sop",              label: "SOP / Runbook" },
+  { value: "kb",               label: "KB article" },
+  { value: "contact_customer", label: "Customer contact directory" },
+  { value: "contact_vendor",   label: "Vendor contact directory" },
+  { value: "vendor_case",      label: "Past vendor case" },
+];
+
+const BULK_INGEST_ENABLED =
+  (process.env.REACT_APP_LOGIQ_BULK_INGEST_FRONTEND || "false").toLowerCase() === "true";
+
 export default function UploadPanel({ onUploadComplete }) {
   const { state, dispatch } = useChat();
   const [docFiles, setDocFiles] = useState([]);
   const [uploadProgress, setUploadProgress] = useState({});
   const [jobStatuses, setJobStatuses] = useState({});
+  // Sprint 3-PREP-B — selected doc_kind for this batch. Flag-off keeps
+  // this fixed at 'ticket' since the dropdown is disabled.
+  const [docKind, setDocKind] = useState("ticket");
 
   const handleUpload = async () => {
     if (!docFiles.length) {
@@ -34,9 +53,14 @@ export default function UploadPanel({ onUploadComplete }) {
         setUploadProgress((p) => ({ ...p, [fileKey]: 0 }));
         setJobStatuses((s) => ({ ...s, [fileKey]: "uploading" }));
 
-        const res = await uploadFile(file, "kb", (pct) => {
-          setUploadProgress((p) => ({ ...p, [fileKey]: pct }));
-        });
+        const res = await uploadFile(
+          file,
+          "kb",
+          (pct) => {
+            setUploadProgress((p) => ({ ...p, [fileKey]: pct }));
+          },
+          BULK_INGEST_ENABLED ? docKind : undefined,   // Sprint 3-PREP-B
+        );
 
         const { job_id, file_id } = res.data;
         setUploadProgress((p) => ({ ...p, [fileKey]: 100 }));
@@ -122,6 +146,23 @@ export default function UploadPanel({ onUploadComplete }) {
           <BookOutlined style={{ color: "#6366f1" }} />
           <span className="text-xs font-semibold t-text-secondary">Upload Documents</span>
           <Tag color="blue" className="text-[10px] ml-auto">.pdf .docx .txt .md .log .json</Tag>
+        </div>
+        {/* Sprint 3-PREP-B — doc_kind picker. Disabled until
+            REACT_APP_LOGIQ_BULK_INGEST_FRONTEND=true; flag-off state keeps
+            the control locked on 'ticket' and the field is omitted from
+            the POST, so the backend default path (post-PREP-A) runs. */}
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-[11px] t-text-muted" style={{ minWidth: 90 }}>
+            Document type
+          </span>
+          <Select
+            size="small"
+            value={docKind}
+            onChange={setDocKind}
+            disabled={!BULK_INGEST_ENABLED || state.isUploading}
+            options={DOC_KIND_OPTIONS}
+            style={{ flex: 1 }}
+          />
         </div>
         <Dragger
           accept={DOC_ACCEPT}

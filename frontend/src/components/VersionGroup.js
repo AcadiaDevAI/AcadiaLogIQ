@@ -7,6 +7,43 @@ import {
   CaretDownOutlined,
 } from "@ant-design/icons";
 
+// Sprint 3-PREP-B — doc_kind badge (mirrors Sidebar.js; intentionally
+// duplicated to avoid a cross-file export cycle since Sidebar imports
+// this component). Flag-gated so flag-off renders nothing.
+const KIND_LABELS = {
+  ticket: "tickets",
+  sop: "sop",
+  kb: "kb",
+  contact_customer: "cust",
+  contact_vendor: "vnd",
+  vendor_case: "case",
+};
+const KIND_COLORS = {
+  ticket: "#3b82f6",
+  sop: "#10b981",
+  kb: "#8b5cf6",
+  contact_customer: "#f59e0b",
+  contact_vendor: "#ef4444",
+  vendor_case: "#ec4899",
+};
+const BULK_INGEST_ENABLED =
+  (process.env.REACT_APP_LOGIQ_BULK_INGEST_FRONTEND || "false").toLowerCase() === "true";
+
+function DocKindBadge({ kind }) {
+  if (!BULK_INGEST_ENABLED) return null;
+  const label = KIND_LABELS[kind];
+  if (!label) return null;
+  return (
+    <span
+      className="text-[9px] px-1.5 py-0.5 rounded flex-shrink-0"
+      style={{ backgroundColor: KIND_COLORS[kind] || "#64748b", color: "#fff" }}
+      title={`doc_kind: ${kind}`}
+    >
+      {label}
+    </span>
+  );
+}
+
 /**
  * Groups multiple versions of the same document family under a single
  * collapsible row. Expects `versions` to be sorted descending by version_rank
@@ -75,6 +112,7 @@ export default function VersionGroup({ versions, isAdmin, onDelete }) {
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-1.5">
               <p className="text-xs t-text truncate max-w-[120px]">{latest.name}</p>
+              <DocKindBadge kind={latest.doc_kind} />
               <span
                 className="text-[9px] px-1.5 py-0.5 rounded"
                 style={{ backgroundColor: "#10b981", color: "#fff" }}

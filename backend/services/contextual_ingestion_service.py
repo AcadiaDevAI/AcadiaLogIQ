@@ -1229,10 +1229,312 @@ def _ingest_generic_array(
 
 
 # ---------------------------------------------------------------------------
+# Sprint 3-PREP-C — Contact directory (customer + vendor) ingestion.
+# Routes JSON files produced by etl_excel_contacts.py (or the validator
+# schema in general) to one-chunk-per-contact-record. Every chunk's
+# content is a flat labeled-prose "contact card" so embedding + BM25 +
+# reranker can score it as a single unit — the exact opposite of long
+# narrative docs where we merge adjacent paragraphs.
+# ---------------------------------------------------------------------------
+
+_VALID_CONTACT_KINDS = ("contact_customer", "contact_vendor")
+
+
+def _render_contact_body(rec: Dict[str, Any]) -> str:
+    """Flatten a canonical contact record to labeled prose for embedding.
+
+    Keys match the canonical schema in docs/CONTACT_SCHEMA.md. Missing
+    fields are rendered as empty strings so the flattened card has a
+    stable shape regardless of which optional blocks the ETL filled.
+    """
+    org = rec.get("organization") or {}
+    team = rec.get("team") or {}
+    person = rec.get("person") or {}
+    escalation = rec.get("escalation") or {}
+    lines = [
+        f"Contact: {person.get('name') or ''} ({person.get('role') or ''})",
+        f"Organization: {org.get('name') or ''} ({org.get('type') or ''})",
+        f"Team: {team.get('name') or ''} — Escalation Level {team.get('escalation_level')}",
+        f"Hours: {team.get('hours') or ''}",
+        f"Phone: {person.get('phone_primary') or ''}",
+        f"Email: {person.get('email') or ''}",
+    ]
+    if person.get("phone_secondary"):
+        lines.append(f"Phone (secondary): {person['phone_secondary']}")
+    if person.get("pager"):
+        lines.append(f"Pager: {person['pager']}")
+    triggers = escalation.get("triggers") or []
+    if triggers:
+        lines.append("Escalation triggers: " + ", ".join(str(t) for t in triggers))
+    if escalation.get("after_hours_path"):
+        lines.append(f"After-hours path: {escalation['after_hours_path']}")
+    vendor_details = rec.get("vendor_details") or {}
+    if vendor_details:
+        if vendor_details.get("product_lines"):
+            lines.append(
+                "Product lines: " + ", ".join(str(p) for p in vendor_details["product_lines"])
+            )
+        if vendor_details.get("support_portal_url"):
+            lines.append(f"Support portal: {vendor_details['support_portal_url']}")
+        if vendor_details.get("tac_phone"):
+            lines.append(f"TAC phone: {vendor_details['tac_phone']}")
+        if vendor_details.get("sla_tier"):
+            lines.append(f"SLA tier: {vendor_details['sla_tier']}")
+        if vendor_details.get("account_manager"):
+            lines.append(f"Account manager: {vendor_details['account_manager']}")
+    if rec.get("notes"):
+        lines.append(f"Notes: {rec['notes']}")
+    return "\n".join(lines)
+
+
+def _is_contact_json(file_bytes: bytes) -> bool:
+    """Return True if the payload is a list whose first record declares
+    kind ∈ {'contact_customer', 'contact_vendor'} and has a person block
+    OR a contact_id. Keeps detect() strict enough that arbitrary JSON
+    arrays with 'kind' fields (e.g. Kubernetes manifests) don't collide."""
+    try:
+        data = json.loads(file_bytes.decode("utf-8", errors="replace"))
+    except Exception:
+        return False
+    if not isinstance(data, list) or not data:
+        return False
+    first = data[0]
+    if not isinstance(first, dict):
+        return False
+    if first.get("kind") not in _VALID_CONTACT_KINDS:
+        return False
+    return bool(first.get("person") or first.get("contact_id"))
+
+
+def _ingest_contact_array(
+    *,
+    file_bytes: bytes,
+    filename: str,
+    file_type: str,
+    owner_id: str,
+    fingerprint: str,
+    exact_duplicate_lookup,
+    version_candidate_lookup,
+) -> Dict[str, Any]:
+    """One-chunk-per-contact-record ingestion.
+
+    Mirrors _ingest_generic_array's return shape. Each chunk's
+    `metadata_json.primary_id` is the contact_id, so the SQL
+    short-circuit can route exact-identifier queries straight to the
+    chunk without going through retrieval.
+    """
+    exact = None
+    if settings.ENABLE_DUPLICATE_CHECK:
+        exact = exact_duplicate_lookup(owner_id=owner_id, fingerprint=fingerprint)
+    if exact:
+        return {
+            "status": "exact_duplicate",
+            "document_metadata": {},
+            "version_decision": {
+                "decision": "exact_duplicate",
+                "matched_document_id": exact["document_id"],
+                "reason": "same fingerprint already exists",
+                "confidence": 1.0,
+                "normalized_name": exact.get("normalized_name") or normalize_filename(filename),
+                "version_family_key": exact.get("version_family_key") or normalize_filename(filename),
+                "version_label": exact.get("version_label"),
+                "version_rank": float(exact.get("version_rank") or 0.0),
+                "document_date": exact.get("document_date"),
+                "effective_date": exact.get("effective_date"),
+                "created_date": exact.get("created_date"),
+            },
+            "chunk_rows": [],
+        }
+
+    try:
+        data = json.loads(file_bytes.decode("utf-8", errors="replace"))
+    except Exception as exc:
+        raise RuntimeError(f"Contact-directory JSON re-parse failed: {exc}")
+
+    if not isinstance(data, list):
+        raise RuntimeError("Contact-directory JSON must be a top-level array")
+
+    enriched_rows: List[Dict[str, Any]] = []
+    record_kind_counts: Dict[str, int] = {}
+
+    for idx, record in enumerate(data):
+        if not isinstance(record, dict):
+            continue
+        record_kind = record.get("kind")
+        if record_kind not in _VALID_CONTACT_KINDS:
+            # Skip malformed rows rather than abort — the validator script
+            # is the enforcement path; ingestion is tolerant of the
+            # occasional bad record slipping through.
+            continue
+        primary_id = record.get("contact_id")
+        if not primary_id:
+            # Without a stable ID we can't answer "who do I call for
+            # Acme P1" queries deterministically; skip.
+            continue
+        primary_id = str(primary_id).strip()
+
+        header = f"CONTACT: {primary_id} | KIND: {record_kind}"
+        body = _render_contact_body(record)
+        content = f"{header}\n\n{body}"
+        person = record.get("person") or {}
+        org = record.get("organization") or {}
+        section_heading = f"{org.get('name') or ''}: {person.get('name') or primary_id}".strip(": ")
+
+        record_kind_counts[record_kind] = record_kind_counts.get(record_kind, 0) + 1
+
+        row_metadata_json = {
+            "primary_id": primary_id,
+            "id_type": "contact_id",
+            "doc_kind": record_kind,
+            "title": filename,
+            "source_type": file_type,
+            "document_type": "Contact Directory",
+            "vendor": org.get("name") if record_kind == "contact_vendor" else None,
+            "product": None,
+            "domain": None,
+            "version": None,
+            "document_date": record.get("last_verified"),
+            "effective_date": None,
+            "created_date": None,
+            "purpose_description": None,
+            "operational_context": "contact_directory",
+            # Contact-specific filters that future retrieval lanes
+            # (Escalation mode, Vendor mode) can narrow on.
+            "organization_name": org.get("name"),
+            "organization_type": org.get("type"),
+            "organization_segment": org.get("segment"),
+            "organization_region": org.get("region"),
+            "team_name": (record.get("team") or {}).get("name"),
+            "escalation_level": (record.get("team") or {}).get("escalation_level"),
+            "person_name": person.get("name"),
+            "person_role": person.get("role"),
+            "person_email": person.get("email"),
+            "person_phone_primary": person.get("phone_primary"),
+        }
+
+        enriched_rows.append(
+            {
+                "chunk_index": idx,
+                "content": content,
+                "contextualized_content": content,
+                "summary": None,
+                "section_heading": section_heading or f"Contact {primary_id}",
+                "chunk_type": "contact_record",
+                "page_number": None,
+                "token_estimate": max(1, len(content) // 4),
+                "source_order": idx,
+                "labels_json": {
+                    "tags": [record_kind],
+                    "entities": [
+                        e for e in [org.get("name"), person.get("name")] if e
+                    ],
+                    "keywords": [],
+                    "operational_context": "contact_directory",
+                },
+                "metadata_json": row_metadata_json,
+            }
+        )
+
+    logger.info(
+        "[ingest] structured fast-path: %d contact records, schema=ContactSchema, kinds=%s",
+        len(enriched_rows), record_kind_counts,
+    )
+
+    # When the file mixes customer + vendor records, pick the majority
+    # kind for the document-level doc_kind; the per-row metadata_json
+    # still carries each record's true kind for retrieval filtering.
+    if record_kind_counts:
+        doc_level_kind = max(record_kind_counts.items(), key=lambda kv: kv[1])[0]
+    else:
+        doc_level_kind = "contact_customer"
+
+    doc_metadata = {
+        "title": filename,
+        "document_type": "Contact Directory",
+        "file_type": "contact_directory",
+        "vendor": None,
+        "product": None,
+        "domain": None,
+        "version_label": None,
+        "document_date": None,
+        "effective_date": None,
+        "created_date": None,
+        "section_count": len(enriched_rows),
+        "chunk_count": len(enriched_rows),
+        "metadata_version": "contact-v1",
+        "extracted_at": datetime.now(timezone.utc).isoformat(),
+        "metadata_json": {
+            "title": filename,
+            "document_type": "Contact Directory",
+            "vendor": None,
+            "product": None,
+            "domain": None,
+            "version": None,
+            "document_date": None,
+            "effective_date": None,
+            "created_date": None,
+            "glossary": {},
+            "doc_kind": doc_level_kind,
+            "record_kind_counts": record_kind_counts,
+        },
+    }
+
+    candidates = version_candidate_lookup(
+        owner_id=owner_id,
+        normalized_name=normalize_filename(filename),
+        title=filename,
+    )
+    version_decision = decide_version(
+        filename=filename,
+        owner_id=owner_id,
+        preliminary_doc_metadata={
+            "title": filename,
+            "version": None,
+            "document_date": None,
+            "effective_date": None,
+            "created_date": None,
+        },
+        candidates=candidates,
+    )
+
+    return {
+        "status": "ready",
+        "document_metadata": doc_metadata,
+        "version_decision": version_decision,
+        "chunk_rows": enriched_rows,
+        # Let PREP-A's post-processor know the doc-level kind inferred
+        # from the records themselves — this trumps the caller-supplied
+        # doc_kind when a mismatch happens (e.g., operator passes
+        # --doc-kind contact_customer but the file holds vendor rows).
+        "doc_kind": doc_level_kind,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Schema registry — ordered; first match wins. Each class is a pure
 # dispatcher: detect() decides, ingest() emits the same dict shape as the
 # legacy path.
 # ---------------------------------------------------------------------------
+
+class ContactSchema:
+    """Canonical customer/vendor contact-directory JSON (Sprint 3-PREP-C).
+
+    Detect fires only when the top-level array's first record declares
+    kind ∈ {contact_customer, contact_vendor}. Must be registered BEFORE
+    GenericArraySchema in STRUCTURED_SCHEMAS so generic-array detection
+    doesn't claim contact files first.
+    """
+
+    name = "ContactSchema"
+
+    @staticmethod
+    def detect(file_bytes: bytes) -> bool:
+        return _is_contact_json(file_bytes)
+
+    @staticmethod
+    def ingest(**kwargs) -> Dict[str, Any]:
+        return _ingest_contact_array(**kwargs)
+
 
 class GoldTicketSchema:
     """Gold-ticket JSON: Metadata.Incident_Number + (Executive_Sharable_RCA | ITIL_5_Why)."""
@@ -1275,7 +1577,7 @@ class GenericArraySchema:
         return _ingest_generic_array(**kwargs)
 
 
-STRUCTURED_SCHEMAS = [GoldTicketSchema, GenericArraySchema]
+STRUCTURED_SCHEMAS = [ContactSchema, GoldTicketSchema, GenericArraySchema]
 
 
 def process_document(
@@ -1287,7 +1589,17 @@ def process_document(
     fingerprint: str,
     exact_duplicate_lookup,
     version_candidate_lookup,
+    doc_kind: Optional[str] = None,            # Sprint 3-PREP-A
 ) -> Dict[str, Any]:
+    # Sprint 3-PREP-A — resolve effective doc_kind.
+    # Precedence: explicit kwarg (validated) > schema-defaulted 'ticket'.
+    # PREP-B will push non-'ticket' values via the kwarg; PREP-A keeps
+    # the default so every row still lands as 'ticket' — flag-off safe.
+    _kind_candidate = (doc_kind or "").strip().lower()
+    if _kind_candidate and _kind_candidate in settings.VALID_DOC_KINDS:
+        resolved_kind = _kind_candidate
+    else:
+        resolved_kind = "ticket"
     # Structured-schema detection runs BEFORE generic parse so we never burn
     # Haiku calls re-guessing fields already present in the source JSON.
     # Every schema that fails detection falls through to the legacy pipeline.
@@ -1333,7 +1645,7 @@ def process_document(
                 )
                 continue
             try:
-                return schema_cls.ingest(
+                schema_result = schema_cls.ingest(
                     file_bytes=file_bytes,
                     filename=filename,
                     file_type=file_type,
@@ -1342,6 +1654,12 @@ def process_document(
                     exact_duplicate_lookup=exact_duplicate_lookup,
                     version_candidate_lookup=version_candidate_lookup,
                 )
+                # Sprint 3-PREP-A — stamp the resolved doc_kind onto the
+                # result so api.py's insert_document_and_chunks call
+                # writes the documents.doc_kind column correctly.
+                if isinstance(schema_result, dict) and "doc_kind" not in schema_result:
+                    schema_result["doc_kind"] = resolved_kind
+                return schema_result
             except Exception as exc:
                 logger.warning(
                     "Schema %s.ingest raised (%s) — falling through to generic pipeline",
@@ -1606,4 +1924,5 @@ def process_document(
         "document_metadata": doc_metadata,
         "version_decision": version_decision,
         "chunk_rows": enriched_rows,
+        "doc_kind": resolved_kind,   # Sprint 3-PREP-A
     }

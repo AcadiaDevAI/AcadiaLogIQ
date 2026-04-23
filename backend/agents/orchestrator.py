@@ -26,6 +26,62 @@ logger = logging.getLogger("acadia-log-iq")
 
 
 # ---------------------------------------------------------------------------
+# Sprint 3C — mode → corpus (doc_kind) policy.
+#
+# Returns the doc_kinds filter list the /ask retrieval call should pass
+# to orchestrator_retrieve, or None to leave retrieval unfiltered (i.e.
+# the pre-3C ticket-history default). Today only Escalation mode has a
+# corpus route; future sprints (3D ticket_handling, 3E vendor_oem) will
+# add their own branches here. Kept as a standalone helper so the
+# policy lives in agents/orchestrator.py (where the rest of mode logic
+# lives) while the retrieval call itself stays in api.py.
+#
+# Flag-off: always returns None — pre-3C byte-identical behavior.
+# ---------------------------------------------------------------------------
+def resolve_mode_doc_kinds(session_mode: Any) -> Optional[List[str]]:
+    if session_mode is None:
+        return None
+
+    mode_name: Optional[str] = None
+    if isinstance(session_mode, str):
+        mode_name = session_mode
+    else:
+        mode_name = getattr(session_mode, "selected_mode", None)
+
+    if not mode_name:
+        return None
+
+    if (
+        mode_name == "escalation"
+        and getattr(settings, "LOGIQ_SPRINT3C_BACKEND", False)
+    ):
+        return ["contact_customer"]
+
+    # Sprint 3D — Ticket Handling mode routes to the SOP/runbook corpus.
+    # Sub-mode (create/update/close/validate) does NOT change the corpus
+    # filter — it only shapes the composer voice. All four sub-modes
+    # retrieve from the same doc_kind=sop body.
+    if (
+        mode_name == "ticket_handling"
+        and getattr(settings, "LOGIQ_SPRINT3D_BACKEND", False)
+    ):
+        return ["sop"]
+
+    # Sprint 3E — Vendor/OEM mode routes to the vendor corpora: contact
+    # records (contact_vendor) AND prior vendor case records
+    # (vendor_case). The composer voice then produces the three-part
+    # response (case writeup + contact card + prior cases). Both
+    # doc_kinds are registered in VALID_DOC_KINDS (config.py:850–851).
+    if (
+        mode_name == "vendor_oem"
+        and getattr(settings, "LOGIQ_SPRINT3E_BACKEND", False)
+    ):
+        return ["contact_vendor", "vendor_case"]
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Agent pipeline performance additions (additive, flag-gated).
 # All behavior preserved when the matching feature flag is False.
 # ---------------------------------------------------------------------------
@@ -490,6 +546,7 @@ def run_agent_pipeline(
     unresolved_count: int = 0,
     pattern_context: Optional[Dict[str, Any]] = None,
     session_scope: Optional[List[str]] = None,
+    session_mode: Optional[Any] = None,
 ) -> AgentPipelineResult:
     """
     Run the full multi-agent pipeline: Planner → Analyst → Composer.
@@ -818,6 +875,7 @@ def run_agent_pipeline(
                 budget=budget,
                 generate_fn=generate_fn,
                 bedrock_client=bedrock_client,
+                session_mode=session_mode,
             )
 
             result.steps.append(compose_result)
@@ -856,4 +914,118 @@ def run_agent_pipeline(
         result.reasoning_summary,
     )
 
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Sprint 3B — 👎 KB/Runbook pivot pipeline.
+#
+# Fires only when the user thumbs-downs a Troubleshooting-mode answer.
+# Re-runs retrieval filtered to doc_kinds=["sop","kb"] using the original
+# user query and composes a 5-section runbook-style response via the
+# kb_pivot voice override. Bypasses planner and analyst on purpose —
+# the KB pivot is a single-shot "here is what the runbook says", not a
+# multi-step synthesis. Keeps the pivot cheap and predictable.
+#
+# Flag-off: raises RuntimeError — callers must flag-gate before invoking.
+# ---------------------------------------------------------------------------
+def run_kb_pivot_pipeline(
+    *,
+    query: str,
+    session_mode: Any,
+    generate_fn: Callable,
+    bedrock_client: Any,
+    embed_fn: Callable,
+    owner_id: str,
+    allowed_file_ids: Set[str],
+    bm25_search_fn: Optional[Callable] = None,
+    vector_search_fn: Optional[Callable] = None,
+    budget: Optional[TokenBudget] = None,
+) -> AgentPipelineResult:
+    """Sprint 3B — retrieve filtered to sop+kb, compose with KB voice.
+
+    Reuses orchestrator_retrieve + run_composer with a different doc_kinds
+    filter and voice_override="kb_pivot". Budget is a fresh half of
+    AGENT_MAX_TOTAL_TOKENS (so a 👎 does not exhaust the session).
+    """
+    if not getattr(settings, "LOGIQ_SPRINT3B_BACKEND", False):
+        raise RuntimeError("LOGIQ_SPRINT3B_BACKEND is off")
+
+    if budget is None:
+        budget = TokenBudget(max_total=max(1, settings.AGENT_MAX_TOTAL_TOKENS // 2))
+
+    result = AgentPipelineResult(agent_mode=True)
+    t_start = time.perf_counter()
+
+    # Local import to keep backend.agents.orchestrator free of a
+    # compile-time dep on the retrieval package (avoids cycles when
+    # tests import this module in isolation).
+    from backend.retrieval.orchestrator import retrieve as _retrieve
+
+    try:
+        q_emb = embed_fn(query)
+        if not q_emb:
+            logger.warning("[kb_pivot] embedding failed for query=%r", query[:120])
+            result.kb_pivot_empty = True
+            result.answer = ""
+            return result
+
+        retrieval = _retrieve(
+            query=query,
+            raw_query=query,
+            query_embedding=q_emb,
+            owner_id=owner_id,
+            allowed_file_ids=set(allowed_file_ids or set()),
+            file_type="kb",
+            generate_fn=generate_fn,
+            bm25_search_fn=bm25_search_fn,
+            vector_search_fn=vector_search_fn,
+            doc_kinds=["sop", "kb"],
+        )
+        ranked = list(retrieval.ranked or [])
+        logger.info("[kb_pivot] retrieval returned %d chunks", len(ranked))
+
+        if not ranked:
+            result.kb_pivot_empty = True
+            result.answer = ""
+            result.total_ms = int((time.perf_counter() - t_start) * 1000)
+            return result
+
+        # Concatenate the top chunks into a single findings block. Each chunk
+        # gets a lightweight header so the composer can cite the right KB
+        # article by name. We intentionally skip planner/analyst — KB pivot
+        # is a single-shot runbook lookup.
+        findings_parts: List[str] = []
+        source_names: List[str] = []
+        for idx, (_cid, ctext, cmeta, _cscore) in enumerate(ranked[:6], start=1):
+            doc_name = (cmeta or {}).get("document_name") or (cmeta or {}).get(
+                "file_name"
+            ) or f"kb_source_{idx}"
+            kind = (cmeta or {}).get("doc_kind") or "kb"
+            findings_parts.append(
+                f"[KB chunk {idx} — {doc_name} (doc_kind={kind})]\n{ctext}"
+            )
+            source_names.append(doc_name)
+
+        compose_result = run_composer(
+            query=query,
+            findings=findings_parts,
+            source_names=source_names,
+            budget=budget,
+            generate_fn=generate_fn,
+            bedrock_client=bedrock_client,
+            session_mode=session_mode,
+            voice_override="kb_pivot",
+        )
+        result.steps.append(compose_result)
+        result.answer = (compose_result.output or "").strip()
+        result.kb_pivot_empty = False
+
+    except Exception as exc:
+        logger.exception("[kb_pivot] pipeline failed: %s", exc)
+        result.answer = ""
+        result.kb_pivot_empty = True
+
+    result.total_ms = int((time.perf_counter() - t_start) * 1000)
+    result.total_tokens = budget.used
     return result

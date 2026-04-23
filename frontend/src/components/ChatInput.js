@@ -3,7 +3,7 @@ import { Button, Tooltip } from "antd";
 import { SendOutlined, LoadingOutlined } from "@ant-design/icons";
 import { useChat } from "../hooks/ChatContext";
 
-export default function ChatInput({ onSend }) {
+export default function ChatInput({ onSend, prefillValue, onPrefillConsumed }) {
   const { state } = useChat();
   const [input, setInput] = useState("");
   const textareaRef = useRef(null);
@@ -16,6 +16,23 @@ export default function ChatInput({ onSend }) {
       textareaRef.current.style.height = Math.min(textareaRef.current.scrollHeight, 160) + "px";
     }
   }, [input]);
+
+  // Sprint 3A — chip-driven prefill. When the parent pushes a new
+  // prefillValue (e.g. "Draft a post-mortem for INC-NEBULA-772 ..."),
+  // populate the input, focus it, and clear the parent's state so any
+  // subsequent user edits aren't reverted on re-render. Flag-off: the
+  // parent never sets prefillValue, this effect never fires.
+  useEffect(() => {
+    if (prefillValue) {
+      setInput(prefillValue);
+      if (textareaRef.current) {
+        textareaRef.current.focus();
+        const len = prefillValue.length;
+        try { textareaRef.current.setSelectionRange(len, len); } catch { /* noop */ }
+      }
+      onPrefillConsumed?.();
+    }
+  }, [prefillValue, onPrefillConsumed]);
 
   const handleSubmit = () => {
     const q = input.trim();

@@ -1,5 +1,3 @@
-
-
 services:
   api:
     build:
@@ -30,7 +28,27 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
       args:
+        # Public Clerk key — safe to embed in the bundle
         REACT_APP_CLERK_PUBLISHABLE_KEY: ${REACT_APP_CLERK_PUBLISHABLE_KEY:-}
+
+        # API base URL the frontend talks to (use EC2 public URL or nginx-proxied path)
+        REACT_APP_API_BASE: ${REACT_APP_API_BASE:-http://localhost:8000}
+
+        # Optional API key (empty string when Clerk is the primary auth)
+        REACT_APP_API_KEY: ${REACT_APP_API_KEY:-}
+
+        # Sprint 1 — Guided Workflow landing page
+        REACT_APP_GUIDED_WORKFLOW_ENABLED: ${REACT_APP_GUIDED_WORKFLOW_ENABLED:-true}
+
+        # Sprint 2 — context-break + pattern cards
+        REACT_APP_LOGIQ_SPRINT2_FRONTEND: ${REACT_APP_LOGIQ_SPRINT2_FRONTEND:-true}
+
+        # Sprint 3A — mode-aware prompts + post-👍 action chips
+        REACT_APP_LOGIQ_SPRINT3A_FRONTEND: ${REACT_APP_LOGIQ_SPRINT3A_FRONTEND:-true}
+
+        # Sprint 3-PREP-B — bulk ingestion doc_kind dropdown + sidebar badge
+        REACT_APP_LOGIQ_BULK_INGEST_FRONTEND: ${REACT_APP_LOGIQ_BULK_INGEST_FRONTEND:-false}
+
         # BUILD_TIMESTAMP is exported by redeploy.sh before build.
         # Changing this arg invalidates the build stage cache and
         # guarantees a fresh bundle hash + visible version stamp.

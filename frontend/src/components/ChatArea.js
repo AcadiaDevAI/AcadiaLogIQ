@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback } from "react";
+import React, { useRef, useEffect, useCallback, useState } from "react";
 import { message } from "antd";
 import { useChat } from "../hooks/ChatContext";
 import { askQuestion, listSessions } from "../services/api";
@@ -45,6 +45,12 @@ function EmptyState() {
 export default function ChatArea() {
   const { state, dispatch } = useChat();
   const scrollRef = useRef(null);
+
+  // Sprint 3A — prefill value pushed by post-👍 action chips. ChatInput
+  // consumes it on mount-delta and clears via onPrefillConsumed so user
+  // edits aren't clobbered. Flag-off: chips never render, so this state
+  // stays null for the life of the session.
+  const [prefillValue, setPrefillValue] = useState(null);
 
   // Auth interceptor is now in AuthGate.js — not needed here anymore.
 
@@ -274,6 +280,7 @@ export default function ChatArea() {
                   sessionId={state.sessionId}
                   onClarificationSelect={handleClarificationSelect}
                   clarificationDisabled={state.isLoading}
+                  onPrefillInput={setPrefillValue}
                 />
                 {clientSettings.LOGIQ_SPRINT2_FRONTEND &&
                   msg.role === "assistant" &&
@@ -295,7 +302,11 @@ export default function ChatArea() {
         )}
       </div>
 
-      <ChatInput onSend={handleSend} />
+      <ChatInput
+        onSend={handleSend}
+        prefillValue={prefillValue}
+        onPrefillConsumed={() => setPrefillValue(null)}
+      />
 
       {clientSettings.LOGIQ_SPRINT2_FRONTEND &&
         clientSettings.GUIDED_WORKFLOW_ENABLED && <ContextBreakModal />}

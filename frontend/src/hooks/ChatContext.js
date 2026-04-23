@@ -147,6 +147,22 @@ function reducer(state, action) {
             patternActive: !!action.payload.context_stats?.pattern_active,
             patternTopic: action.payload.context_stats?.pattern_topic || null,
             patternData: action.payload.context_stats?.pattern_data || null,
+
+            // Sprint 3B — low-similarity banner signal. Pulled from
+            // the top-level response field (confidence_band). When
+            // absent (Sprint 3B flag off or cached path), the banner
+            // does not render.
+            confidenceBand: action.payload.confidence_band || null,
+
+            // Sprint 3B — KB pivot marker. Used when this message is
+            // itself a pivot follow-up (kb_guidance | kb_empty). The
+            // primary /ask response never sets this; only the 👎 flow
+            // adds it via ADD_ASSISTANT_MESSAGE with pivot_type set.
+            pivotType: action.payload.pivot_type || null,
+            // Preserve the original user query on the assistant
+            // message so a 👎 can send it back to /feedback/state
+            // for the KB pivot lookup.
+            originalQuery: action.payload.original_query || null,
           },
         ],
       };

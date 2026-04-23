@@ -7,7 +7,7 @@ accuracy fixes, and performance optimizations.
 
 import sys
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import ClassVar, Dict, List, Optional
 
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -780,6 +780,57 @@ class Settings(BaseSettings):
     REWRITER_ELLIPSIS_MIN_CONF: float = 0.92
 
     # ─────────────────────────────────────────────────────────────
+    # Sprint 3A — Mode-Aware Prompts + Post-👍 Action Buttons
+    # Single master flag gating (1) mode-tuned composer voice selection
+    # and (2) post-thumbs-up action chip rendering signal. Flag-off =
+    # byte-identical pre-3A behavior — _composer_rules is returned by
+    # identity (the default string object), and the frontend chip
+    # registry never renders.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_SPRINT3A_BACKEND: bool = False
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 3B — 👎 KB/Runbook pivot + low-similarity confidence band
+    #
+    # Flag-off path: /feedback/state skips the pivot branch and /ask
+    # omits the confidence_band field — byte-identical post-3A-REVISED.
+    # LOW_SIMILARITY_THRESHOLD controls the top-chunk score below which
+    # the answer is tagged `confidence_band="low"` so the frontend can
+    # render the "⚠️ Low similarity match" banner.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_SPRINT3B_BACKEND: bool = False
+    LOW_SIMILARITY_THRESHOLD: float = 0.35
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 3C — Escalation mode → contact_customer corpus
+    # Flag-off path: escalation mode uses default voice + ticket-history
+    # retrieval (post-3A-REVISED behavior byte-identical). Flag-on:
+    # retrieval filters to doc_kinds=["contact_customer"] and the
+    # composer picks _VOICE_ESCALATION via copy-and-extend (the module
+    # _VOICE_BY_MODE dict is NEVER mutated).
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_SPRINT3C_BACKEND: bool = False
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 3D — Ticket Handling mode → sop corpus
+    # Flag-off path: ticket_handling mode uses default voice +
+    # ticket-history retrieval (post-3A-REVISED behavior byte-identical).
+    # Flag-on: retrieval filters to doc_kinds=["sop"] and the composer
+    # dispatches via (mode, sub_mode) into 4 sub-mode voices:
+    # ticket_create / ticket_update / ticket_close / ticket_validate.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_SPRINT3D_BACKEND: bool = False
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 3E — Vendor/OEM mode → contact_vendor + vendor_case corpora
+    # Flag-off path: vendor_oem mode uses default voice + ticket-history
+    # retrieval (post-3A-REVISED behavior byte-identical). Flag-on:
+    # retrieval filters to doc_kinds=["contact_vendor", "vendor_case"]
+    # and the composer picks _VOICE_VENDOR_OEM via copy-and-extend.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_SPRINT3E_BACKEND: bool = False
+
+    # ─────────────────────────────────────────────────────────────
     # Sprint 2.9 — JSON Structure Validator
     # Rejects uploads whose CONTENT looks like JSON (first non-whitespace
     # byte is { or [) but fails strict parse. Flag-off = byte-identical
@@ -788,6 +839,38 @@ class Settings(BaseSettings):
     # SPRINT_2_9_JSON_VALIDATOR.md for runtime acceptance walk.
     # ─────────────────────────────────────────────────────────────
     LOGIQ_JSON_VALIDATOR_BACKEND: bool = False
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 3-PREP-A — doc_kind multi-corpus tagging
+    # Single master flag that gates the mode→corpus retrieval filter.
+    # Flag-off = retriever ignores doc_kinds kwarg even when passed;
+    # storage/ingestion always writes the doc_kind column (defaults to
+    # 'ticket') so data is ready when the flag flips on.
+    # VALID_DOC_KINDS is a ClassVar so pydantic treats it as a constant,
+    # not a settable field — the set is immutable and referenced via
+    # settings.VALID_DOC_KINDS from ingestion for input validation.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_DOC_KIND_BACKEND: bool = False
+    VALID_DOC_KINDS: ClassVar[frozenset] = frozenset({
+        "ticket",            # JSON gold-ticket history (Troubleshooting)
+        "sop",               # Standard operating procedures, runbooks
+        "kb",                # Knowledge base articles
+        "contact_customer",  # Customer contact directory (Escalation)
+        "contact_vendor",    # Vendor contact directory (Vendor-OEM)
+        "vendor_case",       # Historical vendor case records
+    })
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 3-PREP-B — Bulk ingestion (folder / S3 → corpus)
+    # Gates both the CLI (`backend/scripts/bulk_ingest.py`) and the
+    # doc_kind form field surfaced by the /upload endpoint + admin UI
+    # dropdown. Flag-off: CLI exits 2, /upload silently coerces any
+    # incoming doc_kind to "ticket" (backward-compatible), UI dropdown
+    # is disabled via REACT_APP_LOGIQ_BULK_INGEST_FRONTEND so the UX
+    # is byte-identical to post-PREP-A.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_BULK_INGEST_BACKEND: bool = False
+    BULK_INGEST_MAX_FILES_PER_RUN: int = 10000
 
     model_config = SettingsConfigDict(
         env_file=str(BASE_DIR / ".env"),
