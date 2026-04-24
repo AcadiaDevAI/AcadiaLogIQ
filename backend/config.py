@@ -869,6 +869,59 @@ class Settings(BaseSettings):
     EXPERT_COPILOT_CACHE_TTL_DAYS: int = 30
 
     # ─────────────────────────────────────────────────────────────
+    # Sprint 6 — Tier-1 Alert Copilot (form-driven triage module)
+    # Flag-off path: /tier1/* routes are NOT mounted (the include
+    # block in api.py is skipped), so any call returns FastAPI's own
+    # 404. The landing page hides its Tier-1 entry button via the
+    # frontend build arg REACT_APP_LOGIQ_TIER1_COPILOT_FRONTEND.
+    # Sprint 1–5 behavior is byte-identical when this flag is off.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_TIER1_COPILOT_BACKEND: bool = False
+    TIER1_CACHE_TTL_DAYS: int = 7
+    TIER1_TOP_K: int = 5
+    TIER1_HIGH_CONFIDENCE_THRESHOLD: float = 0.85
+    TIER1_MIN_CONFIDENCE_THRESHOLD: float = 0.60
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 7 — Tier-1 Progressive Workflow
+    # Flag-off path: new routes (/tier1/session, /tier1/deeper-diagnostics,
+    # /tier1/escalation-package, /tier1/explain, /tier1/session/{id}/...)
+    # return 404, the Sprint 6 ranking weights are used verbatim, and the
+    # new response fields (top_5_match_ids / session_id / started_at) are
+    # present on Tier1AnalyzeResponse but remain empty/None so Sprint 6
+    # clients stay byte-identical.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_TIER1_PROGRESSIVE_BACKEND: bool = False
+    TIER1_STUCK_THRESHOLD_SECONDS: int = 480   # 8 minutes
+    TIER1_TOP_N_MATCHES: int = 5
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 8 — Tier-1 UX polish
+    # Gates the single new endpoint that powers arrow pagination:
+    #   GET /tier1/session/{session_id}/match/{match_index}
+    # Flag-off path: the endpoint returns 404 (defensively, in addition
+    # to the router mount requiring Sprint 6's flag). Sprint 6/7
+    # response shapes and ranking weights are untouched.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_TIER1_UX_FIXES_BACKEND: bool = False
+    # Weights MUST sum to 1.00. Declared ClassVar so pydantic treats it as
+    # a constant, not a settable field (mutable dicts aren't a valid
+    # Settings field type and spec §12 explicitly wants a single source of
+    # truth callers reuse for the /tier1/explain breakdown).
+    TIER1_RANKING_WEIGHTS: ClassVar[Dict[str, float]] = {
+        "alert_type_match":      0.25,
+        "asset_match":           0.15,
+        "fingerprint_match":     0.15,
+        "technology_match":      0.05,
+        "vector_similarity":     0.05,
+        "resolution_quality":    0.10,
+        "recency":               0.05,
+        "success_frequency":     0.05,
+        "same_customer_boost":   0.075,
+        "same_asset_family":     0.075,
+    }
+
+    # ─────────────────────────────────────────────────────────────
     # Sprint 2.9 — JSON Structure Validator
     # Rejects uploads whose CONTENT looks like JSON (first non-whitespace
     # byte is { or [) but fails strict parse. Flag-off = byte-identical

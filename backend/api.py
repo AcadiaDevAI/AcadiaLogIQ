@@ -415,6 +415,20 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+# Sprint 6 — Tier-1 Alert Copilot. Mounted ONLY when the flag is on,
+# so /tier1/* returns a native FastAPI 404 the rest of the time and
+# Sprint 1-5 behavior stays byte-identical.
+if getattr(settings, "LOGIQ_TIER1_COPILOT_BACKEND", False):
+    try:
+        from backend.tier1_copilot.routes import router as _tier1_router
+        app.include_router(_tier1_router)
+        logger.info("[tier1_copilot] router mounted at /tier1")
+    except Exception as _tier1_exc:
+        logger.warning(
+            "[tier1_copilot] failed to mount router (module disabled): %s",
+            _tier1_exc,
+        )
+
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
