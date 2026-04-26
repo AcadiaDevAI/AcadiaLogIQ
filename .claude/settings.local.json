@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node -e ' *)",
+      "Bash(npm run *)",
+      "Bash(py -m py_compile backend/tier1_copilot/intake/schemas.py backend/tier1_copilot/intake/validator.py backend/tier1_copilot/intake/tests/test_validator.py)",
+      "Bash(py -m unittest backend.tier1_copilot.intake.tests.test_validator -v)",
+      "Bash(py -m py_compile backend/config.py backend/tier1_copilot/intake/prompt_builder.py backend/tier1_copilot/intake/validator.py backend/tier1_copilot/intake/diversifier.py backend/tier1_copilot/intake/extractor.py backend/tier1_copilot/intake/routes.py)",
+      "Bash(py -m py_compile backend/config.py backend/tier1_copilot/intake/prompt_builder.py backend/tier1_copilot/intake/validator.py backend/tier1_copilot/intake/diversifier.py backend/tier1_copilot/intake/extractor.py backend/tier1_copilot/intake/routes.py backend/tier1_copilot/intake/tests/test_validator.py backend/tier1_copilot/intake/tests/test_prompt_builder.py backend/tier1_copilot/intake/tests/test_diversifier.py)",
+      "Bash(py -m unittest backend.tier1_copilot.intake.tests.test_validator backend.tier1_copilot.intake.tests.test_prompt_builder backend.tier1_copilot.intake.tests.test_diversifier)",
+      "Bash(py -m unittest backend.tier1_copilot.intake.tests.test_prompt_builder)",
+      "Bash(py -m unittest backend.tier1_copilot.intake.tests.test_validator backend.tier1_copilot.intake.tests.test_diversifier)",
+      "Bash(py -m unittest backend.tier1_copilot.intake.tests.test_validator)"
+    ]
+  }
+}

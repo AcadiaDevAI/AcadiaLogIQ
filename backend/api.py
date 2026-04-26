@@ -429,6 +429,23 @@ if getattr(settings, "LOGIQ_TIER1_COPILOT_BACKEND", False):
             _tier1_exc,
         )
 
+# Sprint 9 — Universal Intake. Same gating pattern: mount only when
+# both Sprint 6 (parent flag) and Sprint 9 flags are true. Flag-off =
+# /intake/* returns native 404 and Sprint 6/7/8 stay byte-identical.
+if (
+    getattr(settings, "LOGIQ_TIER1_COPILOT_BACKEND", False)
+    and getattr(settings, "LOGIQ_UNIVERSAL_INTAKE_BACKEND", False)
+):
+    try:
+        from backend.tier1_copilot.intake.routes import router as _intake_router
+        app.include_router(_intake_router)
+        logger.info("[intake] router mounted at /intake")
+    except Exception as _intake_exc:
+        logger.warning(
+            "[intake] failed to mount router (module disabled): %s",
+            _intake_exc,
+        )
+
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)

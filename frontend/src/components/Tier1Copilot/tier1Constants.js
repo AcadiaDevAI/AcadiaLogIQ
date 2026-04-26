@@ -71,6 +71,24 @@ export const TIER1_MODERN_THEME_ON =
 export const TIER1_DOWNLOAD_DEMO_ON =
   process.env.REACT_APP_LOGIQ_TIER1_DOWNLOAD_DEMO === "true";
 
+// ─────────────────────────────────────────────────────────────
+// Sprint 9 — Universal Intake (Email/Phone/Portal/Chat/Note).
+// Flag-off path: SourceToggle is hidden, Sprint 6/7/8 byte-identical.
+// ─────────────────────────────────────────────────────────────
+export const UNIVERSAL_INTAKE_ON =
+  process.env.REACT_APP_LOGIQ_UNIVERSAL_INTAKE_FRONTEND === "true";
+
+export const INTAKE_SOURCES = [
+  { value: "alert", label: "Alert" },
+  { value: "email", label: "Email" },
+  { value: "phone", label: "Phone" },
+  { value: "portal", label: "Portal" },
+  { value: "chat", label: "Chat" },
+  { value: "note", label: "Note" },
+];
+
+export const INTAKE_MAX_RAW_CHARS = 10000;
+
 // Neutralised confidence copy (§3). Primary + subline so the banner
 // can show calibration without the harsh "Weak" language that eroded
 // engineer trust in Sprint 7.

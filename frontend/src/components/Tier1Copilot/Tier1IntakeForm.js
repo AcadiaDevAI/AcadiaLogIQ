@@ -5,10 +5,14 @@ import {
   SEVERITY_OPTIONS,
   TECHNOLOGY_OPTIONS,
   TIER1_UX_FIXES_ON,
+  UNIVERSAL_INTAKE_ON, // Sprint 9
 } from "./tier1Constants";
 import SeverityChipSelector from "./SeverityChipSelector";
 import AssetAutocomplete from "./AssetAutocomplete";
 import { useTier1Theme } from "../../theme/ThemeProvider";
+// Sprint 9 — universal intake (paste-from-anywhere mode).
+import SourceToggle from "./intake/SourceToggle";
+import UniversalIntakePanel from "./intake/UniversalIntakePanel";
 
 /**
  * Tier1IntakeForm — Sprint 6 default + Sprint 8 progressive variant.
@@ -19,11 +23,58 @@ import { useTier1Theme } from "../../theme/ThemeProvider";
  * progressive design spec'd in §6 — severity chips, 3 required fields
  * prominent, 6 optional collapsed behind "Add more context".
  */
+// Sprint 9 — when the universal-intake frontend flag is on, the form
+// is wrapped with source-selection state + an optional paste panel so
+// engineers can pull a triage interpretation from email/phone/portal/
+// chat/note. Flag-off path: byte-identical Sprint 6/8 form (the inner
+// Classic / Progressive components are unchanged).
 export default function Tier1IntakeForm(props) {
+  if (UNIVERSAL_INTAKE_ON) {
+    return <SourceAwareIntake {...props} />;
+  }
   if (TIER1_UX_FIXES_ON) {
     return <ProgressiveIntakeForm {...props} />;
   }
   return <ClassicIntakeForm {...props} />;
+}
+
+
+function SourceAwareIntake(props) {
+  const [source, setSource] = useState("alert");
+  const [prefill, setPrefill] = useState(null);
+
+  const handleCardPicked = (filled) => {
+    setPrefill({ ...filled, _stamp: Date.now() });
+    // Auto-switch back to "alert" so the existing form fields are
+    // visible and the engineer can review/edit before clicking Analyze.
+    setSource("alert");
+  };
+
+  const InnerForm = TIER1_UX_FIXES_ON ? ProgressiveIntakeForm : ClassicIntakeForm;
+
+  return (
+    <div className="flex-1 overflow-y-auto px-4 py-6 t-bg-primary">
+      <div className="w-full" style={{ maxWidth: 720, margin: "0 auto" }}>
+        <div style={{ marginBottom: 16, display: "flex", justifyContent: "center" }}>
+          <SourceToggle
+            value={source}
+            onChange={setSource}
+            disabled={!!props.busy}
+          />
+        </div>
+
+        {source !== "alert" && (
+          <UniversalIntakePanel
+            source={source}
+            sessionId={props.sessionId}
+            onCardPicked={handleCardPicked}
+          />
+        )}
+
+        <InnerForm {...props} prefill={prefill} />
+      </div>
+    </div>
+  );
 }
 
 
@@ -32,9 +83,35 @@ function ClassicIntakeForm({
   busy,
   onSubmit,
   onBack,
+  prefill, // Sprint 9 — populated by SourceAwareIntake on card pick
 }) {
   const [form] = Form.useForm();
   const [canSubmit, setCanSubmit] = useState(false);
+
+  // Sprint 9 — apply universal-intake prefill when it arrives. Each
+  // pick stamps a new _stamp so React re-runs the effect even if the
+  // engineer picks the same card twice.
+  React.useEffect(() => {
+    if (!prefill) return;
+    const fields = {};
+    if (prefill.severity) fields.severity = prefill.severity;
+    if (prefill.asset_name) fields.asset_name = prefill.asset_name;
+    if (prefill.alert_type) fields.alert_type = prefill.alert_type;
+    if (prefill.customer) fields.customer = prefill.customer;
+    if (prefill.location) fields.location = prefill.location;
+    if (Object.keys(fields).length > 0) {
+      form.setFieldsValue(fields);
+      // Trigger button-enabled recompute since we just filled fields.
+      setTimeout(() => {
+        const values = form.getFieldsValue(["severity", "asset_name", "alert_type"]);
+        setCanSubmit(
+          !!values.severity
+            && !!(values.asset_name && values.asset_name.trim())
+            && !!(values.alert_type && values.alert_type.trim()),
+        );
+      }, 0);
+    }
+  }, [prefill && prefill._stamp]);
 
   const recomputeCanSubmit = () => {
     const values = form.getFieldsValue(["severity", "asset_name", "alert_type"]);
@@ -223,12 +300,27 @@ function ProgressiveIntakeForm({
   onBack,
   recentAssets = [],
   recentAlertTypes = [],
+  prefill, // Sprint 9
 }) {
   const { tokens, isModern } = useTier1Theme();
   const [form] = Form.useForm();
   const [severity, setSeverity] = useState(null);
   const [assetName, setAssetName] = useState("");
   const [alertType, setAlertType] = useState("");
+
+  // Sprint 9 — apply universal-intake prefill when it arrives.
+  React.useEffect(() => {
+    if (!prefill) return;
+    if (prefill.severity) setSeverity(prefill.severity);
+    if (prefill.asset_name) setAssetName(prefill.asset_name);
+    if (prefill.alert_type) setAlertType(prefill.alert_type);
+    const inner = {};
+    if (prefill.customer) inner.customer = prefill.customer;
+    if (prefill.location) inner.location = prefill.location;
+    if (Object.keys(inner).length > 0) {
+      form.setFieldsValue(inner);
+    }
+  }, [prefill && prefill._stamp]);
   const [expanded, setExpanded] = useState(false);
 
   const canSubmit =

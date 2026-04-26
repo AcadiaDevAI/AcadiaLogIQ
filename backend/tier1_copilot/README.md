@@ -280,3 +280,71 @@ repeats.
   system-wide but behaviour fixes stay.
 - Everything: flip both frontend flags + `LOGIQ_TIER1_UX_FIXES_BACKEND`
   off and rebuild — Sprint 7 byte-identical.
+
+---
+
+## Sprint 9 — Universal Intake (Email/Phone/Portal/Chat/Note)
+
+### What this does
+
+Adds a second intake mode to the Tier-1 Copilot. Engineer pastes raw
+text from email / phone / portal / chat / note; the extractor returns
+1-4 structured candidate cards, validates them against the ingested
+ticket catalog, and pre-fills the existing Sprint 6 form on pick.
+Downstream `/tier1/analyze` flow runs unchanged.
+
+### Why it exists
+
+Real Tier-1 engineers receive issues via email, phone, chat — not just
+NMS alerts. Manual form-fill from a 4-paragraph email is error-prone
+(wrong severity, mistyped asset). LLM extraction with strict catalog
+validation preserves precision while removing typing friction.
+
+### Module ownership
+
+| File | Owns |
+|---|---|
+| `intake/extractor.py` | Bedrock Haiku call (via Sprint 6 `invoke_llm`) + tolerant JSON parse |
+| `intake/validator.py` | Severity enum, fuzzy match (stdlib `difflib.SequenceMatcher`), confidence band |
+| `intake/diversifier.py` | Drop duplicate `(severity, asset_family, alert_type)` triples; pad up to `INTAKE_MAX_CARDS` |
+| `intake/catalogs.py` | Lazy-init in-memory catalogs from `chunks.metadata_json` |
+| `intake/prompt_builder.py` | Strict extraction prompt with sampled hints |
+| `intake/audit.py` | `intake_extractions` insert + feedback update |
+| `intake/routes.py` | `/intake/extract`, `/intake/extraction/{id}/feedback`, `/intake/health` |
+
+### Endpoints
+
+| Method | Path | Notes |
+|---|---|---|
+| POST | `/intake/extract` | Returns `{extraction_id, candidates: ValidatedCandidate[], error?}` |
+| POST | `/intake/extraction/{id}/feedback` | Logs `picked_index` / `edits` / `was_rejected` |
+| GET  | `/intake/health` | Catalog snapshot (sizes per type) |
+
+### Catalog sourcing
+
+- **Asset families** — `Metadata.Affected_Assets[]` (JSONB array per Sprint 7) plus `Metadata.Target_Service`. Trailing numeric suffix stripped via the same regex Sprint 7 uses.
+- **Alert types** — `Symptom_Solution_Mapping.Detected_Symptom` and `Origin_Event` after lowercase + punctuation normalisation.
+- **Customers** — `Metadata.customer_name` → `Metadata.Customer_Name` → `Metadata.Customer` (defensive fallback chain). Legal-entity suffixes (Inc/Corp/LLC/Ltd/GmbH/PLC/SA/AG) stripped.
+- **Severities** — fixed enum {P1..P4}, never derived.
+
+### How to debug
+
+- Logs prefix: `[intake]`
+- Inspect last extractions:
+  ```sql
+  SELECT id, source, picked_index, was_rejected, created_at
+    FROM intake_extractions ORDER BY created_at DESC LIMIT 10;
+  ```
+- Inspect catalog state: `GET /intake/health`.
+- Force catalog rebuild: restart backend (lazy-init runs again on first
+  call). The shared `aggregator.build_tier1_runtime_state_on_startup`
+  rebuilds both the alias dict AND intake catalogs in one DB pass.
+- Disable instantly: set `LOGIQ_UNIVERSAL_INTAKE_BACKEND=false` and
+  restart.
+
+### Future extension points
+
+- Source-specific prompt nuances (phone transcripts have filler words).
+- Pre-embedded asset/customer catalogs for sub-100 ms fuzzy match.
+- Cross-extraction dedup ("this looks like an alert from 30 min ago").
+- Engineer correction → catalog learning loop.

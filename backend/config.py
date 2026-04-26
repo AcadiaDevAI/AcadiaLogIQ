@@ -904,6 +904,41 @@ class Settings(BaseSettings):
     # response shapes and ranking weights are untouched.
     # ─────────────────────────────────────────────────────────────
     LOGIQ_TIER1_UX_FIXES_BACKEND: bool = False
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 9 — Universal Intake (Email/Phone/Portal/Chat/Note)
+    # Flag-off path: the /intake/* router is not mounted, the frontend
+    # SourceToggle is hidden via REACT_APP_LOGIQ_UNIVERSAL_INTAKE_FRONTEND,
+    # and Sprint 6/7/8 paths are byte-identical. Catalog builder is
+    # lazy: first /intake/extract call materialises the in-memory
+    # IntakeCatalogs from chunks.metadata_json (no startup cost).
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_UNIVERSAL_INTAKE_BACKEND: bool = False
+    INTAKE_MAX_RAW_CHARS: int = 10000
+    INTAKE_MAX_CANDIDATES: int = 5            # asked of the LLM
+    INTAKE_MAX_CARDS: int = 4                 # shown to the engineer
+    INTAKE_CATALOG_MAX_TERMS_PER_TYPE: int = 10000
+    # Sprint 9 baseline (kept for backward compat — Sprint 9.2 adds
+    # per-field thresholds below that take precedence in the validator).
+    INTAKE_FUZZY_MATCH_THRESHOLD: float = 0.70
+    INTAKE_FUZZY_MATCH_THRESHOLD_CUSTOMER: float = 0.85
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 9.2 — per-field fuzzy-match thresholds + token bump.
+    # The Sprint 9 single-threshold (0.70) was too permissive on short
+    # asset names (e.g. NY4-CORE-RTR-01 vs v-bay-core-rtr scored 0.69
+    # — a near-miss the validator was rubber-stamping). 9.2 raises the
+    # bars per-field so the long-tail asset names that the reproduction
+    # tests proved exist in the corpus actually win their lookups.
+    # The per-field constants below are the operative thresholds; the
+    # legacy INTAKE_FUZZY_MATCH_THRESHOLD constant remains for any
+    # external callers but the new validator code never reads it.
+    # ─────────────────────────────────────────────────────────────
+    INTAKE_FUZZY_THRESHOLD_ASSET: float = 0.85
+    INTAKE_FUZZY_THRESHOLD_ALERT: float = 0.80
+    INTAKE_FUZZY_THRESHOLD_CUSTOMER: float = 0.85
+    # Bumped from Sprint 9's 1500 — evidence-substring fields add tokens.
+    INTAKE_EXTRACTION_MAX_TOKENS: int = 2000
     # Weights MUST sum to 1.00. Declared ClassVar so pydantic treats it as
     # a constant, not a settable field (mutable dicts aren't a valid
     # Settings field type and spec §12 explicitly wants a single source of
