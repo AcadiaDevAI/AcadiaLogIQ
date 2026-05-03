@@ -33,6 +33,26 @@ const initialState = {
   //   { source, category, matched_phrase, active_mode,
   //     active_sub_mode, triggering_query }
   pendingContextBreak: null,
+
+  // ── Sprint 10.4 ─────────────────────────────────────
+  // sessionMetadata: arbitrary per-session metadata the backend
+  // attaches to the chat_sessions response. Currently used to surface
+  // `journey_session_id` so ChatArea can render the "Back to
+  // Resolution Journey" banner when the chat originated from a Stage 4
+  // handoff. Shape: { journey_session_id?: string }.
+  sessionMetadata: {},
+
+  // ── Sprint 11 ───────────────────────────────────────
+  // journeyResumeSessionId: when the chat-side "Return to Stages"
+  // or "Escalate to Tier 2" button is clicked from
+  // JourneyMessageActions, this carries the journey session id
+  // back to LandingRouter. LandingRouter watches it, restores
+  // screen=tier1 with that session, then dispatches
+  // CLEAR_JOURNEY_RESUME so the field doesn't re-fire on every
+  // subsequent state change. Replaces the broken Sprint 10.5
+  // window.location.href = `/tier1/journey/<id>` navigation, which
+  // never worked because the React app has no URL routing.
+  journeyResumeSessionId: null,
 };
 
 function reducer(state, action) {
@@ -75,6 +95,10 @@ function reducer(state, action) {
         ticketId: action.payload.ticket_id ?? state.ticketId,
         issueSummary: action.payload.issue_summary ?? state.issueSummary,
         formData: action.payload.form_data ?? state.formData,
+        // Sprint 10.4 — capture session-level metadata (e.g.
+        // journey_session_id) so ChatArea can render the back-to-
+        // journey banner. Default to {} when the backend omits it.
+        sessionMetadata: action.payload.metadata ?? {},
       };
 
     case "NEW_CHAT":
@@ -92,6 +116,8 @@ function reducer(state, action) {
         issueSummary: null,
         formData: null,
         pendingContextBreak: null,
+        // Sprint 10.4 — clear journey-session linkage on NEW_CHAT.
+        sessionMetadata: {},
       };
 
     case "ADD_USER_MESSAGE":
@@ -192,6 +218,30 @@ function reducer(state, action) {
         selectedMode: action.payload.selectedMode || null,
         subMode: action.payload.subMode || null,
         conversationContextActive: !!action.payload.selectedMode,
+      };
+
+    // ── Sprint 11 — chat → journey return path ──────────
+    // Set the resume sid AND clear selectedMode in one shot so
+    // AppLayout falls through from ChatArea back to LandingRouter,
+    // which can then mount Tier1Workspace for the resumed session.
+    // Payload: { journeySessionId: string }.
+    case "RESUME_JOURNEY":
+      return {
+        ...state,
+        journeyResumeSessionId: action.payload?.journeySessionId || null,
+        // Clear chat mode so AppLayout shows LandingRouter on next render.
+        selectedMode: null,
+        subMode: null,
+        conversationContextActive: false,
+      };
+
+    // Idempotent consumer-side clear. LandingRouter dispatches this
+    // after it has read the resume sid and mounted Tier1Workspace,
+    // so the field doesn't re-fire on subsequent renders.
+    case "CLEAR_JOURNEY_RESUME":
+      return {
+        ...state,
+        journeyResumeSessionId: null,
       };
 
     case "SET_SUB_MODE":

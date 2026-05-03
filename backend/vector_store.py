@@ -1209,9 +1209,26 @@ def save_message_to_session(
     content: str,
     owner_id: str,
     sources: Optional[Dict[str, Any]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
 ) -> str:
+    """Persist a chat turn. Optional `metadata` (Sprint 10.4) is
+    embedded under the namespaced `_session_metadata` key inside
+    sources_json so callers can attach session-level context (e.g.
+    `journey_session_id`) without a schema migration. The chat-session
+    GET endpoint surfaces this back as a top-level `metadata` field."""
     session_id = session_id or uuid.uuid4().hex
     now = _now()
+
+    # Sprint 10.4 — fold per-session metadata into sources_json under
+    # a namespaced key so it round-trips through chat_messages without
+    # requiring a new column on chat_sessions.
+    if metadata:
+        merged_sources: Dict[str, Any] = {"_session_metadata": dict(metadata)}
+        if isinstance(sources, dict):
+            for k, v in sources.items():
+                if k != "_session_metadata":
+                    merged_sources[k] = v
+        sources = merged_sources
 
     with SessionLocal() as db:
         existing = db.execute(
@@ -1327,12 +1344,30 @@ def get_chat_session(session_id: str, owner_id: str) -> Optional[Dict[str, Any]]
         ).mappings().all()
 
     parsed_messages = []
-    for row in messages:
+    # Sprint 10.4 — extract any session-level metadata embedded in the
+    # FIRST message's sources_json under `_session_metadata`. This is
+    # how `journey_session_id` round-trips without a chat_sessions
+    # schema migration.
+    session_metadata: Dict[str, Any] = {}
+    for idx, row in enumerate(messages):
+        raw_sources = row["sources_json"]
+        clean_sources = raw_sources
+        if (
+            idx == 0
+            and isinstance(raw_sources, dict)
+            and isinstance(raw_sources.get("_session_metadata"), dict)
+        ):
+            session_metadata = dict(raw_sources["_session_metadata"])
+            # Strip the private key from the user-visible sources blob.
+            clean_sources = {
+                k: v for k, v in raw_sources.items()
+                if k != "_session_metadata"
+            } or None
         parsed_messages.append(
             {
                 "role": row["role"],
                 "content": row["content"],
-                "sources": row["sources_json"],
+                "sources": clean_sources,
                 "feedback": row["feedback"],
                 "timestamp": row["created_at"].isoformat()
                 if row["created_at"]
@@ -1344,6 +1379,7 @@ def get_chat_session(session_id: str, owner_id: str) -> Optional[Dict[str, Any]]
         "id": session["id"],
         "title": session["title"],
         "messages": parsed_messages,
+        "metadata": session_metadata,
         "created_at": session["created_at"].isoformat()
         if session["created_at"]
         else None,

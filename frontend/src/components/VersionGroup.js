@@ -173,7 +173,7 @@ export default function VersionGroup({ versions, isAdmin, onDelete }) {
                       {isActive && (
                         <span
                           className="text-[9px] px-1 py-0.5 rounded"
-                          style={{ backgroundColor: "#0A3F63", color: "#fff" }}
+                          style={{ backgroundColor: "var(--acadia-primary)", color: "#fff" }}
                         >
                           Active
                         </span>

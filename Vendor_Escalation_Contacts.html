@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<title>Vendor Escalation Contact Reference — Tier-1 NOC Copilot</title>
+<style>
+  :root{
+    --navy:#0b3d91; --ink:#1f2937; --muted:#6b7280; --rule:#cbd5e1;
+    --zebra:#f8fafc; --warn-bg:#fef3c7; --warn-bd:#f59e0b; --warn-tx:#92400e;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0;padding:0;background:#fff;color:var(--ink);
+    font:14px/1.45 -apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;}
+  .page{max-width:780px;margin:32px auto;padding:0 28px 64px;}
+  h1.title{font-size:30px;line-height:1.15;color:var(--navy);margin:0 0 6px;}
+  p.lede{color:#374151;margin:0 0 8px;}
+  p.meta{color:var(--muted);font-size:11px;margin:0 0 24px;}
+  h2{font-size:20px;line-height:1.2;color:var(--navy);margin:28px 0 8px;
+    border-bottom:1px solid #e5e7eb;padding-bottom:6px;}
+  h3{font-size:15px;color:#1f2937;margin:18px 0 6px;}
+  p{margin:6px 0;}
+  table{border-collapse:collapse;width:100%;margin:8px 0 14px;font-size:12.5px;}
+  th{background:var(--navy);color:#fff;text-align:left;padding:7px 8px;font-weight:600;}
+  td{border:0.5px solid var(--rule);padding:6px 8px;vertical-align:top;}
+  tbody tr:nth-child(even){background:var(--zebra);}
+  code,kbd{font-family:Menlo,Consolas,monospace;font-size:12px;
+    background:#f3f4f6;border:1px solid #e5e7eb;border-radius:3px;padding:0 4px;}
+  .note{background:var(--warn-bg);border:1px solid var(--warn-bd);
+    color:var(--warn-tx);border-radius:6px;padding:10px 12px;margin:10px 0 18px;font-size:13px;}
+  .small{color:var(--muted);font-size:11px;margin:6px 0 10px;}
+  .pagebreak{page-break-before:always;}
+  @media print{
+    .page{margin:0;padding:0 18mm;}
+    .noprint{display:none;}
+    h2{break-after:avoid;}
+    table{break-inside:avoid;}
+  }
+  .toolbar{position:sticky;top:0;background:#fff;border-bottom:1px solid #e5e7eb;
+    padding:8px 12px;font-size:12px;color:#374151;display:flex;gap:12px;align-items:center;}
+  .toolbar button{background:var(--navy);color:#fff;border:0;border-radius:4px;
+    padding:6px 10px;cursor:pointer;font-size:12px;}
+</style>
+</head>
+<body>
+<div class="toolbar noprint">
+  <strong>Save as PDF:</strong>
+  <span>Press <kbd>Ctrl</kbd>+<kbd>P</kbd> (or <kbd>Cmd</kbd>+<kbd>P</kbd>) → Destination: <em>Save as PDF</em>.</span>
+  <button onclick="window.print()">Print / Save as PDF</button>
+</div>
+
+<div class="page">
+
+<h1 class="title">Vendor Escalation Contact Reference</h1>
+<p class="lede">Tier-1 NOC Copilot — escalation contact directory for Cisco TAC, customer authentication, entitlement validation, and partner vendor support. Drop this document into the SOP/KB corpus so RAG can surface the right contact during Stage 5 escalation packages.</p>
+<p class="meta">Version 1.0 &nbsp;•&nbsp; Built for Tier-1 Resolution Journey Stage 5 (Escalation Package). Replace <em>[bracketed placeholders]</em> with your customer-specific contract numbers and named contacts before publishing.</p>
+
+<h2>1. Cisco TAC — Global Contact Directory</h2>
+<p>Cisco TAC is the primary escalation path for incidents involving Cisco hardware or software (Catalyst, Nexus, ASR/ISR, ASA/Firepower, Wireless LAN Controllers, Meraki, Webex, etc.). Use the regional number for your operating region; the web portal is preferred for non-P1 cases because it captures attachments cleanly and gives you a Service Request (SR) number immediately.</p>
+<table>
+<thead><tr><th>Channel</th><th>Detail</th><th>When to use</th></tr></thead>
+<tbody>
+<tr><td>Web Portal (preferred)</td><td>https://mycase.cloudapps.cisco.com/case</td><td>Sev 2/3/4 cases, attaching show-tech, follow-ups</td></tr>
+<tr><td>Cisco Support Central</td><td>https://www.cisco.com/c/en/us/support/index.html</td><td>Documentation, downloads, bug search</td></tr>
+<tr><td>Worldwide Phone Index</td><td>https://www.cisco.com/c/en/us/support/web/tsd-cisco-worldwide-contacts.html</td><td>Lookup by country / language</td></tr>
+<tr><td>Smart Account Portal</td><td>https://software.cisco.com</td><td>License entitlement + Smart Licensing</td></tr>
+<tr><td>Email (standard)</td><td>tac@cisco.com</td><td>Last resort; phone or portal preferred</td></tr>
+</tbody>
+</table>
+
+<h3>1.1 Regional TAC Phone Numbers (24×7)</h3>
+<table>
+<thead><tr><th>Region</th><th>Country / Area</th><th>Toll-free / Local</th></tr></thead>
+<tbody>
+<tr><td>Americas</td><td>USA &amp; Canada</td><td>+1 800 553 2447</td></tr>
+<tr><td>Americas</td><td>USA (alt)</td><td>+1 408 526 7209</td></tr>
+<tr><td>Americas</td><td>Brazil</td><td>+55 11 3443 6001</td></tr>
+<tr><td>Americas</td><td>Mexico</td><td>+52 55 5267 4565</td></tr>
+<tr><td>EMEA</td><td>Europe (toll-free)</td><td>+800 9999 9999</td></tr>
+<tr><td>EMEA</td><td>United Kingdom</td><td>+44 800 404 7778</td></tr>
+<tr><td>EMEA</td><td>Germany</td><td>+49 800 187 5505</td></tr>
+<tr><td>EMEA</td><td>France</td><td>+33 805 111 040</td></tr>
+<tr><td>EMEA</td><td>UAE / Middle East</td><td>+971 4 391 1640</td></tr>
+<tr><td>APAC</td><td>India (toll-free)</td><td>+91 000 800 100 1364</td></tr>
+<tr><td>APAC</td><td>India (local)</td><td>+91 80 4855 4000</td></tr>
+<tr><td>APAC</td><td>Singapore</td><td>+65 6317 7777</td></tr>
+<tr><td>APAC</td><td>Australia</td><td>+61 2 8446 7411</td></tr>
+<tr><td>APAC</td><td>Japan</td><td>+81 3 5549 6500</td></tr>
+<tr><td>APAC</td><td>China</td><td>+86 400 880 7711</td></tr>
+</tbody>
+</table>
+<div class="note"><strong>P1 / Severity 1 cases must be opened by phone</strong> — the portal does not page on-call engineers fast enough for total-outage scenarios. Always quote the contract / Smart Account ID at the start of the call so the agent can route immediately.</div>
+
+<div class="pagebreak"></div>
+<h2>2. Customer Authentication Methods (Cisco TAC)</h2>
+<p>Before TAC will discuss any case detail, the agent will validate that the caller is authorised to receive support. These are the accepted authentication paths.</p>
+<table>
+<thead><tr><th>Method</th><th>What you provide</th><th>Notes</th></tr></thead>
+<tbody>
+<tr><td>Cisco Service Contract ID</td><td>Contract number (e.g., 9xxxxxxx) + product Serial Number</td><td>Most common path for customer-owned gear.</td></tr>
+<tr><td>Bill-to ID</td><td>9-digit Bill-to ID + site address</td><td>For multi-site customers.</td></tr>
+<tr><td>Smart Account / Virtual Account</td><td>Smart Account name + your Cisco.com (CCO) ID</td><td>Default path for newer SaaS / DNA / Meraki.</td></tr>
+<tr><td>Partner Authorisation</td><td>Partner Cisco.com ID + customer's contract / serial</td><td>When opening on behalf of a customer.</td></tr>
+<tr><td>Cisco.com (CCO) ID</td><td>Username tied to a contract or Smart Account</td><td>Required for portal SR creation.</td></tr>
+<tr><td>Serial Number Lookup</td><td>Device serial — TAC validates entitlement from it</td><td>Use <code>show inventory</code> / <code>show license udi</code> to fetch.</td></tr>
+<tr><td>Meraki Dashboard org ID</td><td>Org name + dashboard email of authorised admin</td><td>Meraki cases route via dashboard <em>Help → Get help</em>.</td></tr>
+</tbody>
+</table>
+
+<h3>2.1 Information to gather BEFORE you call</h3>
+<table>
+<thead><tr><th>Field</th><th>How to get it</th></tr></thead>
+<tbody>
+<tr><td>Contract / Smart Account ID</td><td>Customer SOP / asset DB / CMDB</td></tr>
+<tr><td>Device Serial Number (SN)</td><td><code>show inventory</code> / <code>show license udi</code></td></tr>
+<tr><td>Hardware model + IOS / NX-OS version</td><td><code>show version</code></td></tr>
+<tr><td>Site / location</td><td>Customer's CMDB or asset register</td></tr>
+<tr><td>Problem severity (P1–P4)</td><td>Per Cisco severity matrix (P1 = total outage)</td></tr>
+<tr><td>Business impact statement</td><td>1-line: who is affected, since when, revenue/SLA risk</td></tr>
+<tr><td>Contact callback details</td><td>Engineer name, mobile, alt email</td></tr>
+</tbody>
+</table>
+
+<div class="pagebreak"></div>
+<h2>3. Entitlement of Support — what each tier covers</h2>
+<p>Cisco support entitlement is contract-driven. Confirm the customer's contract type before promising response SLAs to a stakeholder.</p>
+<table>
+<thead><tr><th>Contract</th><th>Coverage</th><th>Response SLA (P1)</th></tr></thead>
+<tbody>
+<tr><td>SMARTnet (Software + Hardware)</td><td>24×7 TAC, OS updates, advance hardware replacement (NBD / 4HR / 2HR options)</td><td>1 hour</td></tr>
+<tr><td>Software Support Service (SWSS)</td><td>Software TAC + minor/major OS upgrades; no hardware replacement</td><td>1 hour</td></tr>
+<tr><td>Solution Support</td><td>Multi-vendor solution-level case mgmt across Cisco + ecosystem partners</td><td>1 hour</td></tr>
+<tr><td>Partner Support Service (PSS)</td><td>Partner is the front line; partner pulls Cisco TAC backstop as needed</td><td>Per partner SLA</td></tr>
+<tr><td>DNA / Meraki / Webex Subscriptions</td><td>Bundled TAC entitlement for the SaaS subscription term</td><td>Per subscription tier</td></tr>
+<tr><td>No active contract</td><td>Severity 1 outages may be opened on best-effort with billing later; non-P1 cases will be refused or quoted</td><td>Best effort</td></tr>
+</tbody>
+</table>
+
+<h3>3.1 How to verify entitlement before calling</h3>
+<table>
+<thead><tr><th>Step</th><th>Action</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Pull device <strong>Serial Number</strong> from <code>show inventory</code>.</td></tr>
+<tr><td>2</td><td>On cisco.com → <em>Support → Coverage Tools → Service Contract Center</em>, enter the SN.</td></tr>
+<tr><td>3</td><td>If using a Smart Account, log in to <em>software.cisco.com</em> and confirm the Virtual Account holds the device.</td></tr>
+<tr><td>4</td><td>Capture: contract number, end-of-coverage date, replacement SLA, TAC entitlement (24×7 vs 8×5).</td></tr>
+<tr><td>5</td><td>Paste those four fields into the Stage 5 escalation package.</td></tr>
+</tbody>
+</table>
+
+<div class="pagebreak"></div>
+<h2>4. Customer Validation — NOC Engineer Playbook</h2>
+<p>Before any vendor SR is opened on a customer's behalf, the NOC must validate the requesting contact is authorised. This protects the customer from unauthorised configuration changes and protects Acadia from contract violations.</p>
+<table>
+<thead><tr><th>Stage</th><th>Check</th><th>Source of truth</th></tr></thead>
+<tbody>
+<tr><td>Identity</td><td>Caller name matches an authorised contact</td><td>Customer CMDB / contract LOA</td></tr>
+<tr><td>Identity</td><td>Callback number matches the customer's registered DID</td><td>CMDB / Salesforce account</td></tr>
+<tr><td>Authorisation</td><td>Caller is on the 'Authorised To Open Tickets' list</td><td>Customer onboarding form</td></tr>
+<tr><td>Scope</td><td>Affected device / circuit is in the customer's managed inventory</td><td>Asset register</td></tr>
+<tr><td>Severity</td><td>Severity selected matches business-impact wording</td><td>Severity matrix in MSA</td></tr>
+<tr><td>Privacy</td><td>Confirm consent before sharing data with 3rd-party vendor (GDPR / DPA)</td><td>Customer Data Processing Agreement</td></tr>
+</tbody>
+</table>
+
+<h3>4.1 Validation script (call-opening template)</h3>
+<p><em>"Hi, this is &lt;NOC engineer&gt; from Acadia NOC. Can you confirm your full name, the customer site you're calling about, and a callback number? I'll validate you against your authorised-contacts list before we proceed. Once validated, I'll open the case and share the SR number with you."</em></p>
+
+<div class="pagebreak"></div>
+<h2>5. Partner Vendor Escalation Contacts</h2>
+<p>Vendors referenced across the uploaded ticket corpus (file1, file2, file3, goldschema_48t_FictionalData, Hypothetical_goldschema_format). Use these when the root cause is on the partner's side.</p>
+
+<h3>5.1 Aruba Networking / HPE — ClearPass, CPPM, Wireless</h3>
+<table>
+<thead><tr><th>Channel</th><th>Detail</th></tr></thead>
+<tbody>
+<tr><td>Support Portal</td><td>https://asp.arubanetworks.com (Aruba Support Portal)</td></tr>
+<tr><td>HPE / Aruba Phone (US/Canada)</td><td>+1 800 943 4526</td></tr>
+<tr><td>HPE / Aruba Phone (UK)</td><td>+44 207 432 0203</td></tr>
+<tr><td>HPE / Aruba Phone (India)</td><td>+91 80 6764 4000</td></tr>
+<tr><td>Email (escalation)</td><td>support@arubanetworks.com</td></tr>
+<tr><td>Authentication</td><td>Aruba Passport ID + Support Contract ID + Device serial</td></tr>
+<tr><td>When to call</td><td>ClearPass / CPPM RADIUS rejects, AP-on-controller faults, AirWave, HPE switch failures</td></tr>
+</tbody>
+</table>
+
+<h3>5.2 Microsoft — Premier / Unified Support</h3>
+<table>
+<thead><tr><th>Channel</th><th>Detail</th></tr></thead>
+<tbody>
+<tr><td>Support Portal</td><td>https://support.microsoft.com/en-us/supportforbusiness</td></tr>
+<tr><td>Premier / Unified phone (US)</td><td>+1 800 936 3100</td></tr>
+<tr><td>Premier / Unified phone (UK)</td><td>+44 203 027 6039</td></tr>
+<tr><td>Premier / Unified phone (India)</td><td>+91 80 4010 3000</td></tr>
+<tr><td>Authentication</td><td>Access ID + Contract ID (or) Tenant ID for M365 / Azure</td></tr>
+<tr><td>Escalation tier</td><td>Customer's named TAM (Technical Account Manager)</td></tr>
+<tr><td>When to call</td><td>Azure AD / Entra auth issues, M365 mail flow, Windows Server, Hyper-V, Intune</td></tr>
+</tbody>
+</table>
+
+<h3>5.3 Managed Service Partners (referenced in the corpus)</h3>
+<table>
+<thead><tr><th>Partner</th><th>Role in your tickets</th><th>Escalation path</th></tr></thead>
+<tbody>
+<tr><td>Wipro</td><td>Multi-vendor investigation partner (auth + AD)</td><td>Customer's named Wipro Service Delivery Manager (SDM); add via [DL]</td></tr>
+<tr><td>Crosscom</td><td>Cisco field hands-and-eyes / smart-hands at customer sites</td><td>Crosscom dispatch desk + customer's installed-base FSE</td></tr>
+</tbody>
+</table>
+<p class="small">Wipro and Crosscom are referenced in the goldschema corpus but contact details are customer-specific. Capture the named contacts during onboarding and replace the placeholders below.</p>
+
+<div class="pagebreak"></div>
+<h2>6. Internal Escalation Matrix (Acadia NOC) — TEMPLATE</h2>
+<p>Replace bracketed placeholders with the actual people/DLs in your runbook before publishing this PDF to RAG.</p>
+<table>
+<thead><tr><th>Tier</th><th>Owner</th><th>Trigger</th><th>Contact</th></tr></thead>
+<tbody>
+<tr><td>Tier-1 NOC</td><td>[NOC Shift Lead]</td><td>P3/P4 default; first 30 min of any incident</td><td>[noc-shift-lead@acadia]</td></tr>
+<tr><td>Tier-2 NOC</td><td>[Senior Engineer on call]</td><td>No progress in 30 min on P2/P3; any P1</td><td>[t2-oncall@acadia]</td></tr>
+<tr><td>Tier-3 / SME</td><td>[Routing/Wireless/Voice SME]</td><td>Vendor case opened + technical deadlock</td><td>[sme-distribution-list]</td></tr>
+<tr><td>Service Delivery Mgr</td><td>[Customer SDM]</td><td>Any P1; SLA breach risk; customer-comms</td><td>[sdm@acadia]</td></tr>
+<tr><td>Major Incident Mgr</td><td>[MIM on call]</td><td>P1 &gt; 30 min; multi-customer impact</td><td>[mim@acadia]</td></tr>
+<tr><td>Vendor TAM</td><td>[Cisco / Aruba / Microsoft TAM]</td><td>Vendor SR stuck &gt; 4 hours on P1</td><td>[tam-name@vendor]</td></tr>
+</tbody>
+</table>
+
+<h2>7. Quick Reference — SR Opening Checklist</h2>
+<table>
+<thead><tr><th>#</th><th>Item</th><th>Captured?</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>Customer name + site</td><td>☐</td></tr>
+<tr><td>2</td><td>Authorised caller validated</td><td>☐</td></tr>
+<tr><td>3</td><td>Severity (P1–P4) + business impact statement</td><td>☐</td></tr>
+<tr><td>4</td><td>Affected device(s): hostname, model, SN, IOS version</td><td>☐</td></tr>
+<tr><td>5</td><td>Contract / Smart Account ID confirmed</td><td>☐</td></tr>
+<tr><td>6</td><td>Symptoms summary + first-occurrence timestamp</td><td>☐</td></tr>
+<tr><td>7</td><td>Steps already attempted (link to Stage 5 package)</td><td>☐</td></tr>
+<tr><td>8</td><td>Diagnostics attached (show-tech, packet capture, logs)</td><td>☐</td></tr>
+<tr><td>9</td><td>Vendor SR number recorded back into NOC ticket</td><td>☐</td></tr>
+<tr><td>10</td><td>Internal escalation tier engaged in parallel</td><td>☐</td></tr>
+</tbody>
+</table>
+
+<div class="pagebreak"></div>
+<h2>8. Where these contacts apply — corpus cross-reference</h2>
+<p>Mapping common incident classes from your uploaded files to the right vendor in this directory.</p>
+<table>
+<thead><tr><th>Incident class (from your tickets)</th><th>Example INC</th><th>Primary escalation</th></tr></thead>
+<tbody>
+<tr><td>EdgeRouter — BGP session flap (Hardware)</td><td>INC-ALPHA-005</td><td>Cisco TAC (§1) — Smart Account verify (§3)</td></tr>
+<tr><td>WirelessAP — WiFi auth failure</td><td>INC-ALPHA-008 / INC-ALPHA-011</td><td>Aruba ClearPass (§5.1) → Cisco TAC if controller side</td></tr>
+<tr><td>Site network — total connectivity loss</td><td>INC-ALPHA-012 / INC-ALPHA-013</td><td>Cisco TAC P1 by phone (§1.1) + WAN provider in parallel</td></tr>
+<tr><td>Telephony — fax line outage</td><td>INC-ALPHA-001</td><td>Telco SP first; CUCM/Cisco voice TAC if PBX-side</td></tr>
+<tr><td>Identity / RADIUS reject</td><td>(file3 Auth incidents)</td><td>Aruba ClearPass (§5.1) + Microsoft if Entra-backed</td></tr>
+</tbody>
+</table>
+<div class="note"><strong>RAG ingestion tip:</strong> When you upload this PDF, set <em>doc_kind=sop</em> so the Stage-4 Search KB / SOP handoff finds it. The Tier-1 escalation package builder (<code>stage5_escalation.py</code>) can then cite this document by name in the "who to contact" section of the bundle.</div>
+
+<p class="small">All vendor phone numbers and URLs in this document are taken from each vendor's public support directory and are subject to change. Re-verify regional toll-free numbers at least quarterly. Contract numbers, named TAMs, and internal DLs are placeholders — fill them in from your customer onboarding records before publishing this PDF into the RAG corpus.</p>
+
+</div>
+</body>
+</html>

@@ -11,7 +11,8 @@ import SeverityChipSelector from "./SeverityChipSelector";
 import AssetAutocomplete from "./AssetAutocomplete";
 import { useTier1Theme } from "../../theme/ThemeProvider";
 // Sprint 9 — universal intake (paste-from-anywhere mode).
-import SourceToggle from "./intake/SourceToggle";
+// Sprint 11 — Proactive | Reactive split-view; ModeToggle removed
+// because both modes are visible side-by-side now.
 import UniversalIntakePanel from "./intake/UniversalIntakePanel";
 
 /**
@@ -40,38 +41,79 @@ export default function Tier1IntakeForm(props) {
 
 
 function SourceAwareIntake(props) {
-  const [source, setSource] = useState("alert");
+  // Sprint 11 — Side-by-side layout. Replaces the earlier toggle UX
+  // (ModeToggle Proactive/Reactive) with a 2-column grid:
+  //   left  = Proactive — the structured Alert form
+  //   right = Reactive — paste-message box; extraction pre-fills the
+  //           Alert form on the left
+  // On viewports < md the two columns stack. Picking a Reactive card
+  // pre-fills the Proactive form so the engineer sees their edited
+  // intake without needing to switch panes.
   const [prefill, setPrefill] = useState(null);
 
   const handleCardPicked = (filled) => {
     setPrefill({ ...filled, _stamp: Date.now() });
-    // Auto-switch back to "alert" so the existing form fields are
-    // visible and the engineer can review/edit before clicking Analyze.
-    setSource("alert");
   };
 
   const InnerForm = TIER1_UX_FIXES_ON ? ProgressiveIntakeForm : ClassicIntakeForm;
 
   return (
     <div className="flex-1 overflow-y-auto px-4 py-6 t-bg-primary">
-      <div className="w-full" style={{ maxWidth: 720, margin: "0 auto" }}>
-        <div style={{ marginBottom: 16, display: "flex", justifyContent: "center" }}>
-          <SourceToggle
-            value={source}
-            onChange={setSource}
-            disabled={!!props.busy}
-          />
+      <div className="w-full" style={{ maxWidth: 1280, margin: "0 auto" }}>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {/* Proactive — structured alert form */}
+          <div>
+            <div className="text-center mb-3">
+              <h2
+                className="t-text"
+                style={{ fontSize: 18, fontWeight: 600, margin: 0 }}
+              >
+                Proactive
+              </h2>
+              <p
+                className="t-text-muted"
+                style={{ fontSize: 12, margin: "2px 0 0" }}
+              >
+                Monitoring or alert-triggered intake
+              </p>
+            </div>
+            <InnerForm {...props} prefill={prefill} />
+          </div>
+
+          {/* Reactive — paste box; output pre-fills Proactive on the left */}
+          <div>
+            <div className="text-center mb-3">
+              <h2
+                className="t-text"
+                style={{ fontSize: 18, fontWeight: 600, margin: 0 }}
+              >
+                Reactive
+              </h2>
+              <p
+                className="t-text-muted"
+                style={{ fontSize: 12, margin: "2px 0 0" }}
+              >
+                Customer-reported via email, phone, portal, chat or note
+              </p>
+            </div>
+            <UniversalIntakePanel
+              source="note"
+              sessionId={props.sessionId}
+              onCardPicked={handleCardPicked}
+              header="Tell us what's happening"
+              helperText={
+                "Provide device type, alert type, and a brief summary so we"
+                + " can auto-fill the Proactive form on the left. Pick an"
+                + " interpretation card and the form populates instantly."
+              }
+              placeholder={
+                "e.g., V-Desktop Environment is reporting Desktop Slowness"
+                + " for customer Acme since 9:30 AM. Users see lag opening"
+                + " applications; ping to gateway is normal."
+              }
+            />
+          </div>
         </div>
-
-        {source !== "alert" && (
-          <UniversalIntakePanel
-            source={source}
-            sessionId={props.sessionId}
-            onCardPicked={handleCardPicked}
-          />
-        )}
-
-        <InnerForm {...props} prefill={prefill} />
       </div>
     </div>
   );
@@ -145,10 +187,10 @@ function ClassicIntakeForm({
     <div className="flex-1 flex items-center justify-center px-4 py-8 t-bg-primary">
       <div className="w-full max-w-3xl">
         <div className="text-center mb-6">
-          <h1 className="text-xl font-bold t-text">Tier-1 Alert Copilot</h1>
+          <h1 className="text-xl font-bold t-text">Tier-1 Alert Triage</h1>
           <p className="t-text-muted text-sm mt-1">
-            Enter what you see. The copilot retrieves the closest historical
-            incident and returns an 8-section troubleshooting answer.
+            Describe the incident below. We&apos;ll match it to the closest
+            historical ticket and return an 8-section troubleshooting answer.
           </p>
         </div>
 
@@ -256,7 +298,7 @@ function ClassicIntakeForm({
               >
                 <Input.TextArea
                   rows={3}
-                  placeholder="Anything else the copilot should see (optional)"
+                  placeholder="Anything else worth noting (optional)"
                   maxLength={2000}
                   showCount
                 />
@@ -274,8 +316,8 @@ function ClassicIntakeForm({
                 disabled={!canSubmit || busy}
                 loading={busy}
                 style={{
-                  backgroundColor: "#0A3F63",
-                  borderColor: "#0A3F63",
+                  backgroundColor: "var(--acadia-primary)",
+                  borderColor: "var(--acadia-primary)",
                   minWidth: 180,
                 }}
               >
@@ -355,9 +397,9 @@ function ProgressiveIntakeForm({
     minWidth: 180,
     borderRadius: tokens.radiusMd || 12,
     background: isModern
-      ? tokens.gradientAccent || "#0A3F63"
-      : "#0A3F63",
-    borderColor: isModern ? "transparent" : "#0A3F63",
+      ? tokens.gradientAccent || "var(--acadia-primary)"
+      : "var(--acadia-primary)",
+    borderColor: isModern ? "transparent" : "var(--acadia-primary)",
   };
 
   return (
@@ -376,9 +418,8 @@ function ProgressiveIntakeForm({
             What&apos;s happening?
           </h1>
           <p className="t-text-muted text-sm mt-2" style={{ margin: "6px 0 0" }}>
-            Enter what you see. The copilot retrieves the closest
-            historical incident and returns an 8-section troubleshooting
-            answer.
+            Describe the incident below. We&apos;ll match it to the closest
+            historical ticket and return an 8-section troubleshooting answer.
           </p>
         </div>
 

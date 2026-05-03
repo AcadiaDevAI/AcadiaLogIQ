@@ -56,7 +56,7 @@ export default function AuthGate({ children }) {
                   width: "32px",
                   height: "32px",
                   border: "3px solid #e5e7eb",
-                  borderTopColor: "#0A3F63",
+                  borderTopColor: "var(--acadia-primary)",
                   borderRadius: "50%",
                   animation: "spin 0.8s linear infinite",
                 }}

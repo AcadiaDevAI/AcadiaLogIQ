@@ -183,6 +183,17 @@ class Tier1Contact(BaseModel):
     escalation_level: Optional[str] = None
 
 
+class Tier1DirectoryContact(BaseModel):
+    """One-line contact recommendation sourced from the Acadia Escalation
+    Contact Directory. `label` is the bucket (Customer / Vendor / Internal /
+    Directory), `name` is the contact or team, `detail` is the one-line
+    summary (phone, email, portal, entitlement)."""
+    label: str
+    name: Optional[str] = None
+    detail: Optional[str] = None
+    source: str = "Acadia Escalation Contact Directory"
+
+
 class Tier1EscalationPackage(BaseModel):
     summary: str = ""
     priority: str = ""
@@ -192,6 +203,7 @@ class Tier1EscalationPackage(BaseModel):
     escalation_path: List[str] = Field(default_factory=list)
     customer_contacts: List[Tier1Contact] = Field(default_factory=list)
     vendor_contacts: List[Tier1Contact] = Field(default_factory=list)
+    directory_contacts: List[Tier1DirectoryContact] = Field(default_factory=list)
     what_was_tried: List[str] = Field(default_factory=list)
     recommended_next_action: Optional[str] = None
     relevant_tickets: List[str] = Field(default_factory=list)

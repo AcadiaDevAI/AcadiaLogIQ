@@ -9,9 +9,12 @@ import ExplainRecommendationCard from "./ExplainRecommendationCard";
 import SessionTimer from "./SessionTimer";
 import SkeletonCard from "./SkeletonCard";
 import StuckDetectionModal from "./StuckDetectionModal";
-import ThemeToggle from "./ThemeToggle";
-import { TIER1_UX_FIXES_ON } from "./tier1Constants";
+import { TIER1_JOURNEY_ON, TIER1_UX_FIXES_ON } from "./tier1Constants";
 import Tier1ThemeProvider from "../../theme/ThemeProvider";
+
+// Sprint 10 — Resolution Journey replaces the answer-card path when
+// the build-time flag is on AND the backend returned a session_id.
+import ResolutionJourney from "./journey/ResolutionJourney";
 
 import useTier1Session from "../../hooks/useTier1Session";
 import {
@@ -222,9 +225,34 @@ function Tier1WorkspaceInner({ result, onNewAlert }) {
     [],
   );
 
+  // Sprint 10 — when the journey flag is on AND the backend returned
+  // a session_id, render the Resolution Journey in place of the legacy
+  // answer-card + chips path. The legacy branch below stays untouched
+  // so flag-off behaviour is byte-identical.
+  if (TIER1_JOURNEY_ON && result && result.session_id) {
+    return (
+      <div className="flex-1 overflow-y-auto px-4 py-6 t-bg-primary">
+        <div className="w-full max-w-6xl mx-auto">
+          <div className="flex justify-between items-center mb-3">
+            <Space>
+              <SessionTimer elapsedSeconds={tier1.elapsed} />
+            </Space>
+            <Space>
+              <Button onClick={onNewAlert}>Start a new alert</Button>
+            </Space>
+          </div>
+          <ResolutionJourney
+            sessionId={result.session_id}
+            onNewAlert={onNewAlert}
+          />
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="flex-1 overflow-y-auto px-4 py-6 t-bg-primary">
-      <div className="w-full max-w-3xl mx-auto">
+      <div className="w-full max-w-6xl mx-auto">
         <div className="flex justify-between items-center mb-3">
           <Space>
             <SessionTimer elapsedSeconds={tier1.elapsed} />
@@ -236,7 +264,6 @@ function Tier1WorkspaceInner({ result, onNewAlert }) {
             )}
           </Space>
           <Space>
-            <ThemeToggle />
             <Button onClick={onNewAlert}>Start a new alert</Button>
           </Space>
         </div>

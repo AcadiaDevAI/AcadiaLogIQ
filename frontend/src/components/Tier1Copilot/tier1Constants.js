@@ -87,7 +87,44 @@ export const INTAKE_SOURCES = [
   { value: "note", label: "Note" },
 ];
 
+// Sprint 11 — Top-level intake mode. Replaces the 6-button source
+// picker (Alert/Email/Phone/Portal/Chat/Note) with a 2-button choice:
+//   proactive → Alert (machine-generated monitoring signal)
+//   reactive  → Email / Phone / Portal / Chat / Note (human-reported)
+// The original INTAKE_SOURCES list is preserved as the sub-channel
+// catalog inside the Reactive panel — backend extraction templates
+// still key off the channel string, so we keep the signal.
+export const INTAKE_MODES = [
+  { value: "proactive", label: "Proactive", source: "alert" },
+  { value: "reactive", label: "Reactive", defaultSource: "email" },
+];
+
+// Reactive sub-channel options — every INTAKE_SOURCES entry except
+// "alert" (which is the Proactive mode itself).
+export const REACTIVE_SUB_CHANNELS = INTAKE_SOURCES.filter(
+  (s) => s.value !== "alert",
+);
+
 export const INTAKE_MAX_RAW_CHARS = 10000;
+
+// ─────────────────────────────────────────────────────────────
+// Sprint 10 — Tier-1 Resolution Journey.
+// Flag-off path: Tier1Workspace renders the existing Sprint 6/7/8
+// answer-card + chips path byte-identical. Flag-on: ResolutionJourney
+// replaces the answer card after Analyze.
+// ─────────────────────────────────────────────────────────────
+export const TIER1_JOURNEY_ON =
+  process.env.REACT_APP_LOGIQ_TIER1_JOURNEY_FRONTEND === "true";
+
+export const STAGE_LABELS = {
+  stage_0: "Confidence Lead",
+  stage_1a: "Smoking Gun",
+  stage_1b: "Do Not Chase",
+  stage_2: "Historical Matches & Possible Causes",
+  stage_3: "The Troubleshooting Approach",
+  stage_4: "Search KB / SOP",
+  stage_5: "Escalation Package",
+};
 
 // Neutralised confidence copy (§3). Primary + subline so the banner
 // can show calibration without the harsh "Weak" language that eroded

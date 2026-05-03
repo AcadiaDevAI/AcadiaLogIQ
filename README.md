@@ -926,3 +926,17 @@ No formal migration tool (Alembic is in requirements but not wired). Schema chan
 8. **Batch upload** — ZIP file containing multiple documents
 9. **Document viewer** — preview uploaded documents in the UI
 10. **Admin dashboard** — usage analytics, cost tracking, quality metrics
+
+
+How to run: backend
+
+ python -m uvicorn backend.api:app --host 0.0.0.0 --port 8000 --reload 2>&1 | Tee-Object logs\backend.log  
+
+ Forntend:
+ Cd frontend
+
+ npm install
+
+ npm run build
+
+ nmp start

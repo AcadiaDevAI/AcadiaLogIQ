@@ -71,7 +71,7 @@ export default function FingerprintInputScreen({ onMatch, onNoMatch, onSkip }) {
             alt="LogIQ"
             className="h-12 mx-auto mb-3 object-contain"
           />
-          <h1 className="text-xl font-bold t-text">Expert Troubleshooting Copilot</h1>
+          {/* <h1 className="text-xl font-bold t-text">Expert Troubleshooting Copilot</h1> */}
           <p className="t-text-muted text-sm mt-1">
             Start with a fingerprint code if you have one
           </p>
@@ -121,8 +121,8 @@ export default function FingerprintInputScreen({ onMatch, onNoMatch, onSkip }) {
             disabled={!canSubmit}
             loading={submitting}
             style={{
-              backgroundColor: "#0A3F63",
-              borderColor: "#0A3F63",
+              backgroundColor: "var(--acadia-primary)",
+              borderColor: "var(--acadia-primary)",
               minWidth: 160,
             }}
           >

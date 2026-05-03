@@ -25,7 +25,10 @@ def get_cached_answer(signature_hash: str) -> Optional[Dict[str, Any]]:
     Also returns None if the row exists but is past its expires_at
     timestamp — stale reads are treated as misses (no in-line DELETE;
     a background sweep can harvest later).
-    """
+
+    Sprint 10.3 — return value now includes `top_5_match_ids`. Empty
+    list when the row was cached before migration 041 ran (the column
+    has DEFAULT '{}' so reads never NULL out)."""
     if not signature_hash:
         return None
     try:
@@ -36,7 +39,7 @@ def get_cached_answer(signature_hash: str) -> Optional[Dict[str, Any]]:
                 text(
                     """
                     SELECT answer_json, confidence, matched_chunk_id,
-                           alert_signature, expires_at
+                           alert_signature, top_5_match_ids, expires_at
                     FROM tier1_answer_cache
                     WHERE signature_hash = :h
                     """
@@ -71,6 +74,11 @@ def get_cached_answer(signature_hash: str) -> Optional[Dict[str, Any]]:
         "confidence": row["confidence"],
         "matched_chunk_id": row["matched_chunk_id"],
         "alert_signature": row["alert_signature"],
+        # Sprint 10.3 — list() cast at the boundary per spec §8 type
+        # discipline. psycopg returns TEXT[] as a list; the cast is
+        # defensive against future driver changes that might return
+        # tuples or numpy arrays.
+        "top_5_match_ids": list(row.get("top_5_match_ids") or []),
     }
 
 
@@ -81,9 +89,17 @@ def set_cached_answer(
     answer: Dict[str, Any],
     confidence: str,
     matched_chunk_id: Optional[str],
+    top_5_match_ids: Optional[list] = None,
     ttl_days: Optional[int] = None,
 ) -> bool:
-    """Upsert a cache row. Returns True on success, False on error."""
+    """Upsert a cache row. Returns True on success, False on error.
+
+    Sprint 10.3 — `top_5_match_ids` is now persisted alongside the
+    answer payload so cache hits can repopulate the new session's
+    cohort. Without this, /tier1/journey/{sid}/initial sees an empty
+    cohort on every cache hit and renders blank panels (the structural
+    bug 10.3 closes per spec §3).
+    """
     if not signature_hash or not answer:
         return False
     ttl = int(ttl_days if ttl_days is not None else settings.TIER1_CACHE_TTL_DAYS)
@@ -96,17 +112,20 @@ def set_cached_answer(
                     """
                     INSERT INTO tier1_answer_cache (
                         signature_hash, alert_signature, answer_json,
-                        matched_chunk_id, confidence, created_at, expires_at
+                        matched_chunk_id, confidence, top_5_match_ids,
+                        created_at, expires_at
                     )
                     VALUES (
                         :h, :sig, CAST(:a AS JSONB),
-                        :mcid, :conf, NOW(), NOW() + (:ttl || ' days')::interval
+                        :mcid, :conf, :top5,
+                        NOW(), NOW() + (:ttl || ' days')::interval
                     )
                     ON CONFLICT (signature_hash)
                     DO UPDATE SET
                         answer_json = EXCLUDED.answer_json,
                         matched_chunk_id = EXCLUDED.matched_chunk_id,
                         confidence = EXCLUDED.confidence,
+                        top_5_match_ids = EXCLUDED.top_5_match_ids,
                         created_at = NOW(),
                         expires_at = NOW() + (:ttl || ' days')::interval
                     """
@@ -117,6 +136,10 @@ def set_cached_answer(
                     "a": json.dumps(answer, ensure_ascii=False),
                     "mcid": matched_chunk_id,
                     "conf": confidence,
+                    # Sprint 10.3 — list() cast at the boundary per spec
+                    # §8 type discipline. SQLAlchemy + psycopg3 + TEXT[]
+                    # is finicky; tuples and numpy arrays fail silently.
+                    "top5": list(top_5_match_ids or []),
                     "ttl": ttl,
                 },
             )

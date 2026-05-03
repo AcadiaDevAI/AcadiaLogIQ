@@ -853,6 +853,19 @@ class Settings(BaseSettings):
     FINGERPRINT_MIN_QUALITY_SCORE: int = 3
 
     # ─────────────────────────────────────────────────────────────
+    # Sprint 11 — Journey-aware retrieval context for /ask.
+    # When ON, /ask looks up the chat session's journey_session_id,
+    # loads the originating ticket's intake (severity / asset_name /
+    # alert_type / customer / ...), and prepends a compact context
+    # prefix to the BM25 / keyword query so retrieval narrows toward
+    # the right corner of the corpus when the chat originated from a
+    # Stage 0 / Stage 3 "Ask in chat" link.
+    # The LLM prompt + the visible chat message are NOT touched.
+    # Flag-off path: /ask behaves bit-for-bit as before.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_JOURNEY_CHAT_RETRIEVAL_CONTEXT: bool = True
+
+    # ─────────────────────────────────────────────────────────────
     # Sprint 5 — Template-First Expert Copilot + Answer Cache
     # Flag-off path: /fingerprint/lookup runs the full Sprint 4 LLM
     # pipeline end-to-end (byte-identical). Flag-on + gold-schema JSON
@@ -904,6 +917,22 @@ class Settings(BaseSettings):
     # response shapes and ranking weights are untouched.
     # ─────────────────────────────────────────────────────────────
     LOGIQ_TIER1_UX_FIXES_BACKEND: bool = False
+
+    # ─────────────────────────────────────────────────────────────
+    # Sprint 10 — Tier-1 Resolution Journey
+    # Flag-off path: /tier1/journey/* router not mounted (returns 404),
+    # Tier1Workspace renders the existing Sprint 6/7/8 answer-card path
+    # unchanged. Flag-on path: GET /initial returns Stage 0 + 1A + 1B
+    # always-visible; Stages 2-5 lazy-fetched per labeled next-stage
+    # button. Helpful clicks log telemetry to tier1_journey_events
+    # (migration 040) but never advance the flow.
+    # ─────────────────────────────────────────────────────────────
+    LOGIQ_TIER1_JOURNEY_BACKEND: bool = False
+    TIER1_JOURNEY_TOP_N: int = 5
+    TIER1_JOURNEY_LOOKBACK_MONTHS: int = 18
+    TIER1_JOURNEY_LLM_POLISH: bool = False
+    TIER1_JOURNEY_BUNDLE_CACHE_TTL_SECONDS: int = 600
+    TIER1_JOURNEY_STAGE0_DOMINANT_THRESHOLD: float = 0.4
 
     # ─────────────────────────────────────────────────────────────
     # Sprint 9 — Universal Intake (Email/Phone/Portal/Chat/Note)

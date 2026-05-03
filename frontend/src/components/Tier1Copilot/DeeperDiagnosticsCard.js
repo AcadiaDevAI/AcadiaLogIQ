@@ -296,8 +296,8 @@ export default function DeeperDiagnosticsCard({
             onClick={handleContinue}
             type="primary"
             style={{
-              backgroundColor: isModern ? undefined : "#0A3F63",
-              borderColor: isModern ? "transparent" : "#0A3F63",
+              backgroundColor: isModern ? undefined : "var(--acadia-primary)",
+              borderColor: isModern ? "transparent" : "var(--acadia-primary)",
               background: isModern ? tokens.gradientAccent : undefined,
             }}
           >

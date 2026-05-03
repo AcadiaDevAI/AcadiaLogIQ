@@ -166,8 +166,8 @@ export default function CustomerForm({ onSeed }) {
                 htmlType="submit"
                 loading={submitting}
                 style={{
-                  backgroundColor: "#0A3F63",
-                  borderColor: "#0A3F63",
+                  backgroundColor: "var(--acadia-primary)",
+                  borderColor: "var(--acadia-primary)",
                   minWidth: 140,
                 }}
               >

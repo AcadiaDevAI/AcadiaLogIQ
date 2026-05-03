@@ -119,6 +119,71 @@ class CacheGetSetTests(unittest.TestCase):
             matched_chunk_id=None,
         ))
 
+    def test_set_cached_answer_persists_top5_ids(self):
+        """Sprint 10.3 — set_cached_answer must accept top_5_match_ids
+        and bind it as the :top5 SQL param so cache hits can repopulate
+        the new session's cohort. Without this, the journey sees an
+        empty cohort on every cache hit."""
+        from backend.tier1_copilot import cache
+        fake_conn = mock.MagicMock()
+        fake_conn.__enter__ = mock.MagicMock(return_value=fake_conn)
+        fake_conn.__exit__ = mock.MagicMock(return_value=False)
+        fake_engine = mock.MagicMock()
+        fake_engine.begin.return_value = fake_conn
+        with mock.patch("backend.db.connection.engine", fake_engine):
+            ok = cache.set_cached_answer(
+                signature_hash="hash-top5",
+                alert_signature="p2 | a | b",
+                answer={"hello": "world"},
+                confidence="High",
+                matched_chunk_id="chunk-1",
+                top_5_match_ids=["chunk-1", "chunk-2", "chunk-3",
+                                 "chunk-4", "chunk-5"],
+            )
+        self.assertTrue(ok)
+        sql_call = fake_conn.execute.call_args
+        sql_str = str(sql_call.args[0])
+        self.assertIn("top_5_match_ids", sql_str)
+        params = sql_call.args[1]
+        # List cast at SQL boundary per spec §8 — psycopg + TEXT[] is
+        # finicky; tuples and numpy arrays fail silently.
+        self.assertIsInstance(params["top5"], list)
+        self.assertEqual(
+            params["top5"],
+            ["chunk-1", "chunk-2", "chunk-3", "chunk-4", "chunk-5"],
+        )
+
+    def test_get_cached_answer_returns_top5_ids(self):
+        """Sprint 10.3 — round-trip read of top_5_match_ids on cache
+        hit. Cached payload returns a list of the cohort chunk_ids the
+        original answer was derived from."""
+        from datetime import datetime, timedelta, timezone
+        from backend.tier1_copilot import cache
+
+        row = {
+            "answer_json": {"x": 1},
+            "confidence": "High",
+            "matched_chunk_id": "c1",
+            "alert_signature": "s",
+            "top_5_match_ids": ["c1", "c2", "c3", "c4", "c5"],
+            "expires_at": datetime.now(timezone.utc) + timedelta(days=7),
+        }
+        fake_result = mock.MagicMock()
+        fake_result.first.return_value = row
+        fake_conn = mock.MagicMock()
+        fake_conn.execute.return_value.mappings.return_value = fake_result
+        fake_conn.__enter__ = mock.MagicMock(return_value=fake_conn)
+        fake_conn.__exit__ = mock.MagicMock(return_value=False)
+        fake_engine = mock.MagicMock()
+        fake_engine.connect.return_value = fake_conn
+        with mock.patch("backend.db.connection.engine", fake_engine):
+            out = cache.get_cached_answer("hash")
+        self.assertIsNotNone(out)
+        self.assertIn("top_5_match_ids", out)
+        self.assertIsInstance(out["top_5_match_ids"], list)
+        self.assertEqual(out["top_5_match_ids"],
+                         ["c1", "c2", "c3", "c4", "c5"])
+
     def test_signature_collision_avoidance(self):
         """Two alerts with same required triple but different optional
         fields must produce different signature_hash values (regression

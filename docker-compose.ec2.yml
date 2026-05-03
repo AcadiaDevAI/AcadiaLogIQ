@@ -82,6 +82,9 @@ services:
           # Sprint 9 — Universal Intake (dynamic form generation based on API-driven schema)
         REACT_APP_LOGIQ_UNIVERSAL_INTAKE_FRONTEND: ${REACT_APP_LOGIQ_UNIVERSAL_INTAKE_FRONTEND:-true}
 
+          # Sprint 10 — Tier-1 Resolution Journey (replaces answer-card path when on)
+        REACT_APP_LOGIQ_TIER1_JOURNEY_FRONTEND: ${REACT_APP_LOGIQ_TIER1_JOURNEY_FRONTEND:-false}
+
         # BUILD_TIMESTAMP is exported by redeploy.sh before build.
         # Changing this arg invalidates the build stage cache and
         # guarantees a fresh bundle hash + visible version stamp.

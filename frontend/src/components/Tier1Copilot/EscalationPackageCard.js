@@ -42,7 +42,7 @@ export default function EscalationPackageCard({ pkg, onClose }) {
     <Card
       ref={scrollRef}
       title={
-        <div className="flex justify-between items-center">
+        <div className="flex justify-between items-center"> 
           <span>Escalation Package</span>
           <Space>
             <Tag color="blue">{pkg.priority || "P?"}</Tag>
@@ -120,6 +120,58 @@ export default function EscalationPackageCard({ pkg, onClose }) {
         </div>
       )}
 
+      {Array.isArray(pkg.directory_contacts) &&
+        pkg.directory_contacts.length > 0 && (
+          <div
+            className="mb-3"
+            style={{
+              backgroundColor: isModern
+                ? tokens.surfaceElevated
+                : "var(--bg-primary)",
+              border: `1px solid ${
+                isModern ? tokens.borderSubtle : "var(--border-color)"
+              }`,
+              borderLeft: "3px solid var(--acadia-primary)",
+              borderRadius: 6,
+              padding: "10px 12px",
+            }}
+          >
+            <div className="t-text font-semibold text-sm mb-1">
+              Recommended contact
+              <span
+                className="t-text-muted"
+                style={{ fontWeight: 400, marginLeft: 6, fontSize: 11 }}
+              >
+                (Acadia Escalation Directory)
+              </span>
+            </div>
+            <ul
+              className="t-text text-sm"
+              style={{ listStyle: "none", paddingLeft: 0, margin: 0 }}
+            >
+              {pkg.directory_contacts.map((d, i) => (
+                <li key={i} style={{ marginBottom: 4 }}>
+                  {d.label && (
+                    <Tag
+                      color="geekblue"
+                      style={{ marginRight: 6, fontSize: 11 }}
+                    >
+                      {d.label}
+                    </Tag>
+                  )}
+                  {d.name && <strong>{d.name}</strong>}
+                  {d.detail && (
+                    <span className="t-text-muted">
+                      {d.name ? " — " : ""}
+                      {d.detail}
+                    </span>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </div>
+        )}
+
       <Divider className="my-3" />
 
       <div className="flex justify-between items-center mb-2">
@@ -130,7 +182,7 @@ export default function EscalationPackageCard({ pkg, onClose }) {
           size="small"
           icon={<CopyOutlined />}
           type="primary"
-          style={{ backgroundColor: "#0A3F63", borderColor: "#0A3F63" }}
+          style={{ backgroundColor: "var(--acadia-primary)", borderColor: "var(--acadia-primary)" }}
           onClick={handleCopy}
         >
           Copy to clipboard

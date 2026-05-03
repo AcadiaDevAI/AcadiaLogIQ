@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { Button, Tooltip, Badge, Tabs, Empty, Popconfirm, message, Switch } from "antd";
 import {
   PlusOutlined,
@@ -94,6 +94,11 @@ export default function Sidebar() {
   const { state, dispatch } = useChat();
   const { isDark, toggleTheme } = useTheme();
   const [loading, setLoading] = useState(false);
+  // Sprint 11 — Track session ids whose DELETE is in flight so a fast
+  // double-click on the same row doesn't fire two requests (the second
+  // would 404 because the first already removed the row, leaving the
+  // user looking at a misleading "Failed to delete" toast).
+  const inFlightDeletes = useRef(new Set());
 
   const isAdmin = state.userRole === "admin";
 
@@ -130,12 +135,58 @@ export default function Sidebar() {
 
   const handleDeleteSession = async (id, e) => {
     e?.stopPropagation();
+
+    // Sprint 11 — Idempotent + optimistic delete.
+    //
+    // Backend symptom this guards against (per logs): the same session
+    // id was DELETEd up to 5 times across 2 minutes — first call 200,
+    // every subsequent call 404, because the row stayed visible in the
+    // sidebar (sessions are fetched once on mount, never re-polled).
+    // Each 404 fired "Failed to delete" and the user kept clicking.
+    //
+    // Three guards:
+    //   1. In-flight Set blocks fast double-click on the same row.
+    //   2. Optimistic remove from local state BEFORE the request — UI
+    //      feels instant, and a 404 race never re-shows the row.
+    //   3. 404 = success (idempotent DELETE semantics — the session is
+    //      gone, exactly what the user wanted). Only true server / network
+    //      failures (5xx, no response) restore the row + show an error.
+    if (inFlightDeletes.current.has(id)) return;
+    inFlightDeletes.current.add(id);
+
+    const prevSessions = state.sessions;
+    const wasActive = state.sessionId === id;
+
+    // Optimistic remove.
+    dispatch({
+      type: "SET_SESSIONS",
+      payload: state.sessions.filter((s) => s.id !== id),
+    });
+    if (wasActive) dispatch({ type: "NEW_CHAT" });
+
     try {
       await deleteSession(id);
-      dispatch({ type: "SET_SESSIONS", payload: state.sessions.filter((s) => s.id !== id) });
-      if (state.sessionId === id) dispatch({ type: "NEW_CHAT" });
       message.success("Chat deleted");
-    } catch { message.error("Failed to delete"); }
+    } catch (err) {
+      const status = err?.response?.status;
+      if (status === 404) {
+        // Session already gone (other tab, prior delete that timed out
+        // client-side, owner_id mismatch). Treat as success — the row
+        // was already optimistically removed and that's the right end
+        // state. Use a quiet info toast so the user isn't confused.
+        message.info("Chat already removed");
+      } else {
+        // Real failure — restore the optimistic removal so the user
+        // can retry. NEW_CHAT was the right call if wasActive (we
+        // can't restore the active-session pointer because the chat
+        // pane already cleared); leaving them on NEW_CHAT is the
+        // safer default than re-opening a chat we may not own.
+        dispatch({ type: "SET_SESSIONS", payload: prevSessions });
+        message.error("Failed to delete");
+      }
+    } finally {
+      inFlightDeletes.current.delete(id);
+    }
   };
 
   const handleClearAll = async () => {
@@ -375,8 +426,8 @@ export default function Sidebar() {
           block
           className="rounded-lg h-9 font-medium text-sm flex-1"
           style={{
-            backgroundColor: "#0A3F63",
-            borderColor: "#0A3F63",
+            backgroundColor: "var(--acadia-primary)",
+            borderColor: "var(--acadia-primary)",
             color: "#fff"
           }}
         >
@@ -404,11 +455,11 @@ export default function Sidebar() {
       >
         <div className="flex items-center gap-2">
           {isAdmin ? (
-            <SettingOutlined style={{ color: "#0A3F63", fontSize: 14 }} />
+            <SettingOutlined style={{ color: "var(--acadia-primary)", fontSize: 14 }} />
           ) : (
             <UserOutlined style={{ color: "var(--text-muted)", fontSize: 14 }} />
           )}
-          <span className="text-xs font-medium" style={{ color: isAdmin ? "#0A3F63" : "var(--text-muted)" }}>
+          <span className="text-xs font-medium" style={{ color: isAdmin ? "var(--acadia-primary)" : "var(--text-muted)" }}>
             {isAdmin ? "Admin" : "User"}
           </span>
         </div>
@@ -417,7 +468,7 @@ export default function Sidebar() {
           onChange={handleRoleToggle}
           size="small"
           style={{
-            backgroundColor: isAdmin ? "#0A3F63" : undefined,
+            backgroundColor: isAdmin ? "var(--acadia-primary)" : undefined,
           }}
         />
       </div>

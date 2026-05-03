@@ -53,8 +53,8 @@ export default function ClarificationOptions({ options, selectedId, onSelect, di
               height: "auto",
               padding: "8px 12px",
               opacity: isDimmed ? 0.5 : 1,
-              borderColor: isSelected ? "#0A3F63" : "var(--border-color)",
-              backgroundColor: isSelected ? "#0A3F63" : "transparent",
+              borderColor: isSelected ? "var(--acadia-primary)" : "var(--border-color)",
+              backgroundColor: isSelected ? "var(--acadia-primary)" : "transparent",
               color: isSelected ? "#fff" : "var(--text-primary)",
             }}
           >
@@ -79,7 +79,7 @@ export default function ClarificationOptions({ options, selectedId, onSelect, di
               type="primary"
               onClick={submitOther}
               disabled={disabled || !otherText.trim()}
-              style={{ backgroundColor: "#0A3F63", borderColor: "#0A3F63" }}
+              style={{ backgroundColor: "var(--acadia-primary)", borderColor: "var(--acadia-primary)" }}
             >
               Send
             </Button>

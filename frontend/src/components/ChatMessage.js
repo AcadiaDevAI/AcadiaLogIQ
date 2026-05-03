@@ -22,6 +22,7 @@ import {
 import { useChat } from "../hooks/ChatContext";
 import { saveFeedbackState, submitFeedback } from "../services/api";
 import ClarificationOptions from "./ClarificationOptions";
+import JourneyMessageActions from "./journey-chat/JourneyMessageActions";
 
 // ─────────────────────────────────────────────────────────────
 // Sprint 3A — deterministic post-👍 action chip registry.
@@ -316,7 +317,7 @@ export default function ChatMessage({ msg, index, sessionId, onClarificationSele
         style={
           isUser
             ? { backgroundColor: "var(--brand-light)", border: "1px solid var(--brand-accent)" }
-            : { background: "linear-gradient(135deg, #0A3F63, #0A3F63)" }
+            : { background: "linear-gradient(135deg, var(--acadia-primary), var(--acadia-primary))" }
         }
       >
         {isUser ? (
@@ -423,9 +424,14 @@ export default function ChatMessage({ msg, index, sessionId, onClarificationSele
           />
         )}
 
-        {/* Action buttons: Copy | 👍 Like | 👎 Dislike */}
+        {/* Action buttons: Copy | 👍 Like | 👎 Dislike
+            Sprint 10.5 §2.4 — JourneyMessageActions appended on the
+            right via marginLeft: auto when the chat originated from a
+            Stage 4 Search-KB handoff (state.sessionMetadata carries
+            journey_session_id). Returns null otherwise so non-journey
+            chats render this row identically to before 10.5. */}
         {!isUser && (
-          <div className="mt-2 flex items-center gap-3">
+          <div className="mt-2 flex items-center gap-3" style={{ flexWrap: "wrap" }}>
             <Tooltip title={copied ? "Copied!" : "Copy"}>
               <button onClick={handleCopy} style={{ cursor: "pointer", background: "none", border: "none", padding: 0, color: "var(--text-faint)" }} className="text-xs">
                 {copied ? <CheckOutlined style={{ color: "#10b981" }} /> : <CopyOutlined />}
@@ -461,6 +467,15 @@ export default function ChatMessage({ msg, index, sessionId, onClarificationSele
                 {feedbackState === "dislike" ? <DislikeFilled /> : <DislikeOutlined />}
               </button>
             </Tooltip>
+
+            <div
+              className="message-actions-journey"
+              style={{ marginLeft: "auto", display: "flex", gap: 8, alignItems: "center" }}
+            >
+              <JourneyMessageActions
+                journeySessionId={state.sessionMetadata?.journey_session_id}
+              />
+            </div>
           </div>
         )}
 

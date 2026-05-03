@@ -6,7 +6,12 @@ const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:8000";
 const API_KEY = process.env.REACT_APP_API_KEY || "";
 const CLERK_ENABLED = !!process.env.REACT_APP_CLERK_PUBLISHABLE_KEY;
 
-const api = axios.create({
+// Sprint 10.6.1 — exported so other API modules (e.g.
+// journey/journeyApi.js) can route their calls through this single
+// authenticated instance. The Clerk request/response interceptors
+// below attach the Bearer token + retry on 401 — every consumer that
+// imports `api` inherits both behaviours.
+export const api = axios.create({
   baseURL: API_BASE,
   timeout: 180000,
   headers: { ...(API_KEY ? { "X-API-Key": API_KEY } : {}) },

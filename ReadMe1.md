@@ -246,3 +246,20 @@ Expected for the curl above: `context_stats.agent_mode == true`, `context_stats.
 3. Persist `stage_enforcer` unresolved counters and the reasoning trace (`AgentPipelineResult.reasoning_summary`) in `repositories/`.
 4. Per-step `validate_answer` (currently only the Composer output is validated).
 5. Feedback-aware Planner — use prior thumbs-down signals to re-plan differently.
+
+
+How to run: backend
+
+ python -m uvicorn backend.api:app --host 0.0.0.0 --port 8000 --reload 2>&1 | Tee-Object logs\backend.log  
+
+ Forntend:
+ Cd frontend
+
+ npm install
+
+ npm run build
+
+ nmp start
+
+ db
+  psql -h logiq-db.c6vow688a3co.us-east-1.rds.amazonaws.com -U postgres -d logiq_dev -p 5432

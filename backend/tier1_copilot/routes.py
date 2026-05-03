@@ -99,25 +99,30 @@ async def analyze(req: Tier1AnalyzeRequest) -> Tier1AnalyzeResponse:
     # ── Cache check ─────────────────────────────────────────
     cached = get_cached_answer(signature_hash)
     if cached:
+        # Sprint 10.3 — log the cohort length so cache-hit cohort
+        # population is visible in the diagnostic stream.
+        cached_cohort_ids = list(cached.get("top_5_match_ids") or [])
         logger.info(
-            "[tier1_copilot] cache hit sig=%s", signature_hash[:10],
+            "[tier1_copilot] cache hit sig=%s cached_top5=%d",
+            signature_hash[:10], len(cached_cohort_ids),
         )
         answer_dict = cached["answer_json"] or {}
         answer = _coerce_answer_section(answer_dict)
 
-        # Sprint 7 — even on a cache hit, give the client a fresh session
-        # so arrow pagination / deeper-diag / escalation endpoints have
-        # somewhere to read from. The cached payload doesn't carry top-5
-        # IDs (they are retrieval-time state), so we leave that list
-        # empty for cache hits; the Workspace will re-call /analyze with
-        # a fresh signature if the engineer wants the full rank list.
+        # Sprint 7 — fresh Sprint 7 session on every cache hit so
+        # arrow-pagination / deeper-diag / escalation endpoints have
+        # somewhere to read from.
+        # Sprint 10.3 §3.3.3 — populate the new session row's
+        # top_5_match_ids from the cache. Without this, the Resolution
+        # Journey sees an empty cohort on every cache hit and renders
+        # blank panels (structural bug closed by 10.3).
         sess_id = None
         started_at = None
         if sprint7_on:
             sess = create_session(
                 alert_signature=normalized["alert_signature"],
                 alert_payload=alert_input,
-                top_5_match_ids=[],
+                top_5_match_ids=cached_cohort_ids,  # ← Sprint 10.3
             )
             if sess is not None:
                 sess_id = sess.id
@@ -132,7 +137,7 @@ async def analyze(req: Tier1AnalyzeRequest) -> Tier1AnalyzeResponse:
             answer=answer,
             cache_hit=True,
             response_id=signature_hash,
-            top_5_match_ids=[],
+            top_5_match_ids=cached_cohort_ids,
             session_id=sess_id,
             started_at=started_at,
         )
@@ -237,12 +242,16 @@ async def analyze(req: Tier1AnalyzeRequest) -> Tier1AnalyzeResponse:
         "similar_count": similar_count,
         "answer": parsed.model_dump(),
     }
+    # Sprint 10.3 §3.3.4 — persist the cohort alongside the answer so
+    # the next cache hit can repopulate the new session's
+    # top_5_match_ids (preventing the journey-empty-cohort regression).
     set_cached_answer(
         signature_hash=signature_hash,
         alert_signature=normalized["alert_signature"],
         answer=payload,
         confidence=confidence,
         matched_chunk_id=matched_chunk_id,
+        top_5_match_ids=list(top_5_ids or []),
     )
 
     response_id = signature_hash

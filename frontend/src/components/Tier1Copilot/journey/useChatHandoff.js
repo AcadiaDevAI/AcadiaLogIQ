@@ -1,0 +1,107 @@
+// Sprint 11 — useChatHandoff
+//
+// Shared hook that opens a new chat session with a prefilled question
+// and auto-fires /ask, mirroring Stage 4's existing handleOpenChat
+// flow (Stage4SearchKBHandoff.js:43-116). Lifted out so Stage 0's
+// "How they did it" step links and Stage 3's per-ticket-detail
+// Resolution Steps can share the exact same plumbing without
+// duplicating the 60-line handler in three places.
+//
+// Inputs:
+//   journeySessionId — the Tier-1 journey session id (sid)
+// Returns:
+//   { busy, askInChat(prefilledMessage) }
+//
+// Behaviour of askInChat(text):
+//   1. POST /tier1/journey/<sid>/search-kb-handoff with the override
+//      → backend creates a chat session + persists the user turn
+//   2. SET_MODE("troubleshooting") so AppLayout swaps in ChatArea
+//   3. SET_SESSION with the hydrated chat session so sidebar +
+//      sessionMetadata are correct (and JourneyMessageActions can
+//      offer the chat-back buttons we wired in Sprint 11)
+//   4. /ask the prefilled text and dispatch the assistant turn
+//
+// Errors at any step show a single antd toast and reset busy. The
+// chat session may have been created server-side even if /ask failed;
+// that's intentional — the user can re-ask from the chat input box.
+
+import { useCallback, useState } from "react";
+import { message } from "antd";
+
+import { useChat } from "../../../hooks/ChatContext";
+import { askQuestion, getSession } from "../../../services/api";
+import { searchKbHandoff } from "./journeyApi";
+
+
+export default function useChatHandoff(journeySessionId) {
+  const { dispatch } = useChat();
+  const [busy, setBusy] = useState(false);
+
+  const askInChat = useCallback(
+    async (prefilledMessage) => {
+      const text = (prefilledMessage || "").trim();
+      if (!text) return;
+      if (busy) return;
+      if (!journeySessionId) {
+        message.error("Cannot open chat — journey session is not loaded yet.");
+        return;
+      }
+      setBusy(true);
+      try {
+        const { chat_session_id } = await searchKbHandoff(
+          journeySessionId,
+          text,
+        );
+
+        dispatch({
+          type: "SET_MODE",
+          payload: { selectedMode: "troubleshooting", subMode: null },
+        });
+
+        try {
+          const sessRes = await getSession(chat_session_id);
+          dispatch({ type: "SET_SESSION", payload: sessRes.data });
+        } catch (sessErr) {
+          // eslint-disable-next-line no-console
+          console.warn("[useChatHandoff] SET_SESSION hydration failed", sessErr);
+          dispatch({ type: "ADD_USER_MESSAGE", payload: text });
+        }
+
+        dispatch({ type: "SET_LOADING", payload: true });
+        try {
+          const askRes = await askQuestion(text, chat_session_id);
+          const askData = askRes.data;
+          dispatch({
+            type: "ADD_ASSISTANT_MESSAGE",
+            payload: {
+              answer: askData.answer,
+              sources: askData.sources || [],
+              confidence: askData.confidence,
+              processing_time_ms: askData.processing_time_ms,
+              sessionId: askData.session_id,
+              context_stats: askData.context_stats || null,
+              needs_clarification: askData.needs_clarification,
+              clarification_id: askData.clarification_id,
+              clarification_options: askData.clarification_options,
+              clarification_context: askData.clarification_context,
+            },
+          });
+        } catch (askErr) {
+          // eslint-disable-next-line no-console
+          console.warn("[useChatHandoff] /ask follow-up failed", askErr);
+        } finally {
+          dispatch({ type: "SET_LOADING", payload: false });
+        }
+      } catch (err) {
+        // eslint-disable-next-line no-console
+        console.error("[useChatHandoff] handoff failed", err);
+        message.error("Could not open chat. Please try again.");
+      } finally {
+        setBusy(false);
+      }
+    },
+    [journeySessionId, dispatch, busy],
+  );
+
+  return { busy, askInChat };
+}

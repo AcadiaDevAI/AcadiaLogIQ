@@ -25,6 +25,14 @@ export default function UniversalIntakePanel({
   source,
   sessionId,
   onCardPicked,
+  // Sprint 11 — optional UI overrides for the Reactive single-mode use.
+  // When omitted, the panel falls back to the Sprint 9 channel-derived
+  // copy ("Paste content from <channel>"). When the parent passes
+  // explicit strings, they win — keeps the panel reusable for any
+  // generic paste flow without leaking channel-specific copy.
+  header: headerOverride,
+  helperText: helperTextOverride,
+  placeholder: placeholderOverride,
 }) {
   const [text, setText] = useState("");
   const [busy, setBusy] = useState(false);
@@ -109,19 +117,23 @@ export default function UniversalIntakePanel({
       }}
     >
       <div className="t-text text-sm font-semibold mb-1">
-        Paste content from {SOURCE_LABEL[source] || source}
+        {headerOverride || `Paste content from ${SOURCE_LABEL[source] || source}`}
       </div>
       <div className="t-text-muted text-xs mb-2">
-        The system will extract up to 4 structured interpretations and
-        validate them against the ingested ticket corpus. Pick one to
-        pre-fill the form below.
+        {helperTextOverride
+          || ("The system will extract up to 4 structured interpretations and"
+              + " validate them against the ingested ticket corpus. Pick one to"
+              + " pre-fill the form below.")}
       </div>
 
       <Input.TextArea
         rows={6}
         value={text}
         onChange={(e) => setText(e.target.value)}
-        placeholder={`Paste the ${SOURCE_LABEL[source] || source} content here…`}
+        placeholder={
+          placeholderOverride
+          || `Paste the ${SOURCE_LABEL[source] || source} content here…`
+        }
         maxLength={INTAKE_MAX_RAW_CHARS}
         showCount
         disabled={busy}
@@ -145,7 +157,15 @@ export default function UniversalIntakePanel({
           onClick={handleExtract}
           disabled={busy || !text.trim() || overLimit}
           loading={busy}
-          style={{ backgroundColor: "#0A3F63", borderColor: "#0A3F63" }}
+          // Sprint 11 — match the Proactive "Analyze alert" button's
+          // gradient look (navy → light blue) so the two CTAs feel
+          // visually identical across the split landing page. The
+          // gradient endpoints are the same Acadia brand tokens.
+          style={{
+            background:
+              "linear-gradient(135deg, var(--acadia-primary) 0%, var(--acadia-primary-light) 100%)",
+            borderColor: "transparent",
+          }}
         >
           {busy ? "Extracting…" : "Extract & Suggest"}
         </Button>

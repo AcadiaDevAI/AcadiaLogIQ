@@ -13,8 +13,12 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Iterable, List, Optional
 
+from backend.tier1_copilot.diagnostics.escalation_directory import (
+    lookup_directory_contacts,
+)
 from backend.tier1_copilot.schemas import (
     Tier1Contact,
+    Tier1DirectoryContact,
     Tier1EscalationPackage,
 )
 
@@ -162,6 +166,15 @@ def build_package(
     what_tried_lines = _what_tried_lines(session_what_tried, client_what_tried)
     contacts = fetch_customer_contacts(customer_name=customer, engine=engine)
 
+    directory_contacts = lookup_directory_contacts(
+        customer=customer,
+        alert_type=alert_payload.get("alert_type") or meta.get("Alert_Type"),
+        asset_name=(assets[0] if assets else None)
+        or alert_payload.get("asset_name"),
+        technology=alert_payload.get("technology") or meta.get("Technology"),
+        notes=alert_payload.get("notes"),
+    )
+
     rel = list(related_incidents or [])
     inc = meta.get("Incident_Number")
     if inc and inc not in rel:
@@ -181,6 +194,7 @@ def build_package(
         suggested_owner=suggested_owner,
         team_path=team_path,
         contacts=contacts,
+        directory_contacts=directory_contacts,
         what_tried_lines=what_tried_lines,
         recommended_next_action=primary_fix,
         relevant_tickets=rel,
@@ -195,6 +209,7 @@ def build_package(
         escalation_path=team_path,
         customer_contacts=contacts,
         vendor_contacts=[],
+        directory_contacts=directory_contacts,
         what_was_tried=what_tried_lines,
         recommended_next_action=str(primary_fix) if primary_fix else None,
         relevant_tickets=rel,
@@ -214,6 +229,7 @@ def _format_paste_block(
     suggested_owner: Optional[str],
     team_path: List[str],
     contacts: List[Tier1Contact],
+    directory_contacts: List[Tier1DirectoryContact],
     what_tried_lines: List[str],
     recommended_next_action: Optional[str],
     relevant_tickets: List[str],
@@ -222,8 +238,8 @@ def _format_paste_block(
     lines.append(f"Summary: {summary}")
     if priority:
         lines.append(f"Priority: {priority}")
-    if customer:
-        lines.append(f"Customer: {customer}")
+    # if customer:
+    #     lines.append(f"Customer: {customer}")
     if assets:
         lines.append(f"Affected assets: {', '.join(assets)}")
     if suggested_owner:
@@ -247,4 +263,11 @@ def _format_paste_block(
     if relevant_tickets:
         lines.append("")
         lines.append(f"Relevant tickets: {', '.join(relevant_tickets)}")
+    if directory_contacts:
+        lines.append("")
+        lines.append("Recommended contacts (Acadia Escalation Directory):")
+        for d in directory_contacts:
+            bits = [b for b in (d.name, d.detail) if b]
+            prefix = f"[{d.label}] " if d.label else ""
+            lines.append("  - " + prefix + " · ".join(bits))
     return "\n".join(lines).strip()

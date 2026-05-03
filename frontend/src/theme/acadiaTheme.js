@@ -4,16 +4,27 @@
 // module is pure data + a null-fallback "classic" bag that preserves
 // the Sprint 6/7 visual style when the modern-theme flag is off.
 
+// ─────────────────────────────────────────────────────────────
+// Sprint 11 — Single source of truth for the Acadia primary color.
+// Derived directly from the logo's "A" navy. Exported so any
+// component (inside the Tier-1 tree or not) can avoid re-hardcoding
+// the hex literal. The Sprint 6/7 hardcoded "#0A3F63" was the same
+// intent but slightly off-spec; consolidating here.
+// ─────────────────────────────────────────────────────────────
+export const ACADIA_PRIMARY       = "#0E2D4D";
+export const ACADIA_PRIMARY_HOVER = "#143F69";
+export const ACADIA_PRIMARY_LIGHT = "#3DA2E0";  // logo swoosh accent
+
 export const MODERN_TOKENS = {
   // Acadia brand navy — derived from logo
-  primary:         "#1E3A8A",
-  primaryHover:    "#1E40AF",
-  primaryLight:    "#3B82F6",
+  primary:         ACADIA_PRIMARY,
+  primaryHover:    ACADIA_PRIMARY_HOVER,
+  primaryLight:    ACADIA_PRIMARY_LIGHT,
 
   // Gradient accents
-  gradientStart:   "#1E3A8A",
-  gradientEnd:     "#4F46E5",
-  gradientAccent:  "linear-gradient(135deg, #1E3A8A 0%, #4F46E5 100%)",
+  gradientStart:   ACADIA_PRIMARY,
+  gradientEnd:     ACADIA_PRIMARY_LIGHT,
+  gradientAccent:  `linear-gradient(135deg, ${ACADIA_PRIMARY} 0%, ${ACADIA_PRIMARY_LIGHT} 100%)`,
 
   // Surface
   surfaceBase:     "#FFFFFF",
@@ -62,7 +73,7 @@ export const CLASSIC_TOKENS = {
   isModern: false,
   // A minimal surface so shared components can still colour-code
   // without branching on isModern everywhere.
-  primary:         "#0A3F63",          // the legacy Acadia CTA colour
+  primary:         ACADIA_PRIMARY,     // unified with logo navy (Sprint 11)
   surfaceBase:     "var(--bg-secondary, #ffffff)",
   surfaceElevated: "var(--bg-primary, #f4f4f5)",
   textPrimary:     "var(--text-primary, #0f172a)",

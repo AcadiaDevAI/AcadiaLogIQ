@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Button, Card, message } from "antd";
 import { useChat } from "../hooks/ChatContext";
 import FingerprintInputScreen from "./FingerprintInputScreen";
@@ -31,7 +31,7 @@ const TIER1_FRONTEND_ON =
   process.env.REACT_APP_LOGIQ_TIER1_COPILOT_FRONTEND === "true";
 
 export default function LandingRouter() {
-  const { dispatch } = useChat();
+  const { state, dispatch } = useChat();
   const [screen, setScreen] = useState("fingerprint");
   const [lastFingerprint, setLastFingerprint] = useState(null);
 
@@ -42,6 +42,32 @@ export default function LandingRouter() {
   const [tier1SessionId] = useState(
     () => `tier1-${Math.random().toString(36).slice(2, 10)}`
   );
+
+  // ── Sprint 11 — chat → journey return path ──────────
+  // When JourneyMessageActions dispatches RESUME_JOURNEY (from
+  // "Return to Stages" or "Escalate to Tier 2"), ChatContext sets
+  // journeyResumeSessionId AND clears selectedMode. AppLayout
+  // re-mounts us; this effect picks up the resume signal, jumps
+  // straight to screen="tier1" with a synthesized result blob,
+  // and clears the resume field so it doesn't re-fire.
+  //
+  // The synthesized blob has only session_id + started_at; that is
+  // enough for useTier1Session to hydrate and for the journey
+  // panels to fetch their own data via /tier1/journey/<sid>/initial,
+  // /resume-state, /stage-N. The match-card may show degraded data
+  // until the next /match call, which is acceptable for a return
+  // path (the user came in via journey, not via fresh /analyze).
+  useEffect(() => {
+    if (!state.journeyResumeSessionId) return;
+    const sid = state.journeyResumeSessionId;
+    setScreen("tier1");
+    setTier1Result({
+      session_id: sid,
+      started_at: new Date().toISOString(),
+      top_5_match_ids: [],
+    });
+    dispatch({ type: "CLEAR_JOURNEY_RESUME" });
+  }, [state.journeyResumeSessionId, dispatch]);
 
   const goToModes = () => setScreen("modes");
   const goToTier1 = () => {
@@ -197,8 +223,8 @@ export default function LandingRouter() {
               size="large"
               onClick={goToModes}
               style={{
-                backgroundColor: "#0A3F63",
-                borderColor: "#0A3F63",
+                backgroundColor: "var(--acadia-primary)",
+                borderColor: "var(--acadia-primary)",
                 minWidth: 160,
               }}
             >

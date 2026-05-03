@@ -5,6 +5,27 @@
 @import url("https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;500;600;700&family=Inter:wght@300;400;500;600&display=swap");
 
 /* ============================================
+   Sprint 11 — Brand tokens (single source of truth)
+   ============================================ */
+:root {
+  /* Acadia primary — derived from logo "A" navy. Used across CTA
+     buttons, accents, focus rings. Theme-agnostic; same value in
+     light and dark themes (the logo doesn't change). */
+  --acadia-primary:        #0E2D4D;
+  --acadia-primary-hover:  #143F69;
+  --acadia-primary-light:  #3DA2E0;
+}
+
+/* ============================================
+   Sprint 11 — Global font family
+   ============================================ */
+html, body, #root {
+  font-family: "Inter", "Poppins", "Segoe UI", system-ui,
+               -apple-system, BlinkMacSystemFont, "Helvetica Neue",
+               Arial, sans-serif;
+}
+
+/* ============================================
    CSS VARIABLES — LIGHT (DEFAULT)
    ============================================ */
 .theme-light {

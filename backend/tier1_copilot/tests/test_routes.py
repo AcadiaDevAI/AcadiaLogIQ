@@ -124,5 +124,89 @@ class AnalyzeNoEvidencePathTests(unittest.TestCase):
             patch_ctx.stop()
 
 
+class CacheHitCohortPopulationTests(unittest.TestCase):
+    """Sprint 10.3 §3.4 — on a cache hit the analyze handler must
+    populate the new session row's top_5_match_ids from the cached
+    payload. Without this, the Resolution Journey sees an empty cohort
+    on every cache hit and renders blank panels."""
+
+    def test_cache_hit_populates_session_cohort(self):
+        from backend.tier1_copilot import routes
+        from backend.config import settings
+
+        cached_payload = {
+            "answer_json": {
+                "matched_incident": "INC-CACHED-001",
+                "similar_count": 5,
+                "answer": {},
+            },
+            "confidence": "High",
+            "matched_chunk_id": "chunk-1",
+            "alert_signature": "p2 | a | b",
+            "top_5_match_ids": [
+                "chunk-1", "chunk-2", "chunk-3", "chunk-4", "chunk-5",
+            ],
+        }
+
+        # Capture the call args sent to create_session so we can assert
+        # the cohort got forwarded onto the session row.
+        captured: dict = {}
+
+        class FakeSession:
+            id = "sess_cached_xyz"
+            from datetime import datetime, timezone
+            created_at = datetime(2026, 4, 1, tzinfo=timezone.utc)
+
+        def fake_create_session(*, alert_signature, alert_payload,
+                                top_5_match_ids):
+            captured["alert_signature"] = alert_signature
+            captured["alert_payload"] = alert_payload
+            captured["top_5_match_ids"] = list(top_5_match_ids or [])
+            return FakeSession()
+
+        client, patch_ctx = _make_client(flag_on=True)
+        try:
+            with mock.patch.object(
+                routes, "get_cached_answer", return_value=cached_payload,
+            ), mock.patch.object(
+                routes, "create_session", side_effect=fake_create_session,
+            ), mock.patch.object(
+                routes, "retrieve_top_matches",
+                side_effect=AssertionError(
+                    "retrieval must NOT run on cache hit",
+                ),
+            ), mock.patch.object(
+                settings, "LOGIQ_TIER1_PROGRESSIVE_BACKEND", True,
+            ):
+                r = client.post("/tier1/analyze", json={
+                    "severity": "P2",
+                    "asset_name": "V-Desktop Environment",
+                    "alert_type": "Desktop Slowness",
+                    "session_id": "s",
+                })
+            self.assertEqual(r.status_code, 200)
+            body = r.json()
+
+            # Cache hit was honoured; retrieval did not run (else the
+            # AssertionError side_effect would have raised).
+            self.assertTrue(body["cache_hit"])
+
+            # The cached cohort flowed onto the new session row.
+            self.assertEqual(
+                captured["top_5_match_ids"],
+                ["chunk-1", "chunk-2", "chunk-3", "chunk-4", "chunk-5"],
+            )
+
+            # The response also exposes the cohort so callers (frontend)
+            # know which tickets the journey will paint.
+            self.assertEqual(
+                body["top_5_match_ids"],
+                ["chunk-1", "chunk-2", "chunk-3", "chunk-4", "chunk-5"],
+            )
+            self.assertEqual(body["session_id"], "sess_cached_xyz")
+        finally:
+            patch_ctx.stop()
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

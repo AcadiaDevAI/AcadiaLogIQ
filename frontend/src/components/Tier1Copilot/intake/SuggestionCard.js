@@ -162,7 +162,7 @@ export default function SuggestionCard({ card, onUse }) {
         <Button
           type="primary"
           onClick={handleUseClick}
-          style={{ backgroundColor: "#0A3F63", borderColor: "#0A3F63" }}
+          style={{ backgroundColor: "var(--acadia-primary)", borderColor: "var(--acadia-primary)" }}
         >
           Use this interpretation
         </Button>

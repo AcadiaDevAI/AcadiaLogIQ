@@ -173,8 +173,8 @@ export default function LandingPage() {
             disabled={!canContinue || submitting}
             loading={submitting}
             style={{
-              backgroundColor: canContinue ? "#0A3F63" : undefined,
-              borderColor: canContinue ? "#0A3F63" : undefined,
+              backgroundColor: canContinue ? "var(--acadia-primary)" : undefined,
+              borderColor: canContinue ? "var(--acadia-primary)" : undefined,
               minWidth: 160,
             }}
           >

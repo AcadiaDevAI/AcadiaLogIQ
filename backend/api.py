@@ -54,6 +54,10 @@ from backend.vector_store import (
     get_user_by_clerk_id,
 )
 from backend.services.contextual_ingestion_service import process_document
+from backend.services.journey_retrieval_context import (
+    build_query_prefix as _journey_ctx_prefix,
+    load_journey_context as _load_journey_ctx,
+)
 from backend.vector_store import find_duplicate_by_hash, find_version_candidates
 from backend.retrieval.orchestrator import (
     retrieve as orchestrator_retrieve,
@@ -429,6 +433,26 @@ if getattr(settings, "LOGIQ_TIER1_COPILOT_BACKEND", False):
             _tier1_exc,
         )
 
+# Sprint 10 — Tier-1 Resolution Journey. Mount only when both Sprint 6
+# (parent — needed because the journey reads tier1_sessions populated
+# by /tier1/analyze) AND the journey flag are true. Flag-off = the
+# /tier1/journey/* router is not registered and FastAPI returns native
+# 404 for any request to those paths, so the prior Sprint 6/7/8/9
+# behaviour is byte-identical.
+if (
+    getattr(settings, "LOGIQ_TIER1_COPILOT_BACKEND", False)
+    and getattr(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", False)
+):
+    try:
+        from backend.tier1_copilot.journey.routes import router as _journey_router
+        app.include_router(_journey_router)
+        logger.info("[tier1_journey] router mounted at /tier1/journey")
+    except Exception as _journey_exc:
+        logger.warning(
+            "[tier1_journey] failed to mount router (module disabled): %s",
+            _journey_exc,
+        )
+
 # Sprint 9 — Universal Intake. Same gating pattern: mount only when
 # both Sprint 6 (parent flag) and Sprint 9 flags are true. Flag-off =
 # /intake/* returns native 404 and Sprint 6/7/8 stay byte-identical.
@@ -549,6 +573,13 @@ class Question(BaseModel):
     )
     # Brief 6 — present only when the user clicks a clarification option.
     clarification_response: Optional[ClarificationSelection] = None
+    # Sprint 10 — optional cohort-scoping filter for the Tier-1
+    # Resolution Journey's Stage 4 KB handoff. When non-empty, the
+    # retrieval call is restricted to chunks whose metadata_json
+    # ->>'doc_kind' matches one of the listed values (e.g. ["sop","kb"]).
+    # When None or empty, retrieval falls through to Sprint 3C's
+    # mode-derived doc_kinds filter exactly as before.
+    allowed_doc_kinds: Optional[List[str]] = None
     model_config = ConfigDict(extra="ignore")
 
     @field_validator("q")
@@ -3043,8 +3074,52 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     ):
         _sprint3c_doc_kinds = resolve_mode_doc_kinds(_sprint3c_mode_snap)
 
+    # Sprint 10 — request-level override for Stage 4 KB handoff. When the
+    # client passes a non-empty `allowed_doc_kinds`, prefer it over the
+    # mode-derived list. Empty / None falls through to Sprint 3C behaviour.
+    _effective_doc_kinds = _sprint3c_doc_kinds
+    if getattr(req, "allowed_doc_kinds", None):
+        _effective_doc_kinds = list(req.allowed_doc_kinds)
+
+    # ── Sprint 11 — journey-aware retrieval enrichment ──
+    # When this chat session originated from a Stage 0 / Stage 3
+    # "Ask in chat" link (Sprint 11 surfaces) the chat session metadata
+    # carries journey_session_id. Look up the journey's intake context
+    # and prepend a short "[Context: asset=… alert=… customer=… …]"
+    # prefix to the BM25 / keyword query so retrieval narrows toward
+    # the right corner of the corpus.
+    #
+    # We DO NOT touch:
+    #   - raw_query   → orchestrator uses for identifier extraction
+    #     (regex on user text); enrichment would create false IDs
+    #   - q_emb       → vector channel keeps working off the original
+    #     question's embedding; adding context would require a second
+    #     Titan call we don't yet need to spend
+    #   - LLM prompt + saved chat message → unchanged, so the user
+    #     sees their bare question both in the chat thread and in any
+    #     downstream answer rendering
+    #
+    # Failure-open: helper returns None on any DB / parsing error and
+    # /ask continues with the unenriched query. Flag-gated; defaults
+    # ON (LOGIQ_JOURNEY_CHAT_RETRIEVAL_CONTEXT in config.py).
+    bm25_query_text = expanded.expanded_text
+    if getattr(settings, "LOGIQ_JOURNEY_CHAT_RETRIEVAL_CONTEXT", True):
+        from backend.db.connection import SessionLocal as _SL
+        _journey_ctx = _load_journey_ctx(
+            chat_session_id=session_id, db_session_factory=_SL,
+        )
+        _ctx_prefix = _journey_ctx_prefix(_journey_ctx)
+        if _ctx_prefix:
+            bm25_query_text = _ctx_prefix + bm25_query_text
+            logger.info(
+                "[journey_context] enriched chat=%s journey=%s fields=%s",
+                session_id,
+                (_journey_ctx or {}).get("_journey_session_id"),
+                sorted(k for k in (_journey_ctx or {}).keys() if not k.startswith("_")),
+            )
+
     retrieval = orchestrator_retrieve(
-        query=expanded.expanded_text,
+        query=bm25_query_text,
         raw_query=req.q,
         query_embedding=q_emb,
         owner_id=owner_id,
@@ -3053,7 +3128,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         generate_fn=safe_generate,
         bm25_search_fn=bm25.search if bm25 and bm25.size > 0 else None,
         vector_search_fn=pgvector_search,
-        doc_kinds=_sprint3c_doc_kinds,
+        doc_kinds=_effective_doc_kinds,
     )
 
     # ── Clean "not found" short-circuit when an identifier was asked for

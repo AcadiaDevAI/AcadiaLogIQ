@@ -89,8 +89,8 @@ export default function ChatInput({ onSend, prefillValue, onPrefillConsumed }) {
     style={
       !disabled && input.trim()
         ? {
-            backgroundColor: "#0A3F63",
-            borderColor: "#0A3F63", 
+            backgroundColor: "var(--acadia-primary)",
+            borderColor: "var(--acadia-primary)", 
             color: "#fff",
           }
         : {}
