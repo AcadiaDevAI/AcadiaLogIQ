@@ -386,11 +386,12 @@ function ProgressiveIntakeForm({
     if (onSubmit) onSubmit(payload);
   };
 
+  // Sprint 11 — match the Reactive UniversalIntakePanel Card exactly so
+  // both columns of the split intake screen read as sibling cards.
   const cardStyle = {
-    backgroundColor: tokens.surfaceBase,
-    borderColor: isModern ? tokens.surfaceElevated : "var(--border-color)",
-    borderRadius: tokens.radiusLg || 16,
-    boxShadow: isModern ? tokens.shadowMd : undefined,
+    backgroundColor: "var(--bg-secondary)",
+    borderColor: "var(--border-color)",
+    borderRadius: 12,
   };
 
   const submitStyle = {
@@ -423,7 +424,7 @@ function ProgressiveIntakeForm({
           </p>
         </div>
 
-        <Card bodyStyle={{ padding: 24 }} style={cardStyle}>
+        <Card bodyStyle={{ padding: 18 }} style={cardStyle}>
           <Form
             form={form}
             layout="vertical"
