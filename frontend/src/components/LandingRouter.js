@@ -1,7 +1,9 @@
 import React, { useEffect, useState } from "react";
 import { Button, Card, message } from "antd";
 import { useChat } from "../hooks/ChatContext";
-import FingerprintInputScreen from "./FingerprintInputScreen";
+// Fingerprint landing disabled — Tier-1 Copilot is now the default entry.
+// Keep import commented so it can be re-enabled in a single line if needed.
+// import FingerprintInputScreen from "./FingerprintInputScreen";
 import LandingPage from "./LandingPage";
 import Tier1IntakeForm from "./Tier1Copilot/Tier1IntakeForm";
 import Tier1AnswerCard from "./Tier1Copilot/Tier1AnswerCard";
@@ -32,7 +34,8 @@ const TIER1_FRONTEND_ON =
 
 export default function LandingRouter() {
   const { state, dispatch } = useChat();
-  const [screen, setScreen] = useState("fingerprint");
+  // Default landing is now Tier-1 Copilot (was "fingerprint").
+  const [screen, setScreen] = useState("tier1");
   const [lastFingerprint, setLastFingerprint] = useState(null);
 
   // Sprint 6 — Tier-1 local flow state (form → analyze → answer → feedback).
@@ -102,28 +105,34 @@ export default function LandingRouter() {
     setScreen("nomatch");
   };
 
-  if (screen === "fingerprint") {
-    return (
-      <>
-        <FingerprintInputScreen
-          onMatch={handleMatch}
-          onNoMatch={handleNoMatch}
-          onSkip={goToModes}
-        />
-        {TIER1_FRONTEND_ON && (
-          <div className="flex justify-center pb-6">
-            <Button
-              size="large"
-              onClick={goToTier1}
-              style={{ minWidth: 200 }}
-            >
-              Tier-1 Copilot
-            </Button>
-          </div>
-        )}
-      </>
-    );
-  }
+  // ─────────────────────────────────────────────────────────────
+  // Fingerprint landing screen disabled.
+  // Tier-1 Copilot is now the default entry (see useState("tier1") above).
+  // To re-enable: uncomment the FingerprintInputScreen import at the top
+  // and uncomment the block below, and revert default screen to "fingerprint".
+  // ─────────────────────────────────────────────────────────────
+  // if (screen === "fingerprint") {
+  //   return (
+  //     <>
+  //       <FingerprintInputScreen
+  //         onMatch={handleMatch}
+  //         onNoMatch={handleNoMatch}
+  //         onSkip={goToModes}
+  //       />
+  //       {TIER1_FRONTEND_ON && (
+  //         <div className="flex justify-center pb-6">
+  //           <Button
+  //             size="large"
+  //             onClick={goToTier1}
+  //             style={{ minWidth: 200 }}
+  //           >
+  //             Tier-1 Copilot
+  //           </Button>
+  //         </div>
+  //       )}
+  //     </>
+  //   );
+  // }
 
   if (screen === "tier1" && TIER1_FRONTEND_ON) {
     const handleTier1Submit = async (payload) => {
@@ -147,8 +156,9 @@ export default function LandingRouter() {
           busy={tier1Busy}
           onSubmit={handleTier1Submit}
           onBack={() => {
+            // Fingerprint screen is disabled — fall back to mode picker.
             setTier1Result(null);
-            setScreen("fingerprint");
+            setScreen("modes");
           }}
         />
       );
@@ -212,12 +222,14 @@ export default function LandingRouter() {
             </p>
           </Card>
           <div className="flex justify-center gap-3">
+            {/* Fingerprint flow disabled — "Try a different fingerprint" hidden.
             <Button
               size="large"
               onClick={() => setScreen("fingerprint")}
             >
               Try a different fingerprint
             </Button>
+            */}
             <Button
               type="primary"
               size="large"

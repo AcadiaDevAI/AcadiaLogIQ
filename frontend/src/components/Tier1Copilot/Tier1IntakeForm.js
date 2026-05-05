@@ -77,7 +77,7 @@ function SourceAwareIntake(props) {
                 Monitoring or alert-triggered intake
               </p>
             </div>
-            <InnerForm {...props} prefill={prefill} />
+            <InnerForm {...props} prefill={prefill} embedded />
           </div>
 
           {/* Reactive — paste box; output pre-fills Proactive on the left */}
@@ -343,6 +343,12 @@ function ProgressiveIntakeForm({
   recentAssets = [],
   recentAlertTypes = [],
   prefill, // Sprint 9
+  // Sprint 11 fix — when rendered inside the Proactive | Reactive split
+  // (SourceAwareIntake), the column already shows a "Proactive" header
+  // above this form, so suppress the inner "What's happening?" title
+  // block and drop the outer flex/padding wrapper. Both columns then
+  // have identical vertical anchors and the Cards line up perfectly.
+  embedded = false,
 }) {
   const { tokens, isModern } = useTier1Theme();
   const [form] = Form.useForm();
@@ -403,26 +409,37 @@ function ProgressiveIntakeForm({
     borderColor: isModern ? "transparent" : "var(--acadia-primary)",
   };
 
+  // Sprint 11 fix — embedded mode (inside SourceAwareIntake split layout)
+  // collapses the page-level wrapper so the Card aligns with the
+  // Reactive column's UniversalIntakePanel Card.
+  const wrapperClass = embedded
+    ? "w-full"
+    : "flex-1 flex items-center justify-center px-4 py-8 t-bg-primary";
+  const innerWrapperStyle = embedded ? {} : { maxWidth: 640 };
+  const innerWrapperClass = embedded ? "w-full" : "w-full";
+
   return (
-    <div className="flex-1 flex items-center justify-center px-4 py-8 t-bg-primary">
-      <div className="w-full" style={{ maxWidth: 640 }}>
-        <div className="text-center mb-6">
-          <h1
-            className="t-text"
-            style={{
-              fontSize: 22,
-              fontWeight: 600,
-              letterSpacing: "-0.01em",
-              margin: 0,
-            }}
-          >
-            What&apos;s happening?
-          </h1>
-          <p className="t-text-muted text-sm mt-2" style={{ margin: "6px 0 0" }}>
-            Describe the incident below. We&apos;ll match it to the closest
-            historical ticket and return an 8-section troubleshooting answer.
-          </p>
-        </div>
+    <div className={wrapperClass}>
+      <div className={innerWrapperClass} style={innerWrapperStyle}>
+        {!embedded && (
+          <div className="text-center mb-6">
+            <h1
+              className="t-text"
+              style={{
+                fontSize: 22,
+                fontWeight: 600,
+                letterSpacing: "-0.01em",
+                margin: 0,
+              }}
+            >
+              What&apos;s happening?
+            </h1>
+            <p className="t-text-muted text-sm mt-2" style={{ margin: "6px 0 0" }}>
+              Describe the incident below. We&apos;ll match it to the closest
+              historical ticket and return an 8-section troubleshooting answer.
+            </p>
+          </div>
+        )}
 
         <Card bodyStyle={{ padding: 18 }} style={cardStyle}>
           <Form
