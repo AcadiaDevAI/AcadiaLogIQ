@@ -21,13 +21,21 @@ logger = logging.getLogger("acadia-log-iq")
 
 
 _STAGE_LABELS = {
-    "stage_0": "Confidence Lead",
+    # Sprint 12 — labels aligned with the frontend STAGE_LABELS
+    # constant so the escalation traversal log uses the same names
+    # the engineer just saw in the UI. The "Stage N — " prefix is
+    # also dropped at the format site below; we render only the
+    # human-readable label.
+    "stage_0": "Best Historical Match & Recommended Resolution",
+    "pivot_insights": "Pivot Insights",
+    # Legacy keys kept for back-compat with rows written before
+    # the Sprint 10.2 1A/1B → pivot_insights merge.
     "stage_1a": "Smoking Gun",
     "stage_1b": "Do Not Chase",
-    "stage_2": "Historical Matches",
-    "stage_3": "Troubleshooting Approach",
-    "stage_4": "Search KB / SOP",
-    "stage_5": "Escalation",
+    "stage_2": "Related Incidents & Probable Causes",
+    "stage_3": "Guided Troubleshooting Workflow",
+    "stage_4": "Knowledge Base & SOP Reference",
+    "stage_5": "Operational Handoff",
 }
 
 
@@ -154,7 +162,11 @@ def fetch_traversal_log(session_id: str) -> List[Dict[str, Any]]:
         duration_str = _format_duration(duration_sec)
 
         out.append({
-            "step": f"Stage {stage[6:].replace('_', '').upper()} — {label}",
+            # Sprint 12 — drop the "Stage N — " prefix; the label alone
+            # matches what the engineer saw in the journey UI cards
+            # ("Best Historical Match & Recommended Resolution",
+            # "Related Incidents & Probable Causes", etc.).
+            "step": label,
             # Append "/ <duration>" so the rendered line reads
             # "viewed, advanced at 2026-05-05 23:50:13 UTC / 1m 3s"
             "result": f"{', '.join(actions)} / {duration_str}",

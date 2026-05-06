@@ -250,11 +250,22 @@ def _derive_evidence_strength(score: Optional[int]) -> str:
     return "weak"
 
 
-def _resolution_steps(ticket: Dict[str, Any]) -> List[str]:
+def _resolution_steps(
+    ticket: Dict[str, Any],
+    incident_number: Optional[str] = None,
+) -> List[str]:
     """Extract Resolution_Steps as a flat string list, capped at 5.
-    Handles list-of-strings, list-of-dicts, and single-string shapes."""
+    Handles list-of-strings, list-of-dicts, and single-string shapes.
+
+    Sprint 12 — when `incident_number` is provided (e.g. the best
+    ticket's Incident_Number), each step is suffixed with " - <id>"
+    so the engineer (and any downstream Tier-2 reader) can trace the
+    step back to the source ticket. The suffix is only appended when
+    a non-empty incident_number is supplied; legacy callers that
+    don't pass it get the original behavior."""
     rca = ticket.get("Executive_Sharable_RCA") if isinstance(ticket.get("Executive_Sharable_RCA"), dict) else {}
     raw = rca.get("Resolution_Steps") if isinstance(rca, dict) else None
+    suffix = f" - {incident_number}" if incident_number else ""
     out: List[str] = []
     if isinstance(raw, list):
         for s in raw:
@@ -266,11 +277,11 @@ def _resolution_steps(ticket: Dict[str, Any]) -> List[str]:
                 continue
             t = str(txt).strip()
             if t:
-                out.append(t)
+                out.append(f"{t}{suffix}")
             if len(out) >= 5:
                 break
     elif isinstance(raw, str) and raw.strip():
-        out.append(raw.strip())
+        out.append(f"{raw.strip()}{suffix}")
     return out
 
 
@@ -324,7 +335,12 @@ def compute_stage0(
     best_quality = _safe_int(meta.get("Resolution_Quality_Score"))
     best_time = _safe_int(meta.get("time_to_resolve_minutes"))
     what_worked = _safe_str(best, "Symptom_Solution_Mapping", "Primary_Fix")
-    how_they_did_it = _resolution_steps(best)
+    # Sprint 12 — pass the best ticket's Incident_Number so each
+    # "How they did it" step is suffixed with " - <ticket_id>".
+    # Lets the engineer (and Tier-2 if escalated) trace any step
+    # back to its source ticket without round-tripping through
+    # Stage 2.
+    how_they_did_it = _resolution_steps(best, best_incident)
     critical_intervention = _safe_str(best, "Forensic_Performance_Audit", "Critical_Intervention")
 
     # ── Cohort stats (collapsed tail) ──

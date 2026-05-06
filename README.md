@@ -1,278 +1,834 @@
-# Acadia Log IQ — AI-Powered Document Intelligence Platform
+# Acadia Log-IQ — AI Copilot for Network Operations
 
-> **Version 3.0** | Phases 1–6 Complete | Production-Ready  
-> Hybrid RAG system for operational document analysis with multi-model routing,  
-> multi-agent troubleshooting, and answer validation guardrails.
+> **AI-powered Tier-1 NOC copilot.** Engineers paste an alert (or a customer email), and the system returns the closest historical resolution, a structured 8-section troubleshooting playbook, a 5-stage guided journey, and a built-in escalation handoff — grounded in your own ticket corpus, KBs, and SOPs.
+
+[![Backend](https://img.shields.io/badge/backend-FastAPI%20%7C%20Python%203.11-009688)](backend/api.py)
+[![Frontend](https://img.shields.io/badge/frontend-React%2018%20%7C%20AntD-1677ff)](frontend/package.json)
+[![LLM](https://img.shields.io/badge/LLM-AWS%20Bedrock-FF9900)](#aws--external-services)
+[![Vector](https://img.shields.io/badge/vector-Postgres%20%2B%20pgvector-336791)](backend/db/migrations)
+[![Auth](https://img.shields.io/badge/auth-Clerk-6c47ff)](backend/clerk_auth.py)
+[![Deploy](https://img.shields.io/badge/deploy-Docker%20%7C%20EC2-2496ED)](docker-compose.ec2.yml)
 
 ---
 
 ## Table of Contents
 
-1. [Overview](#overview)
-2. [Architecture](#architecture)
-3. [Technology Stack](#technology-stack)
-4. [Project Structure](#project-structure)
-5. [Phase-by-Phase Development](#phase-by-phase-development)
-6. [How It Works — End to End](#how-it-works--end-to-end)
-7. [AWS Services & Model Setup](#aws-services--model-setup)
-8. [Environment Variables](#environment-variables)
-9. [Local Development Setup](#local-development-setup)
-10. [EC2 Deployment](#ec2-deployment)
-11. [Docker Reference](#docker-reference)
-12. [Database Setup (RDS + pgvector)](#database-setup-rds--pgvector)
-13. [S3 Storage Setup](#s3-storage-setup)
-14. [Clerk Authentication](#clerk-authentication)
-15. [Document Ingestion Pipeline](#document-ingestion-pipeline)
-16. [Retrieval Pipeline](#retrieval-pipeline)
-17. [Model Routing & Cost Optimization](#model-routing--cost-optimization)
-18. [Multi-Agent Troubleshooting](#multi-agent-troubleshooting)
-19. [Answer Validation & Confidence](#answer-validation--confidence)
-20. [Duplicate & Version Detection](#duplicate--version-detection)
-21. [Health Checks & Observability](#health-checks--observability)
-22. [Security & Data Privacy](#security--data-privacy)
-23. [API Reference](#api-reference)
-24. [Testing](#testing)
-25. [Troubleshooting](#troubleshooting)
-26. [Rollback & Migration](#rollback--migration)
-27. [Known Limitations](#known-limitations)
-28. [Future Extensions](#future-extensions)
+1. [What this is](#what-this-is)
+2. [System architecture at a glance](#system-architecture-at-a-glance)
+3. [Tech stack](#tech-stack)
+4. [The two intake flows — Proactive & Reactive](#the-two-intake-flows--proactive--reactive)
+5. [The Resolution Journey](#the-resolution-journey)
+6. [Chat ↔ Journey round-trip](#chat--journey-round-trip)
+7. [Repository layout](#repository-layout)
+8. [Quickstart — local development](#quickstart--local-development)
+9. [Environment variables](#environment-variables)
+10. [Feature flags (Sprint-layered)](#feature-flags-sprint-layered)
+11. [API surface](#api-surface)
+12. [Database](#database)
+13. [Document ingestion pipeline](#document-ingestion-pipeline)
+14. [Retrieval pipeline](#retrieval-pipeline)
+15. [Authentication (Clerk)](#authentication-clerk)
+16. [AWS / external services](#aws--external-services)
+17. [Deployment (Docker + EC2)](#deployment-docker--ec2)
+18. [Testing](#testing)
+19. [Observability](#observability)
+20. [Contributing & development conventions](#contributing--development-conventions)
+21. [Troubleshooting](#troubleshooting)
+22. [Roadmap](#roadmap)
 
 ---
 
-## Overview
+## What this is
 
-Acadia Log IQ is an enterprise document intelligence platform that lets operations teams upload large technical documents (runbooks, SOPs, KBs, vendor manuals) and ask natural-language questions. The system retrieves relevant information using a hybrid search pipeline, routes to the most cost-effective AI model, and returns grounded, validated answers.
+Acadia Log-IQ is an end-to-end production system that helps **Tier-1 NOC engineers resolve incidents faster** by surfacing the closest historical resolution from a corpus of past tickets, KBs, and SOPs — and then guiding them through a 5-stage resolution journey (Best Match → Related Incidents → Guided Workflow → KB Reference → Operational Handoff).
 
-### Key Capabilities
+The platform has two complementary surfaces sharing a single retrieval backbone:
 
-- **Upload any document format** — PDF, DOCX, TXT, MD, JSON, LOG (up to 100MB)
-- **Smart adaptive chunking** — preserves document structure (scenarios, procedures, sections)
-- **Hybrid retrieval** — vector search + BM25 + full-text keyword search + metadata filtering
-- **Cost-optimized model routing** — Claude Haiku for most queries, Sonnet for complex ones
-- **Multi-agent troubleshooting** — Planner → Analyst → Composer pipeline for complex queries
-- **Answer validation** — grounding checks, fabrication detection, confidence scoring
-- **Version-aware** — detects duplicate/updated documents, supersedes old versions
-- **Session-based chat** — conversation history with feedback (like/dislike)
-- **Clerk authentication** — optional enterprise SSO integration
+| Surface | Audience | Trigger | Output |
+|---|---|---|---|
+| **Tier-1 Copilot** | NOC engineer with a live alert or customer-reported issue | Structured form fill **or** raw text paste | 8-section troubleshooting answer + 5-stage Resolution Journey |
+| **Document QA chat** | Anyone who wants to query the document corpus conversationally | Free-form question | Grounded answer with sources, optional multi-agent troubleshooting, confidence-scored |
+
+Both share the same Bedrock Titan embeddings, hybrid retrieval pipeline (pgvector + BM25 + full-text + metadata filtering), Postgres-backed chat sessions, and Clerk auth.
+
+The codebase has evolved across **12 sprints** of incremental, flag-gated delivery — every Sprint feature is gated behind a paired backend (`LOGIQ_*_BACKEND`) and frontend (`REACT_APP_LOGIQ_*_FRONTEND`) flag so the platform can be rolled forward or back without code changes.
 
 ---
 
-## Architecture
+## System architecture at a glance
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         React Frontend                          │
-│              (Ant Design + Tailwind + react-markdown)           │
-└──────────────────────────┬──────────────────────────────────────┘
-                           │ REST API (JSON)
-                           ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      FastAPI Backend                             │
-│                                                                 │
-│  ┌──────────┐  ┌───────────┐  ┌──────────┐  ┌──────────────┐  │
-│  │ Ingestion│  │ Retrieval │  │ Routing  │  │ Validation   │  │
-│  │ Pipeline │  │ Pipeline  │  │ Pipeline │  │ Pipeline     │  │
-│  │ (Ph 1-2) │  │ (Ph 3)   │  │ (Ph 4)  │  │ (Ph 6)      │  │
-│  └────┬─────┘  └────┬──────┘  └────┬─────┘  └──────┬───────┘  │
-│       │              │              │               │          │
-│       │         ┌────┴──────┐  ┌───┴────┐   ┌──────┴───────┐  │
-│       │         │ Agents   │  │ Models │   │ Confidence   │  │
-│       │         │ (Ph 5)   │  │ Haiku  │   │ Scorer +     │  │
-│       │         │ Planner  │  │ Sonnet │   │ Grounding    │  │
-│       │         │ Analyst  │  │ Mistral│   │ Checker      │  │
-│       │         │ Composer │  └────────┘   └──────────────┘  │
-│       │         └──────────┘                                  │
-└───────┼───────────────────────────────────────────────────────┘
-        │
-        ▼
-┌───────────────────┐  ┌───────────────────┐  ┌────────────────┐
-│ PostgreSQL + pgv  │  │ Amazon Bedrock    │  │ S3 / Local     │
-│ (RDS)             │  │ (LLM + Embed)    │  │ (File Storage) │
-│ • documents       │  │ • Titan Embed V2 │  │ • Raw uploads  │
-│ • chunks          │  │ • Claude Haiku   │  │                │
-│ • embeddings      │  │ • Claude Sonnet  │  │                │
-│ • chat_sessions   │  │ • Mistral 7B     │  │                │
-│ • document_vers   │  │   (reranking)    │  │                │
-└───────────────────┘  └───────────────────┘  └────────────────┘
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                              React 18 Frontend                                 │
+│                          (Ant Design + Tailwind + CRA)                         │
+│                                                                                │
+│   ┌─────────────────┐   ┌─────────────────┐   ┌────────────────────────────┐   │
+│   │  LandingRouter  │   │   ChatArea +    │   │    Tier1Workspace          │   │
+│   │  (entry point)  │──▶│   ChatInput     │   │    └─ ResolutionJourney    │   │
+│   │                 │   │   ChatMessage   │   │       (5 stage cards)      │   │
+│   │  ┌─Proactive──┐ │   │   Sidebar       │   │                            │   │
+│   │  └─Reactive───┘ │   └─────────────────┘   └────────────────────────────┘   │
+│   └─────────────────┘                                                          │
+└──────────────────────────────────────┬─────────────────────────────────────────┘
+                                       │ REST / JSON (axios + Clerk JWT)
+                                       ▼
+┌────────────────────────────────────────────────────────────────────────────────┐
+│                              FastAPI Backend                                   │
+│                                                                                │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  ┌─────────────────┐    │
+│  │  /tier1/*    │  │ /tier1/      │  │  /intake/*   │  │  /ask, /upload, │    │
+│  │  Sprint 6    │  │  journey/*   │  │  Sprint 9    │  │  /chat/*,       │    │
+│  │  Copilot     │  │  Sprint 10   │  │  Universal   │  │  /fingerprint/* │    │
+│  │  (analyze,   │  │  (5-stage    │  │  Intake      │  │  /feedback/*    │    │
+│  │   match,     │  │   journey,   │  │  (extract +  │  │  Phases 1-6     │    │
+│  │   feedback)  │  │   telemetry) │  │   suggest)   │  │                 │    │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  └────────┬────────┘    │
+│         │                 │                 │                   │             │
+│         ▼                 ▼                 ▼                   ▼             │
+│  ┌──────────────────────────────────────────────────────────────────────┐    │
+│  │       Shared retrieval / LLM / validation / agents subsystems        │    │
+│  │                                                                      │    │
+│  │  retrieval/orchestrator  →  query_classifier → keyword_search +      │    │
+│  │  pgvector + BM25 + ts_vector → fusion (RRF) → reranker → top-N       │    │
+│  │                                                                      │    │
+│  │  routing/model_router  →  complexity_classifier → Haiku / Sonnet     │    │
+│  │  agents/{planner, analyst, composer}  →  multi-agent troubleshooting │    │
+│  │  validation/{validator, confidence_scorer, grounding_checker}        │    │
+│  │  tier1_copilot/retrieval, prompt_builder, aggregator (Tier-1 path)   │    │
+│  └──────────────────────────────────────────────────────────────────────┘    │
+└─────────┬──────────────────────────────┬──────────────────────────────────────┘
+          │                              │
+          ▼                              ▼
+┌──────────────────────┐      ┌────────────────────────────────────────────────┐
+│ PostgreSQL+pgvector  │      │              AWS Bedrock                       │
+│ (RDS or self-hosted) │      │   • amazon.titan-embed-text-v2:0  (1024-d)    │
+│                      │      │   • mistral.mistral-7b-instruct-v0:2 (rerank) │
+│ • documents          │      │   • anthropic.claude-haiku-4-5  (default LLM) │
+│ • chunks (+ vectors) │      │   • anthropic.claude-sonnet-4-6 (complex Q)   │
+│ • embeddings         │      └────────────────────────────────────────────────┘
+│ • chat_sessions      │
+│ • chat_messages      │      ┌────────────────────────────────────────────────┐
+│ • tier1_sessions     │      │       Other AWS / external services            │
+│ • tier1_journey_     │      │   • S3 (optional file storage)                 │
+│   events             │      │   • SES (feedback email notifications)         │
+│ • intake_extractions │      │   • Clerk (JWT auth, optional)                 │
+│ • semantic_answer_   │      └────────────────────────────────────────────────┘
+│   cache              │
+│ • tier1_answer_cache │
+└──────────────────────┘
 ```
 
 ---
 
-## Technology Stack
+## Tech stack
 
-| Layer | Technology | Purpose |
-|-------|-----------|---------|
-| **Frontend** | React 18, Ant Design 5, Tailwind CSS | Chat UI, file upload, session management |
-| **Backend** | FastAPI (Python 3.11+) | REST API, background tasks, middleware |
-| **Embeddings** | Amazon Titan Embed Text V2 | 1024-dim vectors for semantic search |
-| **Answer Gen (default)** | Claude Haiku 4.5 via Bedrock | Grounded answer generation (~$0.001/query) |
-| **Answer Gen (complex)** | Claude Sonnet 4.6 via Bedrock | Multi-step reasoning (~$0.01/query) |
-| **Reranking** | Mistral 7B via Bedrock | Cheap chunk relevance scoring |
-| **Metadata Extraction** | Claude Haiku via Bedrock | Document metadata during ingestion |
-| **Database** | PostgreSQL 15 + pgvector | Vectors, chunks, documents, sessions |
-| **File Storage** | Local filesystem / S3 | Raw uploaded files |
-| **Auth** | Clerk (optional) | JWT-based SSO, user management |
-| **Deployment** | Docker, Docker Compose | Containerized local + EC2 |
+| Layer | Technology | Notes |
+|---|---|---|
+| **Frontend framework** | React 18 (CRA) | Functional components + hooks, no Redux (uses `useReducer` + Context) |
+| **UI kit** | Ant Design 5 | Forms, modals, layout primitives |
+| **Styling** | Tailwind CSS + custom theme tokens | `frontend/src/theme/acadiaTheme.js` defines `MODERN_TOKENS` (gradient navy palette) |
+| **HTTP client** | axios | `frontend/src/services/api.js` with Clerk JWT interceptor |
+| **Backend framework** | FastAPI (Python 3.11) | `backend/api.py` is the entry point; `lifespan` hook builds BM25 index + glossary at startup |
+| **Auth** | Clerk (JWT, RS256) | Backend verifies via `PyJWKClient` in `backend/clerk_auth.py`; frontend uses `@clerk/clerk-react` |
+| **Vector DB** | PostgreSQL + pgvector | 1024-dim cosine; `chunks` + `embeddings` tables |
+| **Keyword retrieval** | PostgreSQL `to_tsvector` + ILIKE | Plus an in-memory BM25 index rebuilt at startup from `chunks.content` |
+| **Reranker** | Mistral 7B (Bedrock) | Modular — pluggable cross-encoder support exists |
+| **LLM (default)** | Claude Haiku 4.5 (Bedrock) | Cost-efficient, sub-second latency |
+| **LLM (complex)** | Claude Sonnet 4.6 (Bedrock) | Routed to via complexity classifier (signals: multi-step, reasoning, context size, retrieval confidence, multi-document span) |
+| **LLM (legacy / Tier-1 fallback)** | Mistral 7B (Bedrock) | Used by Tier-1 Copilot for the 8-section answer prompt; deterministic `template_fallback` if parse fails |
+| **Embeddings** | Amazon Titan Embed V2 | 1024-dim, batched ingest |
+| **File storage** | Local FS or AWS S3 | `STORAGE_TYPE` env switch |
+| **Email** | AWS SES | Feedback submissions only |
+| **Containerization** | Docker + Docker Compose | Two compose files: local dev + EC2 |
+| **CI** | GitHub Actions | `.github/workflows/docker-build.yml` (note: stale Streamlit workflow — see roadmap) |
 
 ---
 
-## Project Structure
+## The two intake flows — Proactive & Reactive
+
+The Tier-1 Copilot landing page (post-Sprint-11) renders a **two-column split**: Proactive on the left, Reactive on the right. Both columns feed the same downstream `/tier1/analyze` endpoint and produce the same Resolution Journey.
 
 ```
-acadia-log-iq/
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                          Tier-1 Copilot Landing                             │
+├──────────────────────────────────────┬──────────────────────────────────────┤
+│            PROACTIVE                  │            REACTIVE                  │
+│   Monitoring / alert-triggered        │   Customer-reported via email,      │
+│                                       │   phone, portal, chat or note       │
+│                                       │                                      │
+│   What's happening?                   │   Tell us what's happening           │
+│                                       │                                      │
+│   ┌────────────────────────┐          │   ┌────────────────────────────┐    │
+│   │ Severity: P1 P2 P3 P4  │          │   │ [paste raw alert /         │    │
+│   │ Asset or system: ___   │          │   │  customer message here]    │    │
+│   │ What's the alert: ___  │          │   │                            │    │
+│   │ + 6 optional fields    │          │   │ 0/10000 chars              │    │
+│   │                        │          │   │       [Extract & Suggest]  │    │
+│   │       [Analyze alert]  │          │   └────────────────────────────┘    │
+│   └────────────────────────┘          │              │                       │
+│           │                           │              ▼                       │
+│           │                           │   POST /intake/extract               │
+│           │                           │   → up to 4 candidate "interpret-    │
+│           │                           │     ation cards" (severity +         │
+│           │                           │     asset + alert_type + customer    │
+│           │                           │     + location)                      │
+│           │                           │              │                       │
+│           │     ◀─── pick a card ─────┘              ▼                       │
+│           │                              SuggestionCarousel                  │
+│           │                              (engineer picks one)                │
+│           │     pre-fills Proactive form on the left ◀───┘                   │
+│           ▼                                                                  │
+│   POST /tier1/analyze                                                        │
+│           │                                                                  │
+└───────────┼──────────────────────────────────────────────────────────────────┘
+            ▼
+       Tier1Workspace → ResolutionJourney (5 stages)
+```
+
+### Proactive flow (10 steps)
+
+1. Engineer fills the structured form (Severity, Asset, Alert type — required; 6 optional fields).
+2. Click **Analyze alert** → frontend calls `analyzeAlert(payload)` from `frontend/src/components/Tier1Copilot/tier1Api.js`.
+3. `POST /tier1/analyze` → handled by `backend/tier1_copilot/routes.py:analyze`.
+4. Alert is normalized via `normalize_alert(req, alias_dict)` → produces a `signature_hash`.
+5. Cache check (`tier1_answer_cache` keyed by signature). On miss:
+6. `retrieve_top_matches()` runs:
+   - **Stage 1** — exact SQL ILIKE against denormalized `chunks.alert_signature`, `fingerprints_text`, `component_category` (added in migration 038).
+   - **Stage 2** — hybrid pgvector cosine + `to_tsvector` plainto_tsquery (each LIMIT 30), candidates fused.
+   - **Weighted rerank** — Jaccard overlap (alert_type / asset / fingerprint / technology) + vector_similarity + resolution_quality. Sprint-7 boosts: recency, success_frequency, same_customer_boost, same_asset_family.
+7. `prompt_builder.build_prompt()` constructs the Mistral prompt with the top match + compact context. On parse failure, `template_fallback()` returns a deterministic 8-section answer.
+8. `parse_answer(raw)` decodes into `Tier1AnswerSection` (issue_understanding, historical_match, most_likely_cause, recommended_first_checks, most_likely_fix, validation, escalate_if, follow_up_question).
+9. A row is created in `tier1_sessions` (state: `current_match_index`, `top_5_match_ids`, `started_at`); response cached.
+10. Frontend stores the result and renders `<Tier1Workspace>` → `<ResolutionJourney>` (when `TIER1_JOURNEY_ON` and a `session_id` is present).
+
+### Reactive flow (8 steps)
+
+1. Engineer pastes raw text (email, phone notes, portal ticket dump) into the right column.
+2. Click **Extract & Suggest** → `POST /intake/extract`.
+3. `backend/tier1_copilot/intake/routes.py` validates length, loads catalogs (severity / asset / alert-type / customer derived from the corpus), invokes Bedrock LLM via `extractor.py`.
+4. Each candidate is run through `validate_candidate()` (substring grounding against the raw text — rejects hallucinations).
+5. `diversifier.diversify()` caps to 4 distinct candidate cards.
+6. `audit.log_extraction()` writes an `intake_extractions` row; response includes `extraction_id` + candidates.
+7. Frontend renders `<SuggestionCarousel>`; engineer picks a card → `onCardPicked(filled)` → the Proactive form on the left is populated via `prefill` prop + `useEffect`.
+8. Engineer reviews/edits and clicks **Analyze alert** → from here the flow merges with Step 3 of Proactive.
+
+---
+
+## The Resolution Journey
+
+Once `/tier1/analyze` returns a session_id, `ResolutionJourney` renders a 5-stage progressive disclosure. Each stage is a Card with its own backend endpoint and is revealed only when the engineer clicks "Reveal next stage" — minimizing cognitive load and giving Tier-2 a clear traversal log if escalation happens.
+
+| Stage | UI title (current) | Backend module | Purpose |
+|---|---|---|---|
+| **Stage 0** | Best Historical Match & Recommended Resolution | `journey/stage0_confidence.py` (Best-Ticket Distillation) | Surfaces the single highest-quality past resolution with the Primary_Fix and Resolution_Steps from that ticket. |
+| **Pivot Insights** | Smoking Gun + Do Not Chase (merged) | `journey/stage1_smoking_gun.py` + `stage1_do_not_chase.py` | Pulls the strongest pivot signal across the cohort and the noisy paths *not* to chase. |
+| **Stage 2** | Related Incidents & Probable Causes | `journey/stage2_historical.py` | Up to 5 related incidents (`HistoricalMatchCard`) drawn from the ranked cohort. |
+| **Stage 3** | Guided Troubleshooting Workflow | `journey/stage3_troubleshooting.py` | Up to 8 consolidated diagnostic steps (deduplicated, sequenced, with Alt A / Alt B / Primary branches). |
+| **Stage 4** | Knowledge Base & SOP Reference | `journey/stage4_kb_handoff.py` + `stage4_search_kb_handoff.py` | Spawns a chat session pre-loaded with the alert; engineer can ask follow-ups against full corpus. |
+| **Stage 5** | Operational Handoff | `journey/stage5_escalation.py` | Builds an escalation package (what's tried, recommended owner / next action / contacts) including the engineer's stage-traversal log with **per-stage time-spent**. |
+
+### Reveal mechanics
+
+- `STAGE_ORDER = ["stage_0", "pivot_insights", "stage_2", "stage_3", "stage_4", "stage_5"]`
+- On mount: `GET /tier1/journey/{sid}/initial` and `GET /tier1/journey/{sid}/resume-state` run in parallel. Stage 0 + Pivot Insights are always revealed; the rest unlock on click.
+- Every reveal click POSTs `next_stage_clicked` to `/tier1/journey/{sid}/event` (telemetry → `tier1_journey_events`).
+- `resume-state` reads `event_type='stage_advanced'` rows to restore "where the engineer left off" on remount.
+
+### Telemetry
+
+`backend/tier1_copilot/journey/telemetry.py` validates each event against an allowlist:
+
+| event_type | Fired when |
+|---|---|
+| `stage_rendered` | Stage Card mounted |
+| `helpful_clicked` | Engineer marked a stage as helpful |
+| `next_stage_clicked` | Engineer advanced to the next stage |
+| `stage_advanced` | Resume marker (used by `/resume-state`) |
+| `kb_chat_engaged` | Stage 4 → chat handoff actually returned an answer |
+| `escalation_initiated_from_chat` | Engineer clicked "Escalate" inside the chat (Sprint 10.5) |
+| `abandoned` | Tab closed / session timeout |
+
+All inserts are fire-and-forget — telemetry failures are logged, never raised.
+
+---
+
+## Chat ↔ Journey round-trip
+
+Stage 4 is the bridge between the structured journey and the free-form chat surface. The user can hop into chat for an open-ended follow-up and come back to the journey without losing context.
+
+```
+ResolutionJourney (Stage 4)
+   │  click "Open chat / Search KB"
+   │  useChatHandoff(sid).askInChat(prefilledMessage)
+   ▼
+POST /tier1/journey/{sid}/search-kb-handoff
+   │  • mints a chat_sessions row
+   │  • inserts the user turn with metadata.journey_session_id = sid
+   │  • returns { chat_session_id }
+   ▼
+SET_MODE("troubleshooting")   ──▶  AppLayout swaps to ChatArea
+SET_SESSION (hydrate)         ──▶  state.sessionMetadata.journey_session_id set
+askQuestion(text, chat_session_id) → /ask → ADD_ASSISTANT_MESSAGE
+   │
+   │  Engineer can now keep chatting normally.
+   │  ChatArea renders a "Back to Resolution Journey" banner because
+   │  sessionMetadata.journey_session_id is set.
+   ▼
+Engineer clicks "Return to Stages" or "Escalate to Tier 2"
+   │  JourneyMessageActions dispatches RESUME_JOURNEY({ journeySessionId })
+   ▼
+ChatContext: journeyResumeSessionId set, selectedMode cleared
+   │
+   ▼
+AppLayout falls back to LandingRouter → mounts Tier1Workspace
+with the journey session restored.
+```
+
+The round-trip also supports re-entry from the **chat history sidebar**: clicking a past chat dispatches `SET_SESSION` with the persisted `selected_mode` ("troubleshooting"); AppLayout flips back into ChatArea — and if that chat was journey-originated, the "Back to Resolution Journey" banner is still there.
+
+> **Sprint 12 fix.** The "New Chat" button used to reset `selectedMode` to `null`, which after the Sprint-11 LandingRouter changes started bouncing engineers to the Tier-1 intake form instead of opening a fresh chat. The reducer now keeps `selectedMode = "troubleshooting"` so a fresh chat opens cleanly.
+
+---
+
+## Repository layout
+
+```
+AICode_Chatbot/
 ├── backend/
-│   ├── api.py                              # FastAPI app, all endpoints, /ask pipeline
-│   ├── config.py                           # Pydantic settings (Phases 2-6)
-│   ├── vector_store.py                     # PostgreSQL/pgvector, BM25, CRUD
-│   ├── db/
-│   │   └── connection.py                   # SQLAlchemy session factory
+│   ├── api.py                                # FastAPI app, /ask pipeline, /upload, /chat/*, /fingerprint/*
+│   ├── config.py                             # Pydantic settings; LOGIQ_* feature flags
+│   ├── clerk_auth.py                         # Clerk JWT verification (PyJWKClient)
+│   ├── vector_store.py                       # Postgres CRUD + BM25 index + sessions persistence
+│   ├── tier1_copilot/                        # Sprint 6+: structured Tier-1 Copilot
+│   │   ├── routes.py                         # /tier1/* endpoints
+│   │   ├── retrieval.py                      # Two-stage retrieval + weighted reranking
+│   │   ├── normalizer.py                     # Alert → signature_hash + alias expansion
+│   │   ├── prompt_builder.py                 # Mistral prompt + 8-section parser + fallback
+│   │   ├── aggregator.py                     # Match list assembly
+│   │   ├── cache.py                          # tier1_answer_cache accessors
+│   │   ├── feedback.py                       # Thumbs / follow-up actions
+│   │   ├── alias_dictionary.py
+│   │   ├── schemas.py                        # Pydantic request/response models
+│   │   ├── session_state/tier1_session.py    # tier1_sessions row + state machine
+│   │   ├── intake/                           # Sprint 9: universal intake (paste flow)
+│   │   │   ├── routes.py                     # /intake/* endpoints
+│   │   │   ├── extractor.py
+│   │   │   ├── validator.py                  # Substring grounding (anti-hallucination)
+│   │   │   ├── diversifier.py                # Caps candidates at 4
+│   │   │   └── catalogs.py                   # Severity/asset/alert/customer catalogs
+│   │   ├── journey/                          # Sprint 10: Resolution Journey
+│   │   │   ├── routes.py                     # /tier1/journey/* endpoints
+│   │   │   ├── stage0_confidence.py          # Best-ticket distillation
+│   │   │   ├── stage1_smoking_gun.py         # Pivot signal
+│   │   │   ├── stage1_do_not_chase.py
+│   │   │   ├── stage2_historical.py          # 5 related incidents
+│   │   │   ├── stage3_troubleshooting.py     # Consolidated steps
+│   │   │   ├── stage4_kb_handoff.py
+│   │   │   ├── stage4_search_kb_handoff.py   # Chat session minting
+│   │   │   ├── stage5_escalation.py          # Operational handoff package
+│   │   │   ├── telemetry.py                  # tier1_journey_events writer
+│   │   │   └── ticket_loader.py
+│   │   └── diagnostics/                      # Sprint 7+: deeper analysis cards
+│   │       ├── deeper_diagnostics.py
+│   │       ├── stuck_detector.py
+│   │       ├── explain_recommendation.py
+│   │       ├── escalation_package.py
+│   │       └── escalation_directory.py
+│   ├── retrieval/                            # /ask hybrid retrieval (Phase 3)
+│   │   ├── orchestrator.py                   # Coordinator: classify → retrieve → fuse → rerank
+│   │   ├── query_classifier.py               # keyword / semantic / mixed
+│   │   ├── keyword_search.py
+│   │   ├── fusion.py                         # Reciprocal Rank Fusion
+│   │   └── reranker.py                       # Modular (LLM / cross-encoder / none)
+│   ├── routing/                              # Phase 4 model routing
+│   │   ├── model_router.py
+│   │   ├── complexity_classifier.py
+│   │   └── context_builder.py
+│   ├── agents/                               # Phase 5 multi-agent troubleshooting
+│   │   ├── orchestrator.py                   # Escalation gate
+│   │   ├── planner.py                        # Sonnet — query decomposition
+│   │   ├── analyst.py                        # Haiku — per-step
+│   │   ├── composer.py                       # Haiku — synthesis
+│   │   ├── expert_copilot_template.py        # Sprint 5 gold-schema renderer
+│   │   └── base.py                           # Token budget, LLM invoker
+│   ├── validation/                           # Phase 6 guardrails
+│   │   ├── validator.py
+│   │   ├── confidence_scorer.py              # 4-signal blend (retrieval/coverage/grounding/consistency)
+│   │   ├── grounding_checker.py              # Fabrication detection
+│   │   └── eval_harness.py
 │   ├── ingestion/
-│   │   ├── structured_parser.py            # 3-strategy adaptive document parser
-│   │   └── prompt_templates.py             # Haiku metadata extraction prompts
-│   ├── metadata/
-│   │   └── structure_config.py             # Operational section taxonomy
+│   │   ├── structured_parser.py              # 3-strategy adaptive heading detection
+│   │   └── prompt_templates.py
 │   ├── services/
-│   │   ├── bedrock_haiku.py                # Claude Haiku client (JSON invoke)
-│   │   └── contextual_ingestion_service.py # Chunking + metadata + version detection
-│   ├── retrieval/                          # Phase 3: Hybrid retrieval
-│   │   ├── __init__.py
-│   │   ├── orchestrator.py                 # Main retrieval coordinator
-│   │   ├── query_classifier.py             # Query intent (keyword/semantic/mixed)
-│   │   ├── keyword_search.py               # PostgreSQL FTS + ILIKE
-│   │   ├── fusion.py                       # Weighted RRF result merging
-│   │   └── reranker.py                     # Modular reranker (LLM/CrossEncoder/None)
-│   ├── routing/                            # Phase 4: Model routing
-│   │   ├── __init__.py
-│   │   ├── model_router.py                 # Haiku/Sonnet selection + invocation
-│   │   ├── complexity_classifier.py        # Query difficulty scoring
-│   │   └── context_builder.py              # Enriched prompt assembly
-│   ├── agents/                             # Phase 5: Multi-agent troubleshooting
-│   │   ├── __init__.py
-│   │   ├── orchestrator.py                 # Escalation gate + pipeline
-│   │   ├── base.py                         # Token budget, LLM invoker
-│   │   ├── planner.py                      # Query decomposition (Sonnet)
-│   │   ├── analyst.py                      # Per-step analysis (Haiku)
-│   │   └── composer.py                     # Answer synthesis (Haiku)
-│   ├── validation/                         # Phase 6: Answer validation
-│   │   ├── __init__.py
-│   │   ├── validator.py                    # Main validation pipeline
-│   │   ├── confidence_scorer.py            # 4-signal confidence blend
-│   │   ├── grounding_checker.py            # Fabrication + version checks
-│   │   └── eval_harness.py                 # Offline evaluation utilities
+│   │   ├── contextual_ingestion_service.py   # process_document — main ingestion entry
+│   │   ├── embedding_service.py              # Bedrock Titan v2 client
+│   │   ├── bedrock_haiku.py                  # Anthropic Haiku JSON invoke
+│   │   ├── semantic_cache.py                 # Brief 5 cross-user answer cache
+│   │   ├── session_mode_state.py
+│   │   └── journey_retrieval_context.py
 │   ├── storage/
-│   │   └── local_storage.py                # File storage provider
-│   ├── clerk_auth.py                       # Clerk JWT verification
-│   ├── requirements.txt
+│   │   ├── local_storage.py                  # Filesystem provider
+│   │   └── s3_storage.py                     # S3 provider (boto3)
+│   ├── db/
+│   │   ├── connection.py                     # SQLAlchemy engine + SessionLocal
+│   │   ├── migrate.py                        # Numeric-ordered SQL runner
+│   │   └── migrations/                       # 001_*.sql … 041_*.sql (see Database section)
+│   ├── tests/                                # Backend tests
 │   ├── Dockerfile
+│   ├── requirements.txt
 │   └── .env.example
 ├── frontend/
 │   ├── src/
-│   │   ├── components/                     # React components
-│   │   ├── hooks/                          # ChatContext, useAuthInterceptor
-│   │   ├── services/api.js                 # Axios client
-│   │   ├── App.js
-│   │   ├── index.js
-│   │   └── index.css                       # Tailwind + theme styles
+│   │   ├── App.js                            # ThemeProvider → ConfigProvider → AuthGate → ChatProvider → AppLayout
+│   │   ├── index.js                          # ClerkProvider mount
+│   │   ├── components/
+│   │   │   ├── LandingRouter.js              # Default = tier1; legacy fingerprint screen disabled
+│   │   │   ├── LandingPage.js                # Pre-Sprint-4 mode picker
+│   │   │   ├── ChatArea.js
+│   │   │   ├── ChatInput.js
+│   │   │   ├── ChatMessage.js
+│   │   │   ├── Sidebar.js                    # History + new-chat + admin upload
+│   │   │   ├── AuthGate.js
+│   │   │   ├── FingerprintInputScreen.js     # (currently disabled in LandingRouter)
+│   │   │   ├── Tier1Copilot/
+│   │   │   │   ├── Tier1IntakeForm.js        # Proactive | Reactive split (SourceAwareIntake)
+│   │   │   │   ├── Tier1Workspace.js
+│   │   │   │   ├── Tier1AnswerCard.js
+│   │   │   │   ├── Tier1FollowupChips.js
+│   │   │   │   ├── tier1Constants.js         # All UI labels, feature flags, severity options
+│   │   │   │   ├── tier1Api.js
+│   │   │   │   ├── intake/
+│   │   │   │   │   ├── UniversalIntakePanel.js
+│   │   │   │   │   ├── SuggestionCarousel.js
+│   │   │   │   │   └── intakeApi.js
+│   │   │   │   └── journey/
+│   │   │   │       ├── ResolutionJourney.js
+│   │   │   │       ├── Stage0BestTicketDistillation.js
+│   │   │   │       ├── Stage0ConfidenceLead.js   # legacy Sprint-10 path
+│   │   │   │       ├── Stage1aSmokingGun.js
+│   │   │   │       ├── Stage1bDoNotChase.js
+│   │   │   │       ├── PivotInsightsPanel.js
+│   │   │   │       ├── Stage2HistoricalMatches.js
+│   │   │   │       ├── Stage3TroubleshootingApproach.js
+│   │   │   │       ├── Stage4SearchKBHandoff.js
+│   │   │   │       ├── Stage5EscalationPackage.js
+│   │   │   │       ├── EscalateButton.js
+│   │   │   │       ├── HelpfulButton.js
+│   │   │   │       ├── useChatHandoff.js     # Shared "Ask in chat" plumbing
+│   │   │   │       └── journeyApi.js
+│   │   │   └── journey-chat/
+│   │   │       └── JourneyMessageActions.js  # Return-to-Stages / Escalate-to-Tier-2 buttons
+│   │   ├── hooks/
+│   │   │   ├── ChatContext.js                # useReducer state — sessions, messages, mode, journey resume
+│   │   │   ├── ThemeContext.js
+│   │   │   ├── useAuthInterceptor.js         # axios JWT injector
+│   │   │   └── useAutoRegister.js
+│   │   ├── services/api.js                   # Axios + setTokenGetter; all REST helpers
+│   │   ├── theme/
+│   │   │   ├── acadiaTheme.js                # MODERN_TOKENS (navy gradient palette)
+│   │   │   └── ThemeProvider.js
+│   │   ├── config/clientSettings.js          # GUIDED_WORKFLOW_ENABLED + Sprint flags
+│   │   └── index.css                         # Tailwind + CSS variables
 │   ├── package.json
 │   ├── nginx.conf
-│   └── Dockerfile
-├── tests/
-│   ├── test_retrieval.py                   # Phase 3 tests
-│   ├── test_routing.py                     # Phase 4 tests
-│   ├── test_agents.py                      # Phase 5 tests
-│   └── test_validation.py                  # Phase 6 tests
-├── docker-compose.yml                      # Local development
-├── docker-compose.ec2.yml                  # EC2 deployment
-└── README.md                               # This file
+│   ├── Dockerfile
+│   └── .env / .env.example
+├── docker-compose.yml                        # Local dev
+├── docker-compose.ec2.yml                    # EC2 deployment (api on 8000, ui on 8501→80)
+├── .github/workflows/docker-build.yml        # CI (note: stale Streamlit workflow)
+├── README.md                                 # This file
+└── ARCHITECTURE.docx                         # Detailed end-to-end flow doc (generated)
 ```
 
 ---
 
-## Phase-by-Phase Development
+## Quickstart — local development
 
-### Phase 1 — Foundation
-Basic FastAPI backend, file upload, naive character-based chunking, Titan embeddings, pgvector storage, Mistral 7B for answer generation, React chat UI.
+### Prerequisites
 
-### Phase 2 — Contextual Ingestion
-Structured document parser (DOCX/PDF/TXT), heading-aware chunking, Claude Haiku metadata extraction (vendor, product, domain, tags), duplicate/version detection with SHA-256 fingerprinting, concurrent embedding with ThreadPoolExecutor.
+- Python 3.11+
+- Node.js 18+
+- PostgreSQL 15 with the `pgvector` extension
+- AWS credentials with Bedrock access (or skip Bedrock and run with stubs)
+- (Optional) Clerk account for auth
 
-### Phase 3 — Hybrid Retrieval
-Four-channel search: pgvector cosine similarity + in-memory BM25 + PostgreSQL full-text search (ts_vector) + metadata JSONB filtering. Query intent classifier (keyword/semantic/mixed). Reciprocal Rank Fusion with strategy-aware weight adjustment. Modular reranker (LLM-based by default).
+### 1. Database
 
-### Phase 4 — Model Routing
-Complexity classifier scores queries 0.0-1.0 using 5 signals (multi-step patterns, reasoning patterns, context size, retrieval confidence, multi-document span). Routes to Claude Haiku (default for simple+moderate) or Sonnet (complex). Context builder enriches prompts with session history, metadata hints, and confidence signals.
-
-### Phase 5 — Multi-Agent Troubleshooting
-Selective escalation for complex queries matching agent-eligible patterns (troubleshooting, comparison, synthesis). 3-agent pipeline: Planner (Sonnet) decomposes query → Analyst (Haiku) executes per-step → Composer (Haiku) synthesizes. Shared token budget with hard ceiling. Only ~10-15% of queries trigger agents.
-
-### Phase 6 — Validation Guardrails
-Post-generation validation: 4-signal confidence scoring (retrieval strength, query coverage, grounding faithfulness, consistency). Grounding checker detects fabricated URLs/emails/phones, flags superseded sources. Failed answers replaced with safe fallbacks. JSONL evaluation logging for offline quality analysis.
-
-### Accuracy Fix — Adaptive Chunking
-Root cause of 10% initial accuracy: documents with all-Normal Word styles produced franken-chunks mixing unrelated scenarios. Fix: 3-strategy adaptive parser: (1) Word heading styles, (2) content-based regex patterns, (3) LLM-based section discovery via Haiku for truly unstructured documents. Combined with switching default generation from Mistral 7B to Claude Haiku.
-
----
-
-## How It Works — End to End
-
-### Document Upload Flow
-```
-User uploads DOCX/PDF
-    │
-    ▼
-1. File saved to local storage / S3
-2. SHA-256 fingerprint computed
-3. Duplicate check against existing documents
-4. Structured parser runs (3-strategy heading detection)
-5. Scenario-aware chunking (each section = 1 chunk)
-6. Claude Haiku extracts metadata per chunk (concurrent, batched)
-7. Titan Embed V2 generates embeddings (concurrent)
-8. Chunks + embeddings + metadata inserted into PostgreSQL
-9. BM25 index updated in-memory
-10. Version detection: new_document / new_version / exact_duplicate
+```sql
+CREATE EXTENSION IF NOT EXISTS vector;
+CREATE EXTENSION IF NOT EXISTS pgcrypto;
 ```
 
-### Question Answering Flow
+Migrations run automatically on first backend startup via `backend/db/migrate.py` (numeric-ordered SQL files in `backend/db/migrations/`).
+
+### 2. Backend
+
+```bash
+cd backend
+cp .env.example .env       # edit DATABASE_URL, AWS_*, BEDROCK_*, CLERK_* etc.
+pip install -r requirements.txt
+
+# From the repo root:
+python -m uvicorn backend.api:app --host 0.0.0.0 --port 8000 --reload
 ```
-User asks question
-    │
-    ▼
-1. Embed query with Titan
-2. Phase 3: 4-channel parallel search → RRF fusion → rerank
-3. Grounding gate: reject if insufficient document support
-4. Phase 4: Classify complexity → select model (Haiku/Sonnet)
-5. Phase 5: Escalate to agents if complex + pattern match
-6. Generate answer from retrieved document context
-7. Phase 6: Validate grounding, check fabrications, score confidence
-8. Return answer with sources, confidence, and diagnostics
+
+Health check: `curl http://localhost:8000/health`
+
+### 3. Frontend
+
+```bash
+cd frontend
+cp .env.example .env       # set REACT_APP_API_BASE=http://localhost:8000
+npm install --legacy-peer-deps   # Clerk 5.x requires this flag
+npm start
+```
+
+Open `http://localhost:3000`. The LandingRouter mounts the Tier-1 Copilot intake by default (Sprint 11+).
+
+### 4. Useful logs
+
+```powershell
+# Windows / PowerShell — capture backend logs to file:
+python -m uvicorn backend.api:app --host 0.0.0.0 --port 8000 --reload 2>&1 |
+    Tee-Object logs\backend.log
 ```
 
 ---
 
-## AWS Services & Model Setup
+## Environment variables
 
-### Required AWS Services
+### Backend (`backend/.env`)
 
-| Service | Purpose | Required |
-|---------|---------|----------|
-| **Amazon Bedrock** | LLM inference (Haiku, Sonnet, Mistral, Titan Embed) | Yes |
-| **Amazon RDS** | PostgreSQL 15 + pgvector for vectors/chunks | Yes (or self-hosted PG) |
-| **Amazon S3** | Raw file storage (optional, local storage works) | Optional |
-| **Amazon EC2** | Application hosting | Yes (for cloud deploy) |
-| **Amazon SES** | Feedback email notifications | Optional |
+```env
+# ─── AWS / Bedrock ──────────────────────────────────────────
+AWS_REGION=us-east-1
+AWS_ACCESS_KEY_ID=                   # blank on EC2 (use IAM Role)
+AWS_SECRET_ACCESS_KEY=
+AWS_SESSION_TOKEN=
 
-### Bedrock Model Access
+BEDROCK_EMBED_MODEL=amazon.titan-embed-text-v2:0
+BEDROCK_LLM_MODEL=mistral.mistral-7b-instruct-v0:2
+BEDROCK_HAIKU_MODEL=us.anthropic.claude-haiku-4-5-20251001-v1:0
+BEDROCK_SONNET_MODEL=us.anthropic.claude-sonnet-4-6
 
-Enable these models in the AWS Bedrock console (region: us-east-1):
+# ─── Database ───────────────────────────────────────────────
+DATABASE_URL=postgresql+psycopg://user:password@host:5432/dbname
 
-| Model | Bedrock ID | Purpose | Cost |
-|-------|-----------|---------|------|
-| Titan Embed V2 | `amazon.titan-embed-text-v2:0` | Embeddings | ~$0.0001/query |
-| Claude Haiku 4.5 | `us.anthropic.claude-haiku-4-5-20251001-v1:0` | Default answers + metadata | ~$0.001/query |
-| Claude Sonnet 4.6 | `us.anthropic.claude-sonnet-4-6` | Complex reasoning | ~$0.01/query |
-| Mistral 7B | `mistral.mistral-7b-instruct-v0:2` | Reranking only | ~$0.0001/query |
+# ─── Storage ────────────────────────────────────────────────
+UPLOAD_DIR=/app/uploads
+# STORAGE_TYPE=s3
+# S3_BUCKET=acadia-logiq-uploads
 
-### IAM Policy (Least Privilege)
+# ─── Vector store / collection ──────────────────────────────
+CHROMA_PERSIST_DIR=/app/data/chroma  # legacy — most retrieval uses pgvector
+COLLECTION_NAME=logs_titan_v2_1024
+
+# ─── Tuning ─────────────────────────────────────────────────
+CHUNK_MAX_CHARS=6000
+CHUNK_MIN_CHARS=200
+CHUNK_BATCH_SIZE=6
+ENABLE_LLM_CHUNK_FALLBACK=true
+ENABLE_METADATA_EXTRACTION=true
+
+# ─── Routing / agents / validation ──────────────────────────
+ENABLE_MODEL_ROUTING=true
+ROUTING_DEFAULT_MODEL=haiku
+ENABLE_AGENT_MODE=true
+AGENT_COMPLEXITY_THRESHOLD=0.65
+ENABLE_ANSWER_VALIDATION=true
+ENABLE_EVAL_LOGGING=true
+
+# ─── Auth (Clerk) ───────────────────────────────────────────
+CLERK_ENABLED=false
+CLERK_PUBLISHABLE_KEY=
+CLERK_SECRET_KEY=                    # NEVER commit
+
+# ─── Email (SES) ────────────────────────────────────────────
+SES_ENABLED=false
+SES_SENDER_EMAIL=noreply@yourdomain.com
+SES_FEEDBACK_RECIPIENT=team@yourdomain.com
+
+# ─── Server ─────────────────────────────────────────────────
+HOST=0.0.0.0
+PORT=8000
+LOG_LEVEL=INFO
+API_KEY=                             # optional API-key auth fallback when Clerk off
+UI_API_KEY=                          # used by frontend when CLERK_ENABLED=false
+```
+
+### Frontend (`frontend/.env`)
+
+```env
+REACT_APP_API_BASE=http://localhost:8000
+REACT_APP_CLERK_PUBLISHABLE_KEY=     # leave blank to disable auth UI
+REACT_APP_BUILD_TIMESTAMP=dev        # surfaced in the bottom-right BuildStamp
+
+# Sprint feature flags (every flag you flip here also has a backend twin)
+REACT_APP_GUIDED_WORKFLOW_ENABLED=true
+REACT_APP_LOGIQ_SPRINT2_FRONTEND=true
+REACT_APP_LOGIQ_SPRINT3A_FRONTEND=true
+REACT_APP_LOGIQ_SPRINT3B_FRONTEND=true
+REACT_APP_LOGIQ_SPRINT3C_FRONTEND=true
+REACT_APP_LOGIQ_SPRINT3D_FRONTEND=true
+REACT_APP_LOGIQ_SPRINT3E_FRONTEND=true
+REACT_APP_LOGIQ_SPRINT4_FRONTEND=true
+REACT_APP_LOGIQ_TIER1_COPILOT_FRONTEND=true
+REACT_APP_LOGIQ_TIER1_PROGRESSIVE_FRONTEND=true
+REACT_APP_LOGIQ_TIER1_UX_FIXES_FRONTEND=true
+REACT_APP_LOGIQ_TIER1_MODERN_THEME=true
+REACT_APP_LOGIQ_TIER1_DOWNLOAD_DEMO=true
+REACT_APP_LOGIQ_UNIVERSAL_INTAKE_FRONTEND=true
+REACT_APP_LOGIQ_TIER1_INSIGHTS_FRONTEND=true
+REACT_APP_LOGIQ_UNIFIED_TIER1_UX_FRONTEND=true
+REACT_APP_LOGIQ_TIER1_JOURNEY_FRONTEND=true
+```
+
+---
+
+## Feature flags (Sprint-layered)
+
+Every Sprint feature is gated behind a paired backend + frontend flag. Routers in `backend/api.py` are mounted **only when their flag is on** so older sprint behavior remains byte-identical when flags are off — making rollback a single-env-var change.
+
+| Flag (frontend) | Flag (backend) | What it gates |
+|---|---|---|
+| `REACT_APP_LOGIQ_SPRINT2_FRONTEND` | — | Context-break detection + pattern response cards |
+| `REACT_APP_LOGIQ_SPRINT3A_FRONTEND` | — | Mode-aware prompts + post-thumbs-up action chips |
+| `REACT_APP_LOGIQ_SPRINT3B_FRONTEND` | — | Thumbs-down KB pivot + confidence banner |
+| `REACT_APP_LOGIQ_SPRINT3C/D/E_FRONTEND` | — | Mode-specific contact-card / ticket / vendor chips |
+| `REACT_APP_LOGIQ_SPRINT4_FRONTEND` | `LOGIQ_SPRINT4_BACKEND` | Mounts `LandingRouter` instead of legacy `LandingPage` |
+| `REACT_APP_LOGIQ_TIER1_COPILOT_FRONTEND` | `LOGIQ_TIER1_COPILOT_BACKEND` | Sprint 6 — Tier-1 Copilot intake form & `/tier1/*` routes |
+| `REACT_APP_LOGIQ_TIER1_PROGRESSIVE_FRONTEND` | `LOGIQ_TIER1_PROGRESSIVE_BACKEND` | Sprint 7 — progressive Workspace + ranking boosts |
+| `REACT_APP_LOGIQ_TIER1_UX_FIXES_FRONTEND` | — | Sprint 8 Track A — confidence labels v2, severity chips, skeletons |
+| `REACT_APP_LOGIQ_TIER1_MODERN_THEME` | — | Sprint 8 Track B — modern navy theme tokens |
+| `REACT_APP_LOGIQ_UNIVERSAL_INTAKE_FRONTEND` | `LOGIQ_UNIVERSAL_INTAKE_BACKEND` | Sprint 9 — Reactive paste flow + `/intake/*` routes |
+| `REACT_APP_LOGIQ_TIER1_JOURNEY_FRONTEND` | `LOGIQ_TIER1_JOURNEY_BACKEND` | Sprint 10 — 5-stage Resolution Journey + `/tier1/journey/*` routes |
+| `REACT_APP_LOGIQ_UNIFIED_TIER1_UX_FRONTEND` | — | Sprint 11 — Proactive ⏐ Reactive split layout |
+
+---
+
+## API surface
+
+### Top-level (`backend/api.py`)
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/health` | Liveness + chunk count + model status |
+| GET | `/me` | Current Clerk user (or anonymous) |
+| POST | `/auth/register-or-login` | Idempotent first-time user creation |
+| POST | `/upload` | File upload + ingestion job |
+| GET | `/upload_status/{job_id}` | Ingestion progress |
+| GET | `/files` | List documents |
+| DELETE | `/files/{file_id}` | Delete a document |
+| POST | `/ask` | Main RAG endpoint (~1.5k LOC orchestrator) |
+| GET | `/chat/sessions` | List the user's chat sessions |
+| GET | `/chat/sessions/{id}` | Full session with messages |
+| DELETE | `/chat/sessions/{id}` | Delete a session |
+| GET / POST | `/chat/sessions/{id}/mode` | Read/set the guided-workflow mode |
+| POST | `/chat/sessions/{id}/context/reset` | Clear mode + form data |
+| POST | `/fingerprint/lookup` | Sprint 4 fingerprint exact-match (still wired but disabled in LandingRouter) |
+| POST | `/feedback/state` | Save like/dislike on a single message |
+| POST | `/feedback/submit` | Submit free-form feedback (triggers SES email) |
+
+### Tier-1 Copilot (`backend/tier1_copilot/routes.py`, prefix `/tier1`)
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/tier1/analyze` | Main Tier-1 entry (Proactive form payload) |
+| POST | `/tier1/feedback` | Per-response thumbs / follow-up |
+| POST | `/tier1/session` | Create a Tier-1 session (Sprint 7) |
+| GET | `/tier1/session/{id}/status` | Session state |
+| POST | `/tier1/session/{id}/match-index` | Move match-card pagination |
+| POST | `/tier1/session/{id}/match/{index}` | Lock in a specific match |
+| POST | `/tier1/session/{id}/deeper-diagnostics` | Sprint 7 card |
+| POST | `/tier1/session/{id}/escalation-package` | Sprint 7 card |
+| POST | `/tier1/session/{id}/explain-recommendation` | Sprint 7 card |
+| GET | `/tier1/health` | Tier-1 router health |
+
+### Resolution Journey (`backend/tier1_copilot/journey/routes.py`, prefix `/tier1/journey`)
+
+| Method | Path | Purpose |
+|---|---|---|
+| GET | `/{sid}/initial` | Stage 0 + Pivot Insights payload (parallel paint) |
+| GET | `/{sid}/pivot-insights` | Just the pivot panel |
+| GET | `/{sid}/stage-2` | Up to 5 historical matches |
+| GET | `/{sid}/stage-3` | Consolidated troubleshooting steps |
+| GET | `/{sid}/stage-4` | KB handoff prefilled message |
+| GET | `/{sid}/stage-5` | Operational handoff package |
+| POST | `/{sid}/search-kb-handoff` | Mints a chat session pre-loaded with the alert |
+| POST | `/{sid}/event` | Append a telemetry event (`stage_rendered`, `next_stage_clicked`, etc.) |
+| GET | `/{sid}/resume-state` | Restore "where the engineer left off" on remount |
+
+### Universal Intake (`backend/tier1_copilot/intake/routes.py`, prefix `/intake`)
+
+| Method | Path | Purpose |
+|---|---|---|
+| POST | `/intake/extract` | Reactive paste → up to 4 candidate cards |
+| POST | `/intake/extraction/{id}/feedback` | Records which card was picked / rejected |
+| GET | `/intake/health` | Intake router health |
+
+---
+
+## Database
+
+PostgreSQL is the single source of truth. Migrations are SQL files in `backend/db/migrations/`, applied in numeric order by `backend/db/migrate.py` (each wrapped in `engine.begin()` and split on `;`).
+
+### Core tables
+
+| Table | Purpose |
+|---|---|
+| `documents` | Logical document record (name, owner, version family, ingestion_status, doc_kind) |
+| `chunks` | Text chunks with rich `metadata_json` (Fingerprints, alert_signature, fingerprints_text, component_category, asset_family, cached_expert_answer) |
+| `embeddings` | pgvector 1024-dim vectors keyed to `chunk_id` |
+| `users` | Clerk-mapped user profiles (Phase 3 multi-user) |
+| `chat_sessions` | Chat history rows; carries `selected_mode`, `entered_via`, `original_fingerprint`, `_session_metadata.journey_session_id` |
+| `chat_messages` | User/assistant turns + `feedback`, `context_stats`, `semantic_cache_id` |
+| `learned_vocabulary` | Auto-learned identifier / enum tokens with `canonical_form` |
+| `semantic_answer_cache` | Brief 5 cross-user answer cache, vector-keyed |
+| `pattern_analytics_cache` | Sprint 2 pattern stats (topic-keyed) |
+| `organization_schemas` | Per-org column-name remappings for ingestion |
+| `logiq_sessions` | Generic session/user/org tracking |
+
+### Tier-1 specific
+
+| Table | Purpose |
+|---|---|
+| `tier1_answer_cache` | Sprint 6 — signature-hash-keyed cached 8-section answers (extended in Sprint 10.3 with `top_5_match_ids TEXT[]`) |
+| `tier1_sessions` | Sprint 7 — per-alert session state (current_match_index, thumbs_down_count, escalated, what_tried, started_at) |
+| `tier1_journey_events` | Sprint 10 — append-only telemetry log (id BIGSERIAL, session_id, stage, event_type, payload_json JSONB, created_at) |
+| `intake_extractions` | Sprint 9 — universal intake audit (raw_text hash, candidates, picked_index, was_rejected) |
+
+### Notable migrations
+
+| File | What it adds |
+|---|---|
+| `001_phase1_foundation.sql` | `vector`/`pgcrypto` extensions, base schema |
+| `002_phase2_contextual_ingestion.sql` | Versioning columns on `documents` |
+| `003_phase3_multi_user.sql` | `users`, owner-scoped indexes |
+| `034_add_doc_kind.sql` | `doc_kind` (ticket/sop/kb/contact_*/vendor_case) classification |
+| `035_fingerprint_gin_indexes.sql` | GIN index on `chunks.metadata_json -> 'Metadata' -> 'Fingerprints'` |
+| `036_session_fingerprint_state.sql` | `entered_via`, `original_fingerprint` on `chat_sessions` |
+| `038_tier1_copilot.sql` | Denormalized `alert_signature`, `fingerprints_text`, `component_category` columns + `tier1_answer_cache` |
+| `039_tier1_progressive.sql` | `chunks.asset_family`; `tier1_sessions` |
+| `040_tier1_journey_events.sql` | `tier1_journey_events` |
+| `041_universal_intake.sql` | `intake_extractions` |
+| `041_tier1_answer_cache_top5.sql` | Adds `top_5_match_ids TEXT[]` |
+
+> **Note:** Two files share the `041_` prefix — `migrate.py` orders alphabetically so this is deterministic in practice but a future renumber would tidy it up.
+
+### Fingerprints
+
+Fingerprints (e.g. `BGP-5-ADJCHANGE`) are stored as a JSONB array at `chunks.metadata_json -> 'Metadata' -> 'Fingerprints'`. Migration 035 adds a GIN index for sub-millisecond exact-match lookups via `POST /fingerprint/lookup` (the legacy Sprint-4 entry point — currently disabled in `LandingRouter` but the endpoint still functions).
+
+---
+
+## Document ingestion pipeline
+
+`backend/services/contextual_ingestion_service.py:process_document` is the entry called from `POST /upload`.
+
+```
+File uploaded
+   │
+   ▼
+1. SHA-256 fingerprint   ──▶  exact_duplicate? skip
+   │
+   ▼
+2. Adaptive parser (3 strategies):
+   (a) DOCX heading styles
+   (b) Content-pattern regex (Scenario/Chapter/Step etc.)
+   (c) Haiku LLM section discovery (≈ $0.002, only if a/b fail)
+   │
+   ▼
+3. Scenario-aware chunking (one section = one chunk)
+   │
+   ▼
+4. Per-chunk metadata extraction (Haiku, concurrent, batched)
+   │
+   ▼
+5. Titan Embed v2 → 1024-dim vectors (concurrent)
+   │
+   ▼
+6. INSERT chunks + embeddings + metadata into Postgres / pgvector
+   │
+   ▼
+7. Update in-memory BM25 index
+   │
+   ▼
+8. Version detection: new_document / new_version / exact_duplicate
+   (supersedes old version when same family)
+```
+
+Gold-schema JSON tickets follow a special path (`_ingest_gold_ticket_json`): one chunk per ticket with rich `metadata_json` carrying `Fingerprints`, `Incident_Summary`, `Operational_SOP`, `Executive_Sharable_RCA`, `Resolution_Quality_Score`, etc. — these are the ticket bodies the Tier-1 retrieval queries.
+
+---
+
+## Retrieval pipeline
+
+### `/ask` (general document QA)
+
+`backend/retrieval/orchestrator.py` runs four candidate channels in parallel and fuses them:
+
+```
+Query
+  │  Titan embed
+  ▼
+┌─────────────────┐  ┌──────────┐  ┌──────────────┐  ┌──────────────┐
+│ pgvector cosine │  │  BM25    │  │  PG FTS +    │  │  Metadata    │
+│   (LIMIT 25)    │  │ (LIMIT   │  │  ILIKE fallb.│  │  JSONB filter│
+│                 │  │   20)    │  │   (LIMIT 15) │  │   (LIMIT 10) │
+└────────┬────────┘  └────┬─────┘  └──────┬───────┘  └──────┬───────┘
+         │                │               │                 │
+         └────────────┬───┴───────────────┴─────────────────┘
+                      ▼
+               Reciprocal Rank Fusion (strategy-aware weights)
+                      │
+                      ▼
+              Modular reranker (LLM / cross-encoder / none)
+                      │
+                      ▼
+                Top-N chunks → context builder
+                      │
+                      ▼
+       Complexity classifier → Haiku (default) / Sonnet (complex)
+                      │
+                      ▼
+              Answer + Phase 6 grounding/confidence checks
+```
+
+### Tier-1 Copilot
+
+`backend/tier1_copilot/retrieval.py:retrieve_top_matches` is a separate, narrower path optimized for alert→ticket matching:
+
+1. **Stage 1 — exact SQL** (ILIKE on denormalized columns) — short-circuits if score ≥ 0.80.
+2. **Stage 2 — hybrid** (pgvector + ts_vector) when Stage 1 is weak.
+3. **Weighted rerank** combining Jaccard overlap (alert_type / asset / fingerprint / technology) + vector similarity + resolution_quality, plus Sprint-7 boosts (recency, success_frequency, same_customer, same_asset_family).
+
+Confidence band: ≥ 0.85 High · ≥ 0.60 Medium · ≥ 0.40 Low · else None.
+
+---
+
+## Authentication (Clerk)
+
+When `CLERK_ENABLED=true` the backend requires a Clerk-issued JWT on every authenticated route. `backend/clerk_auth.py` uses `PyJWKClient` to fetch the issuer's public keys, validates RS256, exp, iss (`https://<frontend>.clerk.accounts.dev`), and optionally `azp` (frontend origin).
+
+The frontend wraps the app in `<ClerkProvider>` (`frontend/src/index.js`); `<AuthGate>` blocks unauthenticated traffic; `useAuthInterceptor` injects the active token into every axios call via `setTokenGetter`. `useAutoRegister` POSTs `/auth/register-or-login` on first auth so the user gets a row in the `users` table.
+
+Set `CLERK_ENABLED=false` to fall back to optional API-key auth (`API_KEY` / `UI_API_KEY` env vars) — useful for local dev or single-tenant deployments.
+
+---
+
+## AWS / external services
+
+| Service | Used by | Notes |
+|---|---|---|
+| **Bedrock — Titan Embed V2** | `backend/services/embedding_service.py` | 1024-dim cosine embeddings |
+| **Bedrock — Mistral 7B** | `backend/api.py` (Tier-1 prompt) + `backend/retrieval/reranker.py` | Tier-1 8-section answer + reranking |
+| **Bedrock — Claude Haiku 4.5** | `backend/services/bedrock_haiku.py` (ingestion metadata + chunking fallback) + `backend/routing/model_router.py` (default `/ask` LLM) | Cost-efficient, sub-second answer |
+| **Bedrock — Claude Sonnet 4.6** | `backend/routing/model_router.py` (escalated path) + `backend/agents/planner.py` | Multi-step / complex reasoning |
+| **S3** | `backend/storage/s3_storage.py` (when `STORAGE_TYPE=s3`); `backend/scripts/bulk_ingest.py` | Optional file storage |
+| **SES** | `backend/api.py:send_feedback_email_async` | Sends a SES email when `/feedback/submit` is called |
+| **Clerk** | `backend/clerk_auth.py`, `frontend/src/components/AuthGate.js` | Optional |
+
+### IAM (least-privilege example)
 
 ```json
 {
@@ -285,658 +841,189 @@ Enable these models in the AWS Bedrock console (region: us-east-1):
       "Resource": [
         "arn:aws:bedrock:us-east-1::foundation-model/amazon.titan-embed-text-v2:0",
         "arn:aws:bedrock:us-east-1::foundation-model/mistral.mistral-7b-instruct-v0:2",
-        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-haiku-20241022-v1:0",
-        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-3-5-sonnet-20241022-v2:0"
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-haiku-4-5*",
+        "arn:aws:bedrock:us-east-1::foundation-model/anthropic.claude-sonnet-4-6*"
       ]
     },
-    {
-      "Sid": "S3Storage",
-      "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-      "Resource": "arn:aws:s3:::your-bucket-name/*"
-    },
-    {
-      "Sid": "SESEmail",
-      "Effect": "Allow",
-      "Action": "ses:SendEmail",
-      "Resource": "*",
-      "Condition": {
-        "StringEquals": { "ses:FromAddress": "noreply@yourdomain.com" }
-      }
-    }
+    { "Sid": "S3Storage", "Effect": "Allow",
+      "Action": ["s3:GetObject","s3:PutObject","s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::acadia-logiq-uploads/*" },
+    { "Sid": "SESEmail", "Effect": "Allow",
+      "Action": "ses:SendEmail", "Resource": "*",
+      "Condition": { "StringEquals": { "ses:FromAddress": "noreply@yourdomain.com" } } }
   ]
 }
 ```
 
 ---
 
-## Environment Variables
+## Deployment (Docker + EC2)
 
-### Backend (`backend/.env`)
+### Dockerfiles
 
-```env
-# ============================================================
-# AWS / Bedrock
-# ============================================================
-AWS_REGION=us-east-1
-AWS_ACCESS_KEY_ID=                    # Leave blank on EC2 (use IAM Role)
-AWS_SECRET_ACCESS_KEY=                # Leave blank on EC2 (use IAM Role)
-AWS_SESSION_TOKEN=
+- **`backend/Dockerfile`** — `python:3.11-slim`, installs `build-essential libpq-dev poppler-utils`, runs as non-root `appuser`, exposes 8000, healthcheck on `/health`.
+- **`frontend/Dockerfile`** — multi-stage. Build stage: `node:18-alpine`, `npm install --legacy-peer-deps`, accepts every `REACT_APP_*` flag as a build ARG, runs `npm run build`. Serve stage: `nginx:alpine` with a custom `nginx.conf`, exposes port 80.
 
-# Bedrock Models
-BEDROCK_EMBED_MODEL=amazon.titan-embed-text-v2:0
-BEDROCK_LLM_MODEL=mistral.mistral-7b-instruct-v0:2
-BEDROCK_HAIKU_MODEL=us.anthropic.claude-haiku-4-5-20251001-v1:0
-BEDROCK_SONNET_MODEL=us.anthropic.claude-sonnet-4-6
+### Compose
 
-# ============================================================
-# Database (PostgreSQL + pgvector)
-# ============================================================
-DATABASE_URL=postgresql+psycopg://user:password@host:5432/dbname
+`docker-compose.ec2.yml` defines:
 
-# ============================================================
-# Storage
-# ============================================================
-UPLOAD_DIR=/app/uploads
-# STORAGE_TYPE=s3                     # Uncomment for S3
-# S3_BUCKET=your-bucket-name          # Required if STORAGE_TYPE=s3
-
-# ============================================================
-# Chunking & Ingestion
-# ============================================================
-CHUNK_MAX_CHARS=6000
-CHUNK_MIN_CHARS=200
-CHUNK_BATCH_SIZE=6
-ENABLE_LLM_CHUNK_FALLBACK=true
-ENABLE_METADATA_EXTRACTION=true
-
-# ============================================================
-# Model Routing
-# ============================================================
-ENABLE_MODEL_ROUTING=true
-ROUTING_DEFAULT_MODEL=haiku
-
-# ============================================================
-# Agents
-# ============================================================
-ENABLE_AGENT_MODE=true
-AGENT_COMPLEXITY_THRESHOLD=0.65
-
-# ============================================================
-# Validation
-# ============================================================
-ENABLE_ANSWER_VALIDATION=true
-ENABLE_EVAL_LOGGING=true
-
-# ============================================================
-# Authentication (Clerk — optional)
-# ============================================================
-CLERK_ENABLED=false
-CLERK_PUBLISHABLE_KEY=
-CLERK_SECRET_KEY=                     # NEVER commit this
-
-# ============================================================
-# API
-# ============================================================
-HOST=0.0.0.0
-PORT=8000
-LOG_LEVEL=INFO
-API_KEY=                              # Optional API key auth
-
-# ============================================================
-# Email (SES — optional)
-# ============================================================
-SES_ENABLED=false
-SES_SENDER_EMAIL=noreply@yourdomain.com
-SES_FEEDBACK_RECIPIENT=team@yourdomain.com
+```
+service: api    → built from ./backend, port 8000:8000, env_file backend/.env, named volume "uploads"
+service: ui     → built from ./frontend, depends_on api: service_healthy, port 8501:80
+network: app-network
 ```
 
-### Frontend (`frontend/.env`)
+Frontend is built with `REACT_APP_API_BASE=/api` so nginx proxies API calls to the backend container.
 
-```env
-REACT_APP_API_BASE=http://localhost:8000
-REACT_APP_CLERK_PUBLISHABLE_KEY=      # Leave blank to disable auth
-```
+### EC2 deployment (one-shot)
 
----
-
-## Local Development Setup
-
-### Prerequisites
-- Python 3.11+
-- Node.js 18+
-- PostgreSQL 15 with pgvector extension
-- AWS credentials with Bedrock access
-
-### Step 1: Database
 ```bash
-# Install pgvector extension
-CREATE EXTENSION IF NOT EXISTS vector;
-
-# Run migrations (or let the app create tables on first start)
-```
-
-### Step 2: Backend
-```bash
-cd backend
-cp .env.example .env
-# Edit .env: set DATABASE_URL, AWS credentials
-
-pip install -r requirements.txt
-uvicorn backend.api:app --host 0.0.0.0 --port 8000 --reload
-```
-
-### Step 3: Frontend
-```bash
-cd frontend
-cp .env.example .env
-# Edit .env: set REACT_APP_API_BASE=http://localhost:8000
-
-npm install
-npm start
-```
-
-Open http://localhost:3000
-
----
-
-## EC2 Deployment
-
-### Instance Requirements
-- **AMI:** Ubuntu 22.04 LTS
-- **Type:** t3.medium minimum (2 vCPU, 4 GB RAM)
-- **Storage:** 30+ GB
-- **Security Group:** ports 22, 8000, 8501
-
-### Step 1: Install Docker
-```bash
-sudo apt-get update
 sudo apt-get install -y docker.io docker-compose-plugin git
-sudo usermod -aG docker $USER
-newgrp docker
-```
+sudo usermod -aG docker $USER && newgrp docker
 
-### Step 2: Clone and Configure
-```bash
-git clone https://github.com/your-org/acadia-log-iq.git
-cd acadia-log-iq
+git clone https://github.com/your-org/AICode_Chatbot.git
+cd AICode_Chatbot
+cp backend/.env.example backend/.env
+nano backend/.env  # set DATABASE_URL, AWS_REGION, model IDs, CLERK_*
 
-cd backend && cp .env.example .env
-nano .env  # Set DATABASE_URL, AWS_REGION, model IDs
-cd ..
-```
-
-### Step 3: Build and Deploy
-```bash
-export REACT_APP_CLERK_PUBLISHABLE_KEY=pk_test_xxx  # or leave blank
-
+export REACT_APP_CLERK_PUBLISHABLE_KEY=pk_live_xxx
 docker compose -f docker-compose.ec2.yml up --build -d
-docker compose -f docker-compose.ec2.yml logs -f  # Watch logs
+docker compose -f docker-compose.ec2.yml logs -f
 ```
 
-### Step 4: Verify
-```bash
-curl http://localhost:8000/health
-```
+Verify: `curl http://localhost:8000/health` → `{"status": "ok", ...}`.
 
-### Step 5: Reset Data (After Code Updates)
-If you updated the parser/chunking logic, re-index documents:
-```bash
-# Option A: Delete via UI and re-upload
-
-# Option B: Database reset
-docker compose -f docker-compose.ec2.yml exec -T api python -c "
-from backend.db.connection import SessionLocal
-from sqlalchemy import text
-with SessionLocal() as db:
-    db.execute(text('UPDATE documents SET current_version_id = NULL'))
-    db.execute(text('DELETE FROM chat_messages'))
-    db.execute(text('DELETE FROM chat_sessions'))
-    db.execute(text('DELETE FROM embeddings'))
-    db.execute(text('DELETE FROM chunks'))
-    db.execute(text('DELETE FROM document_metadata'))
-    db.execute(text('DELETE FROM ingestion_jobs'))
-    db.execute(text('DELETE FROM document_versions'))
-    db.execute(text('DELETE FROM documents'))
-    db.commit()
-    print('Reset complete')
-"
-```
-
----
-
-## Docker Reference
-
-### Backend Dockerfile
-```dockerfile
-FROM python:3.11-slim
-WORKDIR /app
-RUN apt-get update && apt-get install -y build-essential curl libpq-dev poppler-utils
-COPY backend/requirements.txt /app/requirements.txt
-RUN pip install --no-cache-dir -r /app/requirements.txt
-COPY backend /app/backend
-RUN useradd -m -u 1000 appuser && mkdir -p /app/uploads && chown -R appuser:appuser /app
-USER appuser
-EXPOSE 8000
-CMD ["python", "-m", "uvicorn", "backend.api:app", "--host", "0.0.0.0", "--port", "8000"]
-```
-
-### Frontend Dockerfile
-```dockerfile
-FROM node:20-alpine AS build
-WORKDIR /app
-COPY package.json ./
-RUN npm install --legacy-peer-deps
-COPY . .
-ARG REACT_APP_API_BASE=http://localhost:8000
-ARG REACT_APP_CLERK_PUBLISHABLE_KEY=
-RUN npm run build
-FROM nginx:alpine
-COPY nginx.conf /etc/nginx/conf.d/default.conf
-COPY --from=build /app/build /usr/share/nginx/html
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
-```
-
----
-
-## Database Setup (RDS + pgvector)
-
-### RDS Configuration
-- **Engine:** PostgreSQL 15+
-- **Instance:** db.t3.micro (dev) / db.r6g.large (prod)
-- **Storage:** 20 GB gp3 (auto-scaling)
-- **pgvector:** Enable via `CREATE EXTENSION vector;`
-
-### Tables
-| Table | Purpose |
-|-------|---------|
-| `documents` | Logical documents (name, owner, status, version family) |
-| `document_versions` | Version history with fingerprints |
-| `document_metadata` | Extracted metadata (vendor, product, domain) |
-| `chunks` | Text chunks with section headings, chunk types |
-| `embeddings` | 1024-dim vectors (pgvector) |
-| `ingestion_jobs` | Upload processing status tracking |
-| `chat_sessions` | Conversation sessions |
-| `chat_messages` | Individual messages with feedback |
-
----
-
-## S3 Storage Setup
-
-For production, configure S3 as the primary file store:
-
-```env
-STORAGE_TYPE=s3
-S3_BUCKET=acadia-logiq-uploads
-AWS_REGION=us-east-1
-```
-
-S3 bucket policy:
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [{
-    "Effect": "Allow",
-    "Principal": {"AWS": "arn:aws:iam::ACCOUNT:role/ec2-role"},
-    "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
-    "Resource": "arn:aws:s3:::acadia-logiq-uploads/*"
-  }]
-}
-```
-
----
-
-## Document Ingestion Pipeline
-
-### 3-Strategy Adaptive Parser
-
-```
-Document uploaded
-    │
-    ▼
-Strategy 1: Check Word heading styles (Heading 1/2/3)
-    │ Found headings? → Use them ✓
-    │ No headings found? ↓
-    ▼
-Strategy 2: Content-based pattern detection
-    │ Regex: "Scenario A:", "Chapter 1:", "Step 1:", etc.
-    │ Found patterns? → Use them ✓
-    │ No patterns found? ↓
-    ▼
-Strategy 3: LLM section discovery (Haiku, ~$0.002)
-    │ Send first 8000 chars → Haiku identifies sections
-    │ Re-tag blocks → Use LLM headings ✓
-    │ Nothing found? → Fall back to character-based chunking
-```
-
-### Supported Document Formats
-| Format | Parser | Heading Detection |
-|--------|--------|-------------------|
-| DOCX | python-docx | Word styles + content patterns + LLM |
-| PDF | PyMuPDF (fitz) | Content patterns + LLM |
-| TXT/MD | Line-based | Markdown headings + content patterns + LLM |
-| JSON/LOG | Line-based | Content patterns + LLM |
-
----
-
-## Retrieval Pipeline
-
-### 4-Channel Hybrid Search
-```
-Query → Embed with Titan
-    │
-    ├─→ Channel 1: pgvector cosine similarity (25 candidates)
-    ├─→ Channel 2: BM25 term frequency (20 candidates)
-    ├─→ Channel 3: PostgreSQL FTS + ILIKE fallback (15 candidates)
-    └─→ Channel 4: Metadata JSONB filter (10 candidates)
-         │
-         ▼
-    RRF Fusion (strategy-aware weights)
-         │
-         ▼
-    Reranker (Mistral 7B scores 0-10)
-         │
-         ▼
-    Top 6 chunks → context assembly
-```
-
-### Weight Adjustment by Query Strategy
-| Strategy | Vector | BM25 | Keyword |
-|----------|--------|------|---------|
-| Semantic ("how to troubleshoot...") | 0.55 | 0.25 | 0.20 |
-| Keyword ("ORA-00942 error") | 0.25 | 0.35 | 0.40 |
-| Mixed (default) | 0.45 | 0.30 | 0.25 |
-
----
-
-## Model Routing & Cost Optimization
-
-### Routing Policy
-| Complexity Tier | Score Range | Model | Cost/Query |
-|----------------|-------------|-------|-----------|
-| Simple | 0.0 – 0.30 | Claude Haiku | ~$0.001 |
-| Moderate | 0.30 – 0.70 | Claude Haiku | ~$0.001 |
-| Complex | 0.70 – 1.0 | Claude Sonnet | ~$0.01 |
-
-### Complexity Signals
-| Signal | Weight | What It Measures |
-|--------|--------|-----------------|
-| Multi-step | 0.30 | Comparison, workflow, step-by-step queries |
-| Reasoning | 0.25 | Why/analyze/recommend/root-cause queries |
-| Context size | 0.15 | Large context harder to reason over |
-| Low confidence | 0.20 | Low retrieval confidence = risky |
-| Multi-document | 0.10 | Answer spans multiple sources |
-
-### Estimated Monthly Cost (1000 queries/day)
-| Component | Queries | Model | Monthly Cost |
-|-----------|---------|-------|-------------|
-| Embeddings | 30K | Titan | ~$3 |
-| Answers (85% simple) | 25.5K | Haiku | ~$25 |
-| Answers (15% complex) | 4.5K | Sonnet | ~$45 |
-| Reranking | 30K | Mistral | ~$3 |
-| **Total** | | | **~$76/month** |
-
----
-
-## Multi-Agent Troubleshooting
-
-### Escalation Gate (ALL conditions must be true)
-1. `ENABLE_AGENT_MODE = true`
-2. Complexity tier = "complex"
-3. Score > 0.65
-4. Query matches pattern (troubleshoot, compare, synthesize, remediate)
-5. At least 1 source document available
-
-### Agent Pipeline
-```
-Planner (Sonnet, ~1K tokens)
-    → "Check interface status", "Verify routing", "Test connectivity"
-         │
-Analyst (Haiku × N steps, ~1.5K tokens each)
-    → Per-step findings from document context
-         │
-Composer (Haiku, ~2K tokens)
-    → Coherent bullet-point answer
-```
-
-### Cost Controls
-- Token budget: 8000 total across all agents
-- Timeout: 45 seconds wall-clock
-- Max steps: 4 from planner
-- Fallback: raw findings if composer fails
-
----
-
-## Answer Validation & Confidence
-
-### Confidence Scoring (4 signals)
-| Signal | Weight | Measures |
-|--------|--------|---------|
-| Retrieval | 0.30 | Top reranked chunk score |
-| Coverage | 0.25 | Query terms found in context |
-| Grounding | 0.25 | Answer terms found in context |
-| Consistency | 0.20 | Non-empty, no hallucination phrases |
-
-### Grounding Checks
-- **Fabricated URLs** — URLs in answer not in source documents
-- **Fabricated emails** — email addresses not in sources
-- **Fabricated phones** — phone numbers not in sources
-- **Sentence grounding** — <40% term overlap → flagged
-- **Version awareness** — superseded sources → warning appended
-
-### Decision Matrix
-| Condition | Action |
-|-----------|--------|
-| Confidence ≥ 0.35 AND grounding pass | Return original answer |
-| Superseded sources detected | Append version warning |
-| Fabricated specifics found | Replace with safe fallback |
-| Confidence < 0.35 | Replace with insufficient-evidence fallback |
-
----
-
-## Duplicate & Version Detection
-
-```
-New document uploaded
-    │
-    ▼
-SHA-256 fingerprint matches existing? → exact_duplicate (skip)
-    │ No match
-    ▼
-Normalized filename + title similarity > threshold?
-    │ Yes → new_version (supersede old, index new)
-    │ No  → new_document (index fresh)
-```
-
-- **Active documents** are searched by default
-- **Superseded documents** are excluded from retrieval
-- **Version families** track related document lineage
-- Configure via `INCLUDE_OLD_VERSIONS=true` to search all versions
-
----
-
-## Health Checks & Observability
-
-### Endpoints
-| Endpoint | Purpose |
-|----------|---------|
-| `GET /health` | Service health, model status, chunk count |
-| `GET /upload_status/{job_id}` | Ingestion progress tracking |
-
-### Structured Logging
-All logs use the `acadia-log-iq` logger with structured format:
-```
-2026-03-16 19:43:54 - acadia-log-iq - INFO - Retrieval complete: strategy=mixed vector=25 bm25=20 kw=15 → fused=15 → reranked=6 (2648ms)
-2026-03-16 19:43:54 - acadia-log-iq - INFO - Model routing: query='...' → model=haiku | simple query (score=0.092)
-2026-03-16 19:43:57 - acadia-log-iq - INFO - Generation complete: model=haiku, 3129ms, 12563 prompt chars
-2026-03-16 19:43:57 - acadia-log-iq - INFO - Confidence: 0.652 (ret=0.80 cov=0.71 gnd=0.58 con=1.00) → PASS
-```
-
-### Evaluation Logging
-Every request logs a JSONL eval record (for offline quality analysis):
-```
-EVAL_RECORD: {"query":"...", "confidence":0.652, "passed":true, "model_used":"haiku", ...}
-```
-
-### Response Diagnostics
-The `/ask` response includes `context_stats` with:
-- Retrieval: strategy, per-channel candidate counts, timing
-- Routing: model used, complexity score/tier, generation time
-- Agents: mode, steps, tokens, timing
-- Validation: passed, confidence, issues count, version warnings
-
----
-
-## Security & Data Privacy
-
-### Secret Management
-- **Never commit `.env` files** — use `.env.example` templates
-- **Clerk secret key** — backend only, never in frontend
-- **AWS credentials** — use IAM Roles on EC2, never hardcode
-- **Database password** — set via environment variable
-
-### Data Privacy
-- **No PII in eval logs** — only query (truncated), confidence scores, source names
-- **Document content stays in PostgreSQL** — never sent to external services except Bedrock
-- **Bedrock data policy** — AWS does not use your data for model training
-- **Session data** — stored in PostgreSQL, deletable via API
-- **File uploads** — stored locally or in S3 (your control)
-
-### Code Protection
-- **`.dockerignore`** — excludes `.env`, `node_modules`, `.git`
-- **Non-root Docker user** — `appuser` with UID 1000
-- **CORS whitelist** — only allowed origins can call the API
-- **Rate limiting** — 30 requests/minute on `/ask`, 100/minute on `/upload`
-
----
-
-## API Reference
-
-| Method | Endpoint | Auth | Description |
-|--------|----------|------|-------------|
-| GET | `/health` | No | Health check |
-| GET | `/me` | Yes | Current user info |
-| POST | `/upload?file_type=kb` | Yes | Upload document |
-| GET | `/upload_status/{job_id}` | Yes | Ingestion progress |
-| POST | `/ask` | Yes | Ask question |
-| GET | `/files` | Yes | List documents |
-| DELETE | `/files/{file_id}` | Yes | Delete document |
-| GET | `/chat/sessions` | Yes | List sessions |
-| GET | `/chat/sessions/{id}` | Yes | Get session |
-| DELETE | `/chat/sessions/{id}` | Yes | Delete session |
-| DELETE | `/chat/sessions` | Yes | Clear all sessions |
-| POST | `/reset` | Yes | Full data reset |
-| POST | `/feedback/submit` | Yes | Submit feedback |
-| POST | `/feedback/state` | Yes | Save like/dislike |
+> **Use IAM Roles on EC2**, not hardcoded AWS keys. Leave `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` blank — boto3 picks up the instance role automatically.
 
 ---
 
 ## Testing
 
+### Backend
+
 ```bash
-# All tests (no database or AWS needed)
-pytest tests/ -v
-
-# Specific phases
-pytest tests/test_retrieval.py -v     # Phase 3: query classifier, fusion
-pytest tests/test_routing.py -v       # Phase 4: complexity, routing policy
-pytest tests/test_agents.py -v        # Phase 5: escalation gate, pipeline
-pytest tests/test_validation.py -v    # Phase 6: confidence, grounding
-
-# Evaluation harness (offline quality benchmarking)
-python -c "
-from backend.validation.eval_harness import run_eval_suite, EVAL_SUITE
-results = run_eval_suite(EVAL_SUITE)
-correct = sum(1 for r in results if r.correct)
-print(f'{correct}/{len(results)} eval cases passed')
-"
+cd backend
+pytest -v                                              # all tests
+pytest tier1_copilot/tests -v                          # Tier-1 unit tests
+pytest tests/tier1_copilot/journey -v                  # Journey integration tests
+pytest tier1_copilot/intake/tests -v                   # Universal intake tests
+pytest tests/test_validation.py -v                     # Phase 6 validation
 ```
+
+Approximate coverage: ~50 backend test files. Notable suites:
+
+- `backend/tier1_copilot/tests/` — normalizer, alias_dictionary, retrieval, ranking_boosts, prompt_builder, cache, escalation_package, deeper_diagnostics, explain_recommendation, stuck_detector, session_state, match_by_index_endpoint.
+- `backend/tests/tier1_copilot/journey/` — stage1 do-not-chase, stage1 smoking-gun, stage2 historical, stage3 troubleshooting, stage3 per-ticket-details, stage4 kb-handoff, stage5 escalation, journey-initial endpoint, pivot-insights, resume-state, telemetry-invariants, search-kb-handoff.
+
+### Frontend
+
+```bash
+cd frontend
+npm test
+```
+
+Two suites today:
+
+- `frontend/src/components/Tier1Copilot/journey/__tests__/ResolutionJourney.test.js`
+- `frontend/src/components/journey-chat/__tests__/JourneyMessageActions.test.js`
+
+---
+
+## Observability
+
+### Structured logging (logger: `acadia-log-iq`)
+
+```
+2026-05-05 19:43:54 - acadia-log-iq - INFO - Retrieval complete:
+    strategy=mixed vector=25 bm25=20 kw=15 → fused=15 → reranked=6 (2648ms)
+2026-05-05 19:43:54 - acadia-log-iq - INFO - Model routing: model=haiku (score=0.092)
+2026-05-05 19:43:57 - acadia-log-iq - INFO - Generation complete: model=haiku, 3129ms, 12563 prompt chars
+2026-05-05 19:43:57 - acadia-log-iq - INFO - Confidence: 0.652 (ret=0.80 cov=0.71 gnd=0.58 con=1.00) → PASS
+```
+
+### JSONL eval records
+
+Every `/ask` request emits an `EVAL_RECORD: {...}` JSONL line — useful for offline quality regression analysis.
+
+### Response diagnostics
+
+`/ask` and `/tier1/analyze` return rich `context_stats` blocks with retrieval breakdown, model used, complexity score, agents path (if escalated), validation outcome, and per-stage timing.
+
+### Journey telemetry
+
+Every stage interaction posts to `tier1_journey_events`. Stage 5's escalation package now includes the engineer's stage-traversal log with **per-stage time-spent** (Sprint 12) — useful both for the Tier-2 reader and for engagement analytics.
+
+---
+
+## Contributing & development conventions
+
+### Sprint flag discipline
+
+Every new feature lands behind a paired backend + frontend flag. Flag-off must be byte-identical to the previous sprint. This is the project's most important invariant — it lets us ship daily without rolling back code.
+
+### Commenting style
+
+Every non-trivial branch carries a comment that explains **why**, **what sprint introduced it**, and **what fallback exists when the flag is off**. Read top-of-file comments in:
+
+- `frontend/src/components/LandingRouter.js`
+- `frontend/src/components/Tier1Copilot/Tier1IntakeForm.js`
+- `frontend/src/components/Tier1Copilot/journey/useChatHandoff.js`
+- `frontend/src/components/Tier1Copilot/tier1Constants.js`
+- `backend/tier1_copilot/journey/stage5_escalation.py`
+- `backend/tier1_copilot/journey/telemetry.py`
+
+### Adding a stage label
+
+`STAGE_LABELS` in `frontend/src/components/Tier1Copilot/tier1Constants.js` is the single source of truth for both the stage Card titles **and** the "Reveal next stage" button labels in `Stage1aSmokingGun`, `Stage1bDoNotChase`, `Stage2HistoricalMatches`, `Stage3TroubleshootingApproach`, and `PivotInsightsPanel`.
+
+### Adding an `/ask` endpoint feature
+
+`/ask` is ~1.5k LOC of orchestration. Reuse the existing context_stats / pattern detector / clarification flow — don't fork the handler.
 
 ---
 
 ## Troubleshooting
 
-### "Settings object has no attribute X"
-Your `config.py` is missing Phase 6 settings. Replace with the latest version and clear `__pycache__`:
-```powershell
-Get-ChildItem -Directory -Filter "__pycache__" -Recurse | Remove-Item -Recurse -Force
-```
-
-### "Python-dotenv could not parse statement at line N"
-Your `.env` file has a bare comment without `#` prefix. Check the offending line and add `#`.
-
-### "Foreign key violation on /reset"
-The `reset_pg_data()` function needs to null out `current_version_id` before deleting `document_versions`. Run the SQL reset manually (see EC2 Deployment section).
-
-### "Haiku returned invalid JSON" warnings during ingestion
-Normal — Haiku sometimes hits `max_tokens` on large chunks. The retry logic handles this. If it persists across ALL chunks, increase `HAIKU_MAX_TOKENS` in config.
-
-### Low accuracy / wrong answers
-1. Did you re-index documents after updating the parser? Delete and re-upload.
-2. Check that `config.py` has `CHUNK_MAX_CHARS=6000` and `ROUTING_DEFAULT_MODEL=haiku`
-3. Verify `structured_parser.py` has the 3-strategy heading detection
-
-### EC2 deployment doesn't reflect code changes
-Docker caches layers. Force a fresh build:
-```bash
-docker compose -f docker-compose.ec2.yml up --build --force-recreate -d
-```
+| Symptom | Likely cause / fix |
+|---|---|
+| `Settings object has no attribute X` | `backend/config.py` missing a Phase 6 / Sprint setting. Pull latest and clear `__pycache__`. |
+| `Python-dotenv could not parse statement at line N` | `.env` has a comment without `#` prefix on that line. |
+| `Foreign key violation on /reset` | `UPDATE documents SET current_version_id = NULL` before deleting `document_versions`. |
+| `Haiku returned invalid JSON` warnings | Normal — Haiku occasionally hits `max_tokens`. Retry logic handles it. Increase `HAIKU_MAX_TOKENS` if persistent. |
+| Low retrieval accuracy | Re-index documents after parser changes. Confirm `CHUNK_MAX_CHARS=6000` and `ROUTING_DEFAULT_MODEL=haiku`. |
+| EC2 deploy doesn't reflect changes | Docker layer cache. `docker compose -f docker-compose.ec2.yml up --build --force-recreate -d`. |
+| New Chat opens the Tier-1 intake form instead of an empty chat | Sprint 12 fix in `ChatContext.js` — ensure `selectedMode = "troubleshooting"` in the `NEW_CHAT` reducer case. |
+| Stage labels still show "Stage N — ..." | Sprint 12 rename — `STAGE_LABELS` was updated in `tier1Constants.js`; clear browser cache and `Ctrl+Shift+R`. |
 
 ---
 
-## Rollback & Migration
+## Roadmap
 
-### Rolling Back to Phase N
-Each phase is additive. To disable later phases:
-- **Disable agents:** `ENABLE_AGENT_MODE=false`
-- **Disable validation:** `ENABLE_ANSWER_VALIDATION=false`
-- **Disable model routing:** `ENABLE_MODEL_ROUTING=false` (uses `ROUTING_DEFAULT_MODEL`)
-- **Disable LLM chunking fallback:** `ENABLE_LLM_CHUNK_FALLBACK=false`
-
-### Database Migrations
-No formal migration tool (Alembic is in requirements but not wired). Schema changes are handled by the application on first run. For manual schema updates, connect to PostgreSQL directly.
-
-### Data Integrity
-- Always `UPDATE documents SET current_version_id = NULL` before deleting `document_versions`
-- Delete tables in order: embeddings → chunks → document_metadata → ingestion_jobs → document_versions → documents
+| Item | Status |
+|---|---|
+| Cohere Embed v3 (telecom-aware embeddings) | Planned |
+| Cross-encoder reranker (faster than LLM) | Planned |
+| Streaming `/ask` responses (SSE) | Planned |
+| Multi-tenant (per-org isolation) | Planned |
+| Alembic migrations | Planned |
+| Prometheus metrics + Grafana | Planned |
+| Replace stale `docker-build.yml` Streamlit workflow | Pending |
+| Renumber the duplicate `041_` migration | Pending |
 
 ---
 
-## Known Limitations
+## License
 
-1. **Embedding model** — Titan Embed V2 is general-purpose; telecom-specific terms may have weak embeddings. Keyword search compensates but a domain-specific model would improve further.
-2. **No streaming** — answers are returned complete, not streamed token-by-token.
-3. **Single-user upload** — concurrent uploads from the same user may conflict.
-4. **BM25 in-memory** — rebuilt from PostgreSQL at startup; large datasets (100K+ chunks) may slow startup.
-5. **No formal migration tool** — schema changes require manual SQL.
-6. **Reranker uses Mistral** — LLM-based reranking is slow (~2-5s). Cross-encoder would be faster.
+Internal — © Acadia Consultants. All rights reserved.
 
 ---
 
-## Future Extensions
+## Maintainers
 
-1. **Streaming responses** — SSE/WebSocket for token-by-token answer delivery
-2. **Cohere Embed V3** — domain-aware embeddings for better telecom/networking retrieval
-3. **Cross-encoder reranker** — local model, faster than LLM reranking
-4. **Multi-tenant** — per-organization document isolation
-5. **Alembic migrations** — formal schema versioning
-6. **Prometheus metrics** — request latency, model usage, token consumption dashboards
-7. **S3 storage provider** — full S3 integration for file uploads (currently local)
-8. **Batch upload** — ZIP file containing multiple documents
-9. **Document viewer** — preview uploaded documents in the UI
-10. **Admin dashboard** — usage analytics, cost tracking, quality metrics
+- Engineering: maruthiphani75@gmail.com
+- Operations: dev@acadiaconsultants.com
 
+---
 
-How to run: backend
-
- python -m uvicorn backend.api:app --host 0.0.0.0 --port 8000 --reload 2>&1 | Tee-Object logs\backend.log  
-
- Forntend:
- Cd frontend
-
- npm install
-
- npm run build
-
- nmp start
+> 📄 **For the deep end-to-end walkthrough** (data flows with sequence diagrams, full glossary, demo / KT / interview prep), see **`ARCHITECTURE.docx`** at the project root.

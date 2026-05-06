@@ -51,9 +51,11 @@ def test_fetch_traversal_log_rolls_up_per_stage():
     # Three stages traversed
     assert len(out) == 3
     # Order by first-seen
-    assert out[0]["step"].endswith("Confidence Lead")
-    assert out[1]["step"].endswith("Smoking Gun")
-    assert out[2]["step"].endswith("Historical Matches")
+    # Sprint 12 — labels renamed to match the journey UI titles and the
+    # "Stage N — " prefix dropped from the step field.
+    assert out[0]["step"] == "Best Historical Match & Recommended Resolution"
+    assert out[1]["step"] == "Smoking Gun"
+    assert out[2]["step"] == "Related Incidents & Probable Causes"
     # Stage 1A had viewed + Helpful + advanced
     s1a = out[1]
     assert "viewed" in s1a["result"]

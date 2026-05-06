@@ -209,12 +209,14 @@ def test_distillation_extracts_resolution_steps():
         out = compute_stage0(cohort)
 
     assert len(out.how_they_did_it) == 5
+    # Sprint 12 — each step is suffixed with " - <Incident_Number>"
+    # so it can be traced back to the source ticket.
     assert out.how_they_did_it == [
-        "step 1",
-        "step 2 with dict",
-        "step 3 with action key",
-        "step 4 with step key",
-        "step 5",
+        "step 1 - INC-LISTY",
+        "step 2 with dict - INC-LISTY",
+        "step 3 with action key - INC-LISTY",
+        "step 4 with step key - INC-LISTY",
+        "step 5 - INC-LISTY",
     ]
     assert "SHOULD NOT APPEAR" not in " ".join(out.how_they_did_it)
 
