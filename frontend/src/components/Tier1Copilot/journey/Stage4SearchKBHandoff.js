@@ -131,7 +131,7 @@ export default function Stage4SearchKBHandoff({
   return (
     <Card style={{ marginBottom: 16, borderLeft: "4px solid #7c3aed" }}>
       <Title level={5} style={{ marginTop: 0 }}>
-        Stage 4 — {STAGE_LABELS.stage_4}
+        {STAGE_LABELS.stage_4}
       </Title>
       <Paragraph type="secondary">
         Click below to ask follow-up questions in the chat — your alert is pre-loaded.

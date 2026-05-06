@@ -117,13 +117,13 @@ export const TIER1_JOURNEY_ON =
   process.env.REACT_APP_LOGIQ_TIER1_JOURNEY_FRONTEND === "true";
 
 export const STAGE_LABELS = {
-  stage_0: "Confidence Lead",
+  stage_0: "Best Historical Match & Recommended Resolution",
   stage_1a: "Smoking Gun",
   stage_1b: "Do Not Chase",
-  stage_2: "Historical Matches & Possible Causes",
-  stage_3: "The Troubleshooting Approach",
-  stage_4: "Search KB / SOP",
-  stage_5: "Escalation Package",
+  stage_2: "Related Incidents & Probable Causes",
+  stage_3: "Guided Troubleshooting Workflow",
+  stage_4: "Knowledge Base & SOP Reference",
+  stage_5: "Operational Handoff",
 };
 
 // Neutralised confidence copy (§3). Primary + subline so the banner

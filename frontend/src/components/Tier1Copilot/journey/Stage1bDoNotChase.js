@@ -59,7 +59,7 @@ export default function Stage1bDoNotChase({
     <Card style={{ marginBottom: 16, borderLeft: "4px solid #B03A2E" }}>
       <Title level={5} style={{ marginTop: 0 }}>
         <CloseCircleOutlined style={{ marginRight: 8 }} />
-        Stage 1B — Do Not Chase
+        Do Not Chase
       </Title>
 
       {isEmpty ? (

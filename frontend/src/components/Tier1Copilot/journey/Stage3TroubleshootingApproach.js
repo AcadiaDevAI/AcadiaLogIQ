@@ -355,7 +355,7 @@ export default function Stage3TroubleshootingApproach({
     return (
       <Card style={{ marginBottom: 16, borderLeft: "4px solid #6B6B6B" }}>
         <Title level={5} style={{ marginTop: 0 }}>
-          Stage 3 — The Troubleshooting Approach
+          Guided Troubleshooting Workflow
         </Title>
         <Paragraph type="secondary">
           No consolidated steps available for these similar tickets.
@@ -367,7 +367,7 @@ export default function Stage3TroubleshootingApproach({
   return (
     <Card style={{ marginBottom: 16, borderLeft: "4px solid #2563eb" }}>
       <Title level={5} style={{ marginTop: 0 }}>
-        Stage 3 — The Troubleshooting Approach{hasSteps ? ` (${data.steps.length})` : ""}
+        Guided Troubleshooting Workflow
       </Title>
 
       {hasSteps ? (

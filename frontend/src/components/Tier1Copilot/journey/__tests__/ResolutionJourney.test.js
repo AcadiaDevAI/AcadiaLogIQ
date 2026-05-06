@@ -126,7 +126,7 @@ describe("Stage5EscalationPackage auto-expand", () => {
     // the package is already expanded.
     expect(screen.queryByText(/Show escalation package/i)).toBeNull();
     // Title is always there as a smoke check.
-    expect(screen.getByText(/Stage 5 — Escalation Package/i)).toBeInTheDocument();
+    expect(screen.getByText(/Operational Handoff/i)).toBeInTheDocument();
   });
 
   test("test_stage_5_collapsed_when_autoExpand_false", () => {

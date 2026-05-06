@@ -40,7 +40,7 @@ export default function Stage5EscalationPackage({
     return (
       <Card style={{ marginBottom: 16, borderLeft: "4px solid #6B6B6B" }}>
         <Title level={5} style={{ marginTop: 0 }}>
-          Stage 5 — Escalation Package
+          Operational Handoff
         </Title>
         <Paragraph type="secondary">
           Could not assemble the escalation package. The Sprint 7 generator
@@ -53,7 +53,7 @@ export default function Stage5EscalationPackage({
   return (
     <Card style={{ marginBottom: 16, borderLeft: "4px solid #B03A2E" }}>
       <Title level={5} style={{ marginTop: 0 }}>
-        Stage 5 — Escalation Package
+        Operational Handoff
       </Title>
 
       {/* Sprint 10.7 — package render gated on `expanded`. With the

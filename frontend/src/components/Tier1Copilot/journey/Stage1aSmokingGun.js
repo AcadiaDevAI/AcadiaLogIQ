@@ -58,7 +58,7 @@ export default function Stage1aSmokingGun({
       <Card style={{ marginBottom: 16, borderLeft: "4px solid #6B6B6B" }}>
         <Title level={5} style={{ marginTop: 0 }}>
           <ThunderboltOutlined style={{ marginRight: 8 }} />
-          Stage 1A — {title}
+          {title}
         </Title>
         <Paragraph type="secondary">
           No single pivot signal dominates this cohort. See historical
@@ -81,7 +81,7 @@ export default function Stage1aSmokingGun({
         <div>
           <Title level={5} style={{ marginTop: 0, marginBottom: caption ? 2 : undefined }}>
             <ThunderboltOutlined style={{ marginRight: 8 }} />
-            Stage 1A — {title}
+            {title}
           </Title>
           {caption ? (
             <Text italic type="secondary" style={{ fontSize: 12 }}>{caption}</Text>

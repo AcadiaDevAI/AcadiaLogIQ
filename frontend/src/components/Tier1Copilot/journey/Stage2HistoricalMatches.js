@@ -138,7 +138,7 @@ export default function Stage2HistoricalMatches({
     return (
       <Card style={{ marginBottom: 16, borderLeft: "4px solid #6B6B6B" }}>
         <Title level={5} style={{ marginTop: 0 }}>
-          Stage 2 — Historical Matches & Possible Causes
+          Related Incidents & Probable Causes
         </Title>
         <Paragraph type="secondary">
           No matching historical tickets found for this profile.
@@ -169,7 +169,7 @@ export default function Stage2HistoricalMatches({
   return (
     <Card style={{ marginBottom: 16, borderLeft: "4px solid #2563eb" }}>
       <Title level={5} style={{ marginTop: 0 }}>
-        Stage 2 — Historical Matches & Possible Causes ({total})
+        Related Incidents & Probable Causes
       </Title>
 
       <Collapse defaultActiveKey={["match-0"]} items={items} />

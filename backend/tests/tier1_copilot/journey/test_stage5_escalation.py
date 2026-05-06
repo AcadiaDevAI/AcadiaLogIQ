@@ -62,8 +62,9 @@ def test_fetch_traversal_log_rolls_up_per_stage():
     # plus second-level precision so rapid stage transitions don't
     # collapse into identical minute-level timestamps.
     assert "advanced at 2026-04-29 12:03:00 UTC" in s1a["result"]
-    # Stage 2 only viewed
-    assert out[2]["result"] == "viewed"
+    # Stage 2 only viewed (Sprint 12 appends "/ <duration>")
+    assert out[2]["result"].startswith("viewed")
+    assert "/" in out[2]["result"]
 
 
 def test_build_package_called_with_merged_what_tried():

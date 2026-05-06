@@ -31,6 +31,28 @@ _STAGE_LABELS = {
 }
 
 
+def _format_duration(seconds: float) -> str:
+    """Render an elapsed-seconds float as a compact human string:
+       <60s  → "Xs"
+       <1h   → "Xm Ys" (or "Xm" when seconds == 0)
+       ≥1h   → "Xh Ym" (or "Xh" when minutes == 0)
+
+    Used for per-stage time-spent in the escalation traversal log so
+    Tier-2 / analytics can see how long the engineer dwelled on each
+    stage in addition to the absolute timestamps.
+    """
+    if seconds is None or seconds < 0:
+        return "0s"
+    s = int(round(seconds))
+    if s < 60:
+        return f"{s}s"
+    m, sec = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {sec}s" if sec > 0 else f"{m}m"
+    h, m2 = divmod(m, 60)
+    return f"{h}h {m2}m" if m2 > 0 else f"{h}h"
+
+
 def fetch_traversal_log(session_id: str) -> List[Dict[str, Any]]:
     """Read tier1_journey_events for this session, return as a flat list
     of `{step, result, note}` dicts compatible with build_package's
@@ -114,9 +136,28 @@ def fetch_traversal_log(session_id: str) -> List[Dict[str, Any]]:
                 actions.append("advanced")
         if not actions:
             actions.append("seen")
+
+        # Sprint 12 — per-stage time-spent. Useful for Tier-2 review and
+        # for engagement analytics ("how long did the engineer actually
+        # sit with each stage before advancing?"). Duration is computed
+        # as (advance_ts - first_seen) when the engineer clicked the
+        # next-stage CTA; otherwise as (latest_event_ts - first_seen),
+        # which captures dwell time even when they didn't advance
+        # (e.g., the final viewed stage before escalation).
+        first_ts = bucket["first_seen"]
+        last_ts = events[-1][1] if events else first_ts
+        end_ts = adv if adv is not None else last_ts
+        try:
+            duration_sec = (end_ts - first_ts).total_seconds()
+        except Exception:
+            duration_sec = 0
+        duration_str = _format_duration(duration_sec)
+
         out.append({
             "step": f"Stage {stage[6:].replace('_', '').upper()} — {label}",
-            "result": ", ".join(actions),
+            # Append "/ <duration>" so the rendered line reads
+            # "viewed, advanced at 2026-05-05 23:50:13 UTC / 1m 3s"
+            "result": f"{', '.join(actions)} / {duration_str}",
             "note": None,
         })
     return out

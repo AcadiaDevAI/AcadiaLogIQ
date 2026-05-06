@@ -86,7 +86,7 @@ export default function Stage0BestTicketDistillation({ data, sessionId, onReveal
   if (data.sparse) {
     return (
       <Card style={{ marginBottom: 16, borderLeft: "4px solid #6B6B6B" }}>
-        <Title level={5} style={{ marginTop: 0 }}>Stage 0 — Confidence Lead</Title>
+        <Title level={5} style={{ marginTop: 0 }}>Best Historical Match & Recommended Resolution</Title>
         {data.profile_match ? (
           <Paragraph style={{ marginBottom: 8 }}>
             <Text type="secondary">{data.profile_match}</Text>
@@ -105,7 +105,7 @@ export default function Stage0BestTicketDistillation({ data, sessionId, onReveal
   return (
     <Card style={{ marginBottom: 16, borderLeft: `4px solid ${color}` }}>
       <Title level={5} style={{ marginTop: 0, marginBottom: 4 }}>
-        Stage 0 — Best Past Resolution
+        Best Historical Match & Recommended Resolution
       </Title>
 
       {data.profile_match ? (

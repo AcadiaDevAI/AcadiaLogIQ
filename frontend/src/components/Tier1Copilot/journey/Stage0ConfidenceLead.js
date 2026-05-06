@@ -58,7 +58,7 @@ export default function Stage0ConfidenceLead({ data }) {
   if (data.sparse) {
     return (
       <Card style={{ marginBottom: 16, borderLeft: "4px solid #6B6B6B" }}>
-        <Title level={5} style={{ marginTop: 0 }}>Stage 0 — Confidence Lead</Title>
+        <Title level={5} style={{ marginTop: 0 }}>Best Historical Match & Recommended Resolution</Title>
         <Paragraph style={{ marginBottom: 0 }}>
           {data.profile_match ? (
             <Text type="secondary">{data.profile_match}</Text>
@@ -86,7 +86,7 @@ export default function Stage0ConfidenceLead({ data }) {
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 12 }}>
         <div style={{ minWidth: 240, flex: 1 }}>
           <Title level={5} style={{ marginTop: 0, marginBottom: 4 }}>
-            Stage 0 — Confidence Lead
+            Best Historical Match & Recommended Resolution
           </Title>
           {data.profile_match ? (
             <Tag style={{ marginBottom: 8 }}>{data.profile_match}</Tag>
