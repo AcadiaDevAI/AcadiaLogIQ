@@ -85,8 +85,21 @@ function reducer(state, action) {
         }),
         // ── Pull mode fields from the session payload if backend
         //    attaches them (Sprint 2 will start populating these).
-        //    Safe fall-through to current state when fields are absent.
-        selectedMode: action.payload.selected_mode ?? state.selectedMode,
+        //
+        //    Sprint 12 — fallback hardened. When the backend omits
+        //    selected_mode (older chat rows, or any session created
+        //    before mode persistence landed) AND the session carries
+        //    messages, default to "troubleshooting" so AppLayout
+        //    routes to ChatArea. Previously we fell back to
+        //    state.selectedMode, which left the user stuck on the
+        //    LandingRouter (Tier-1 intake form) when they clicked a
+        //    history entry from inside the Tier-1 Workspace
+        //    (selectedMode=null at that point).
+        selectedMode:
+          action.payload.selected_mode ??
+          ((action.payload.messages && action.payload.messages.length > 0)
+            ? "troubleshooting"
+            : state.selectedMode),
         subMode: action.payload.sub_mode ?? state.subMode,
         conversationContextActive:
           action.payload.conversation_context_active ?? state.conversationContextActive,
@@ -102,21 +115,36 @@ function reducer(state, action) {
       };
 
     case "NEW_CHAT":
+      // Sprint 12 — "New Chat" now opens a blank ChatArea (empty
+      // EmptyState + ChatInput) instead of bouncing the user back to
+      // the LandingRouter (which, post-Sprint-11, lands on the Tier-1
+      // Copilot intake form by default — unwanted for a "fresh chat"
+      // gesture). selectedMode is held at "troubleshooting" so:
+      //   1. AppLayout's `!state.selectedMode` gate stays false ⇒
+      //      ChatArea continues to render.
+      //   2. /ask uses the same ticket-related retrieval path that
+      //      the Stage 4 KB-handoff chat uses (useChatHandoff.js sets
+      //      the same mode), keeping search corpus consistent.
+      //   3. The next /ask call creates a new backend session that
+      //      will be stored with selected_mode="troubleshooting", so
+      //      a later chat-history click round-trips back into ChatArea
+      //      via SET_SESSION cleanly.
       return {
         ...state,
         sessionId: null,
         messages: [],
-        // Guided workflow: NEW_CHAT always returns to the landing page.
-        selectedMode: null,
+        selectedMode: "troubleshooting",
         subMode: null,
-        conversationContextActive: false,
+        conversationContextActive: true,
         customerName: null,
         technologyDomain: null,
         ticketId: null,
         issueSummary: null,
         formData: null,
         pendingContextBreak: null,
-        // Sprint 10.4 — clear journey-session linkage on NEW_CHAT.
+        // Sprint 10.4 — clear journey-session linkage on NEW_CHAT so
+        // the "Back to Resolution Journey" banner doesn't carry over
+        // from a prior journey-originated chat.
         sessionMetadata: {},
       };
 

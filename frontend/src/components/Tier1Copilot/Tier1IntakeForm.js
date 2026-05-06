@@ -442,6 +442,30 @@ function ProgressiveIntakeForm({
         )}
 
         <Card bodyStyle={{ padding: 18 }} style={cardStyle}>
+          {/* Sprint 12 — when this form is embedded inside the
+              SourceAwareIntake split layout, render the
+              "What's happening?" title + description INSIDE the Card
+              (instead of as a page-level header above it). This
+              preserves the triage-engineer guidance that lived on the
+              old single-column landing page, and keeps the Card aligned
+              with the Reactive column (UniversalIntakePanel uses the
+              same pattern: header + helper text inside its Card body). */}
+          {embedded && (
+            <div style={{ marginBottom: 14 }}>
+              <div
+                className="t-text"
+                style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}
+              >
+                What&apos;s happening?
+              </div>
+              <div className="t-text-muted" style={{ fontSize: 12 }}>
+                Describe the incident below. We&apos;ll match it to the
+                closest historical ticket and return an 8-section
+                troubleshooting answer.
+              </div>
+            </div>
+          )}
+
           <Form
             form={form}
             layout="vertical"
