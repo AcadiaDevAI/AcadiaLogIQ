@@ -116,14 +116,34 @@ export default function UniversalIntakePanel({
         marginBottom: 16,
       }}
     >
-      <div className="t-text text-sm font-semibold mb-1">
-        {headerOverride || `Paste content from ${SOURCE_LABEL[source] || source}`}
-      </div>
-      <div className="t-text-muted text-xs mb-2">
-        {helperTextOverride
-          || ("The system will extract up to 4 structured interpretations and"
-              + " validate them against the ingested ticket corpus. Pick one to"
-              + " pre-fill the form below.")}
+      {/* Sprint 12 — header centered + sized to match the Proactive
+          column's "What's happening?" block (20/13px) so the two
+          columns of the split intake landing read as visually
+          symmetric. UniversalIntakePanel has only one usage today
+          (Reactive column inside SourceAwareIntake), so this style
+          bump is local to that surface. */}
+      <div style={{ marginBottom: 14, textAlign: "center" }}>
+        <h2
+          className="t-text"
+          style={{
+            fontSize: 20,
+            fontWeight: 600,
+            letterSpacing: "-0.01em",
+            margin: 0,
+            marginBottom: 6,
+          }}
+        >
+          {headerOverride || `Paste content from ${SOURCE_LABEL[source] || source}`}
+        </h2>
+        <p
+          className="t-text-muted"
+          style={{ fontSize: 13, margin: 0, lineHeight: 1.5 }}
+        >
+          {helperTextOverride
+            || ("The system will extract up to 4 structured interpretations and"
+                + " validate them against the ingested ticket corpus. Pick one to"
+                + " pre-fill the form below.")}
+        </p>
       </div>
 
       <Input.TextArea

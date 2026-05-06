@@ -451,18 +451,27 @@ function ProgressiveIntakeForm({
               with the Reactive column (UniversalIntakePanel uses the
               same pattern: header + helper text inside its Card body). */}
           {embedded && (
-            <div style={{ marginBottom: 14 }}>
-              <div
+            <div style={{ marginBottom: 18, textAlign: "center" }}>
+              <h2
                 className="t-text"
-                style={{ fontSize: 14, fontWeight: 600, marginBottom: 4 }}
+                style={{
+                  fontSize: 20,
+                  fontWeight: 600,
+                  letterSpacing: "-0.01em",
+                  margin: 0,
+                  marginBottom: 6,
+                }}
               >
                 What&apos;s happening?
-              </div>
-              <div className="t-text-muted" style={{ fontSize: 12 }}>
+              </h2>
+              <p
+                className="t-text-muted"
+                style={{ fontSize: 13, margin: 0, lineHeight: 1.5 }}
+              >
                 Describe the incident below. We&apos;ll match it to the
                 closest historical ticket and return an 8-section
                 troubleshooting answer.
-              </div>
+              </p>
             </div>
           )}
 
