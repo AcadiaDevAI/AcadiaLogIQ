@@ -8,7 +8,7 @@
 // [Helpful] [The Troubleshooting Approach ▶]
 
 import React, { useState } from "react";
-import { Button, Card, Collapse, Typography } from "antd";
+import { Button, Card, Collapse, Space, Tag, Typography } from "antd";
 
 import EscalateButton from "./EscalateButton";
 import HelpfulButton from "./HelpfulButton";
@@ -82,6 +82,30 @@ function MatchCardBody({ match }) {
       {match.root_cause ? (
         <Paragraph style={{ marginBottom: 8 }}>
           <Text strong>Root Cause: </Text>{match.root_cause}
+        </Paragraph>
+      ) : null}
+      {/* Sprint 12.5 — Error codes row. Aggregated per ticket from
+          Metadata.Fingerprints + Operational_SOP.primary_error_fingerprint
+          + semantic_faq_block[*].related_signals. Rendered as monospace
+          chips so the engineer can grep these tokens against the
+          current incident's logs. Omitted when empty (no row stub). */}
+      {match.error_codes && match.error_codes.length > 0 ? (
+        <Paragraph style={{ marginBottom: 8 }}>
+          <Text strong>Error codes: </Text>
+          <Space size={[4, 4]} wrap>
+            {match.error_codes.map((code) => (
+              <Tag
+                key={code}
+                color="red"
+                style={{
+                  marginRight: 0,
+                  fontFamily: "var(--font-monospace, monospace)",
+                }}
+              >
+                {code}
+              </Tag>
+            ))}
+          </Space>
         </Paragraph>
       ) : null}
       {resolutionLine ? (

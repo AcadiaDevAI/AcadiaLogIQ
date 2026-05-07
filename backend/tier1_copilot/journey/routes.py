@@ -23,6 +23,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from backend.config import settings
 
 from .schemas import (
+    EscalationHandoffNoteResponse,
+    EscalationRouting,
     JourneyEventRequest,
     JourneyEventResponse,
     JourneyInitial,
@@ -35,6 +37,7 @@ from .schemas import (
     Stage4SearchKB,
 )
 from .stage0_confidence import compute_stage0
+from .stage0_environment import build_environment_profile
 from .stage1_smoking_gun import build_stage1a
 from .stage1_do_not_chase import build_stage1b
 from .stage2_historical import build_stage2
@@ -42,6 +45,8 @@ from .stage3_troubleshooting import build_stage3
 from .stage4_kb_handoff import build_stage4
 from .stage4_search_kb_handoff import create_chat_session_with_handoff
 from .stage5_escalation import build_journey_escalation_package
+from .stage5_handoff_note import generate_handoff_note
+from .stage5_routing import build_escalation_routing
 from .telemetry import record_event
 from .ticket_loader import load_cohort_metadata
 
@@ -134,19 +139,25 @@ async def get_initial(session_id: str) -> JourneyInitial:
     lookback = int(getattr(settings, "TIER1_JOURNEY_LOOKBACK_MONTHS", 18))
     threshold = float(getattr(settings, "TIER1_JOURNEY_STAGE0_DOMINANT_THRESHOLD", 0.4))
 
+    environment_profile = build_environment_profile(cohort)
     stage_0 = compute_stage0(cohort, lookback_months=lookback)
     smoking_gun = build_stage1a(cohort, min_frequency_ratio=threshold)
     do_not_chase = build_stage1b(cohort)
 
     # Sprint 10.3 §5.2 — diagnostic-grade log. From one line you can
     # tell whether each panel got populated and why.
+    # Sprint 12.4 — env_empty added so the new lead-in panel's
+    # coverage is visible in the same line.
     logger.info(
         "[journey.initial] sid=%s top5=%d cohort=%d "
+        "env_empty=%s env_with_data=%d "
         "s1a_derived=%s s1b_entries=%d s1b_reason=%s "
         "s0_strength=%s",
         session_id[:12],
         len(cohort),
         stage_0.cohort_size,
+        environment_profile.empty,
+        environment_profile.tickets_with_data,
         smoking_gun.derived_from,
         len(do_not_chase.entries),
         do_not_chase.reason,
@@ -155,6 +166,7 @@ async def get_initial(session_id: str) -> JourneyInitial:
 
     return JourneyInitial(
         session_id=session_id,
+        environment_profile=environment_profile,
         stage_0=stage_0,
         pivot_insights=PivotInsights(
             smoking_gun=smoking_gun,
@@ -291,6 +303,46 @@ async def get_stage_5(session_id: str):
 
 
 # ─────────────────────────────────────────────────────────────
+# Sprint 12.7 — /escalation-routing — aggregated routing & vendor
+# data for the Operational Handoff card. Read-only, derived from
+# the same cohort as /stage-5; runs cheap (no LLM, no DB beyond the
+# already-cached cohort load).
+# ─────────────────────────────────────────────────────────────
+@router.get(
+    "/{session_id}/escalation-routing",
+    response_model=EscalationRouting,
+)
+async def get_escalation_routing(session_id: str) -> EscalationRouting:
+    """Aggregated Resolution_Groups + Team_Path + Vendor_OEM_Engagement
+    across the cohort. Returned as a separate endpoint so the existing
+    /stage-5 (Sprint 7 Tier1EscalationPackage) wire shape stays
+    byte-identical for the chat-Escalate consumers."""
+    _require_flag()
+    cohort = _load_or_cache(session_id)
+    return build_escalation_routing(cohort)
+
+
+# ─────────────────────────────────────────────────────────────
+# Sprint 12.7 — /escalation-handoff-note — LLM-generated Tier-2
+# handoff note. Triggered by the "Generate Tier 2 Escalation Handoff"
+# button on the Operational Handoff card. Failure-open: never raises;
+# falls back to a deterministic template-fill on LLM error so the
+# button always returns a usable note.
+# ─────────────────────────────────────────────────────────────
+@router.post(
+    "/{session_id}/escalation-handoff-note",
+    response_model=EscalationHandoffNoteResponse,
+)
+async def post_escalation_handoff_note(
+    session_id: str,
+) -> EscalationHandoffNoteResponse:
+    _require_flag()
+    cohort = _load_or_cache(session_id)
+    note, used_fallback = generate_handoff_note(cohort)
+    return EscalationHandoffNoteResponse(note=note, used_fallback=used_fallback)
+
+
+# ─────────────────────────────────────────────────────────────
 # Sprint 10.2 — /search-kb-handoff — creates a real chat session,
 # auto-submits the journey's prefilled question, and either invokes
 # /ask (when SOP/KB corpus exists) or inserts an upload-prompt
@@ -364,6 +416,14 @@ async def search_kb_handoff(
     override = (req.prefilled_message_override or "").strip() if req else ""
     prefilled_message = override or handoff.prefilled_message
 
+    # Sprint 12.1 — per-bullet Ask-in-Chat carries the bullet's source
+    # Incident_Number so the chat session can be scoped to that one
+    # ticket. NULL when Stage 4 / Search-in-KB invokes the handoff —
+    # global retrieval behavior is preserved in that case.
+    scope_incident_id = (
+        (req.scope_incident_id or "").strip() if req else ""
+    ) or None
+
     try:
         result = create_chat_session_with_handoff(
             journey_session_id=session_id,
@@ -371,6 +431,7 @@ async def search_kb_handoff(
             prefilled_message=prefilled_message,
             engine=_engine,
             ask_fn=None,  # frontend fires /ask after SET_SESSION lands
+            scope_incident_id=scope_incident_id,
         )
     except Exception as exc:
         logger.error(

@@ -43,6 +43,7 @@ def create_chat_session_with_handoff(
     engine: Any = None,
     ask_fn: Optional[Callable[..., Dict[str, Any]]] = None,
     save_message_fn: Optional[Callable[..., str]] = None,
+    scope_incident_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Sprint 10.6 — orchestrate the Stage 4 handoff.
 
@@ -65,6 +66,12 @@ def create_chat_session_with_handoff(
             any `allowed_doc_kinds` filter — Search KB now searches
             the same corpus regular /ask searches.
         save_message_fn: Test injection point for save_message_to_session.
+        scope_incident_id: Sprint 12.1 — when set, the chat session is
+            scoped to a single Incident_Number; subsequent /ask calls
+            filter retrieval by metadata_json->>'primary_id'. Set by
+            the per-bullet Ask-in-Chat handoff (the bullet's source
+            ticket extracted from its " - INC-XXX" suffix). NULL =
+            global Search-in-KB behavior is preserved.
 
     Returns:
         {"chat_session_id", "redirect_url"}  — `has_corpus` removed in 10.6
@@ -91,6 +98,38 @@ def create_chat_session_with_handoff(
         # existing handoff tests keep passing.
         save_kwargs.pop("metadata", None)
         chat_session_id = save_message_fn(**save_kwargs)
+
+    # Sprint 12.1 — When the per-bullet "Ask in Chat" handoff carries
+    # a `scope_incident_id`, persist it on the chat_sessions row so
+    # every /ask call within this chat session retrieves only from
+    # that one ticket's chunks (orchestrator filter on
+    # metadata_json->>'primary_id'). NULL = legacy global behavior is
+    # preserved (Search-in-KB path).
+    #
+    # Done as a small UPDATE rather than threading the column through
+    # save_message_to_session's signature, to keep this change strictly
+    # additive and avoid touching the chat-message persistence path.
+    if scope_incident_id and chat_session_id:
+        try:
+            from sqlalchemy import text as _scope_text
+            from backend.db.connection import engine as _scope_engine
+            with _scope_engine.begin() as _conn:
+                _conn.execute(
+                    _scope_text(
+                        "UPDATE chat_sessions SET scope_incident_id = :sid "
+                        "WHERE id = :cid"
+                    ),
+                    {"sid": str(scope_incident_id), "cid": chat_session_id},
+                )
+        except Exception as exc:
+            # Demo-day safety: a failure here must NOT break the
+            # handoff. The chat will simply behave like a regular
+            # unscoped session. Log and continue.
+            logger.warning(
+                "[journey.stage4] failed to persist scope_incident_id "
+                "chat=%s scope=%s err=%s",
+                chat_session_id, scope_incident_id, exc,
+            )
 
     # 2. Sprint 10.6 §3 — invoke /ask WITHOUT any doc-kind filter.
     #    No empty-corpus gate, no upload-prompt branch. If retrieval

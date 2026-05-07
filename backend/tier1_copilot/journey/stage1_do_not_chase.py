@@ -1,30 +1,54 @@
 """Sprint 10 Stage 1B — Do Not Chase aggregator.
 
-Per spec §3.3:
-  Source field families (per cohort ticket):
-    - Knowledge_Base[*].diagnostic_pathway.elimination_checklist[]
-    - Knowledge_Base[*].diagnostic_logic.differential_diagnosis[]
-    - Knowledge_Base[*].false_path_red_herrings[].misleading_signal +
-      .rule_out_logic
+Per spec §3.3, source field families (per cohort ticket):
+    - Knowledge_Base[*].semantic_unit_educational.diagnostic_pathway
+        .elimination_checklist[]                       (list of strings)
+    - Knowledge_Base[*].semantic_unit_educational.diagnostic_logic
+        .differential_diagnosis[]                      (list of strings)
+    - Knowledge_Base[*].semantic_unit_educational.diagnostic_pathway
+        .false_path_red_herrings[]                     (list of
+        ``{misleading_signal, rule_out_logic}`` dicts — only source that
+        carries real per-item rule-out copy)
     - Troubleshooting_Ledger.Diagnostic_Tests_Executed[] — only entries
-      whose `outcome` matches normal | healthy | not_root_cause |
-      ruled_out (case-insensitive contains)
+        whose ``outcome`` matches normal | healthy | not_root_cause |
+        ruled_out (case-insensitive contains). Currently absent from
+        the production corpus (0 tickets carry it); the branch is kept
+        for forward-compatibility with future enrichment.
 
-  Aggregation:
+Aggregation:
     - Concat into flat (signal, rule_out) tuples.
     - Normalize signal (lower, strip punctuation, collapse whitespace).
-    - Group; keep groups with count >= 2.
-    - Sort desc by count. Cap at 8.
+    - Group; keep groups with count >= MIN_OCCURRENCE_COUNT.
+    - Sort desc by count. Cap at MAX_ENTRIES.
+
+Compatibility:
+    The current production gold-ticket schema nests these fields one
+    level deeper, under ``Knowledge_Base[*].semantic_unit_educational``.
+    A small wrapper (`_se_kb`) resolves both the nested layout and the
+    legacy flat layout in one place so callers (and tests) stay shape-
+    agnostic.
+
+Logging:
+    Emits one INFO line per call summarising cohort coverage:
+    ``[stage1b] cohort=N with_pairs=M coverage=P% groups=K
+    reason=... entries=E``. Lets prod monitoring spot ingestion
+    regressions (a batch of tickets without populated false-path /
+    elimination data shows up as a coverage drop) without requiring
+    every caller to inspect the result object.
 
 Pure function — no DB, no LLM.
 """
 from __future__ import annotations
 
+import logging
 import re
 from collections import defaultdict
 from typing import Any, Dict, List, Optional, Tuple
 
 from .schemas import DoNotChaseEntry, Stage1bDoNotChase
+
+
+logger = logging.getLogger("acadia-log-iq")
 
 
 _WS = re.compile(r"\s+")
@@ -71,14 +95,47 @@ def _kb_entries(ticket: Dict[str, Any]) -> List[Dict[str, Any]]:
     return []
 
 
+def _se_kb(kb_entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Return the KB sub-tree that holds diagnostic data, tolerating
+    two known layouts:
+
+    * Nested (current ingest):
+        ``Knowledge_Base[*].semantic_unit_educational`` — diagnostic
+        sections (``diagnostic_pathway``, ``diagnostic_logic``) live
+        one level under this wrapper.
+    * Flat (legacy / hand-written tickets): the diagnostic sections
+        sit directly on the KB entry.
+
+    Always returns a dict so callers can chain ``.get(...)`` without
+    None-guards. Mirrors the same shape resolver used by
+    ``stage1_smoking_gun._pivot_payload`` so the two stages stay in
+    lock-step on schema interpretation.
+    """
+    if not isinstance(kb_entry, dict):
+        return {}
+    sue = kb_entry.get("semantic_unit_educational")
+    if isinstance(sue, dict):
+        return sue
+    return kb_entry
+
+
 def _harvest_pairs(ticket: Dict[str, Any]) -> List[Tuple[str, str]]:
     """Pull (signal, rule_out) pairs from all four field families."""
     pairs: List[Tuple[str, str]] = []
 
     for kb in _kb_entries(ticket):
+        sue = _se_kb(kb)
+
+        diagnostic_pathway = sue.get("diagnostic_pathway") if isinstance(sue.get("diagnostic_pathway"), dict) else {}
+        diagnostic_logic   = sue.get("diagnostic_logic")   if isinstance(sue.get("diagnostic_logic"),   dict) else {}
+
         # diagnostic_pathway.elimination_checklist[]
-        path = kb.get("diagnostic_pathway") if isinstance(kb.get("diagnostic_pathway"), dict) else {}
-        ec = path.get("elimination_checklist") if isinstance(path, dict) else None
+        # In the corpus this is a list of bare strings ("Power equipment
+        # verified on-site …"). Per-item rule_out_logic isn't supplied
+        # by the source schema for this field; the dict-shaped branch
+        # remains for legacy / hand-written tickets that stamp it that
+        # way.
+        ec = diagnostic_pathway.get("elimination_checklist")
         if isinstance(ec, list):
             for item in ec:
                 if isinstance(item, dict):
@@ -89,9 +146,9 @@ def _harvest_pairs(ticket: Dict[str, Any]) -> List[Tuple[str, str]]:
                 elif isinstance(item, str) and item.strip():
                     pairs.append((item, ""))
 
-        # diagnostic_logic.differential_diagnosis[]
-        dl = kb.get("diagnostic_logic") if isinstance(kb.get("diagnostic_logic"), dict) else {}
-        dd = dl.get("differential_diagnosis") if isinstance(dl, dict) else None
+        # diagnostic_logic.differential_diagnosis[] (list of bare
+        # diagnosis strings in the production corpus).
+        dd = diagnostic_logic.get("differential_diagnosis")
         if isinstance(dd, list):
             for item in dd:
                 if isinstance(item, dict):
@@ -102,8 +159,10 @@ def _harvest_pairs(ticket: Dict[str, Any]) -> List[Tuple[str, str]]:
                 elif isinstance(item, str) and item.strip():
                     pairs.append((item, ""))
 
-        # false_path_red_herrings[]
-        fp = kb.get("false_path_red_herrings")
+        # diagnostic_pathway.false_path_red_herrings[] — the only
+        # source that carries real per-item rule-out logic in the gold
+        # schema. Dict shape: ``{misleading_signal, rule_out_logic}``.
+        fp = diagnostic_pathway.get("false_path_red_herrings")
         if isinstance(fp, list):
             for item in fp:
                 if isinstance(item, dict):
@@ -156,7 +215,8 @@ def build_stage1b(
                          count<min_count (kept as a safety branch —
                          only fires when callers pass min_count > 1)
     """
-    if not cohort:
+    n = len(cohort or [])
+    if n == 0:
         return Stage1bDoNotChase(empty=True, reason="no_data")
 
     # group key = normalised signal → metadata
@@ -167,8 +227,10 @@ def build_stage1b(
     })
 
     raw_pairs_count = 0
+    tickets_with_pairs = 0
     for ticket in cohort:
         inc = _incident_number(ticket) or ""
+        ticket_contributed = False
         for sig, rule in _harvest_pairs(ticket):
             if not sig or not str(sig).strip():
                 continue
@@ -176,17 +238,34 @@ def build_stage1b(
             if not key:
                 continue
             raw_pairs_count += 1
+            ticket_contributed = True
             g = groups[key]
             g["raw_signals"].append(sig.strip())
             if rule and rule.strip():
                 g["rule_outs"].append(rule.strip())
             if inc and inc not in g["incidents"]:
                 g["incidents"].append(inc)
+        if ticket_contributed:
+            tickets_with_pairs += 1
+
+    coverage_pct = round(100.0 * tickets_with_pairs / n) if n else 0
+
+    def _emit(result: Stage1bDoNotChase) -> Stage1bDoNotChase:
+        # One log line per call so prod monitoring can spot ingestion
+        # regressions (a batch of tickets without populated false-path
+        # / elimination data shows up as a coverage drop).
+        logger.info(
+            "[stage1b] cohort=%d with_pairs=%d coverage=%d%% "
+            "groups=%d reason=%s entries=%d",
+            n, tickets_with_pairs, coverage_pct,
+            len(groups), result.reason, len(result.entries),
+        )
+        return result
 
     # Sprint 10.1 — classify the empty case so the frontend can pick
     # the right copy.
     if raw_pairs_count == 0 or not groups:
-        return Stage1bDoNotChase(empty=True, reason="no_data")
+        return _emit(Stage1bDoNotChase(empty=True, reason="no_data"))
 
     # Filter by min_count (count = unique incident count) and sort
     qualifying = [
@@ -201,16 +280,32 @@ def build_stage1b(
         # passes min_count > 1 and no group meets it; we still report
         # "no_recurring" so the frontend renders the appropriate
         # empty-state copy.
-        return Stage1bDoNotChase(empty=True, reason="no_recurring")
+        return _emit(Stage1bDoNotChase(empty=True, reason="no_recurring"))
 
-    qualifying.sort(key=lambda x: len(x[1]["incidents"]), reverse=True)
+    # Primary sort: groups whose source tickets supplied a real
+    # per-item rule_out_logic (i.e. came in via false_path_red_herrings
+    # or a dict-shaped elimination_checklist entry) rank ahead of
+    # groups that would otherwise fall back to the generic "checked
+    # and found healthy" line. The §3.3 procedure asks for the *why*
+    # alongside the *what* — an entry that carries it is strictly
+    # more useful to the engineer regardless of occurrence count.
+    #
+    # Secondary sort: occurrence count (more incidents = stronger
+    # evidence). Within each tier the most-supported entry leads.
+    qualifying.sort(
+        key=lambda kv: (bool(kv[1]["rule_outs"]), len(kv[1]["incidents"])),
+        reverse=True,
+    )
 
     out: List[DoNotChaseEntry] = []
     for _key, g in qualifying[:max_entries]:
-        # Canonical signal — most-frequent verbatim
+        # Canonical signal — most-frequent verbatim.
         canonical = max(set(g["raw_signals"]), key=g["raw_signals"].count)
+        # Canonical rule-out — longest non-empty string when the group
+        # has any (most descriptive wins, mirroring Stage 1A's "longest
+        # at tie" pattern). Otherwise the generic fallback fires.
         rule = (
-            g["rule_outs"][0] if g["rule_outs"]
+            max(g["rule_outs"], key=len) if g["rule_outs"]
             else "Checked and found healthy in past incidents — verify but do not deep-dive."
         )
         out.append(DoNotChaseEntry(
@@ -220,4 +315,4 @@ def build_stage1b(
             seen_in_incidents=g["incidents"][:5],
         ))
 
-    return Stage1bDoNotChase(entries=out, empty=False, reason="populated")
+    return _emit(Stage1bDoNotChase(entries=out, empty=False, reason="populated"))

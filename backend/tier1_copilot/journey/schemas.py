@@ -6,7 +6,7 @@ model. Telemetry POST takes `JourneyEventRequest` and returns `{ok}`.
 """
 from __future__ import annotations
 
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -59,16 +59,24 @@ class Stage1aSmokingGun(BaseModel):
     seen_in_incidents: List[str] = Field(default_factory=list)
     empty: bool = True
     # Sprint 10.1 — tells the frontend how to label the panel:
-    #   "mental_pivot_aggregate" → cohort had populated Knowledge_Base
-    #     fields; the standard "Smoking Gun" panel renders.
-    #   "primary_fix_fallback"  → KB was empty; we distilled from the
-    #     highest-quality cohort ticket's Primary_Fix +
+    #   "mental_pivot_aggregate" → multiple cohort tickets share the
+    #     same pivot_data_point (count >= ceil(N * 0.4)); the standard
+    #     "Smoking Gun" panel renders with the cohort-frequency badge.
+    #   "mental_pivot_single"    → at least one ticket has documented
+    #     pivot data, but the cohort threshold isn't met (sparse data,
+    #     not enough tickets carry it). Surface what we have rather
+    #     than dropping it. Frontend renders the same panel but with
+    #     a caption that contextualises the lone observation.
+    #   "primary_fix_fallback"  → no cohort ticket has populated
+    #     Knowledge_Base.the_mental_pivot at all; we distilled from
+    #     the highest-quality ticket's Primary_Fix +
     #     Root_Cause_Technical_High_Level. Frontend re-titles to
     #     "Best Historical Fix" with a small italic caption.
     #   "empty"                 → no usable data; render existing
     #     empty-state copy.
     derived_from: Literal[
         "mental_pivot_aggregate",
+        "mental_pivot_single",
         "primary_fix_fallback",
         "empty",
     ] = "empty"
@@ -82,6 +90,50 @@ class DoNotChaseEntry(BaseModel):
     rule_out_logic: str
     occurrence_count: int
     seen_in_incidents: List[str] = Field(default_factory=list)
+
+
+# ─────────────────────────────────────────────────────────────
+# Sprint 12.7 — Escalation Routing & Vendor/OEM Engagement.
+# Lives next to (not inside) the Sprint 7 Tier1EscalationPackage so
+# the existing chat-Escalate flow is byte-identical. Exposed via a
+# dedicated GET endpoint that the journey frontend fetches alongside
+# /stage-5 when the engineer reveals Operational Handoff.
+# ─────────────────────────────────────────────────────────────
+class Tier2EntryCandidate(BaseModel):
+    team: str
+    occurrence_count: int = 1
+    example_path: Optional[str] = None
+
+
+class EscalationRouting(BaseModel):
+    resolution_groups: List[str] = Field(default_factory=list)
+    team_paths: List[str] = Field(default_factory=list)
+    recommended_tier2_teams: List[Tier2EntryCandidate] = Field(default_factory=list)
+    # Vendor_OEM_Engagement is 0/213 populated in the current corpus
+    # — wired forward-compat. `vendor_records` carries the raw dicts
+    # (rendered lazily by the frontend when present); the dedicated
+    # `forensic_data_required` list is pulled from well-known
+    # sub-keys (forensic_data_required / required_artifacts /
+    # evidence_required / required_data) so the master forensic-data
+    # list lights up automatically once ingestion populates them.
+    vendor_records: List[Dict[str, Any]] = Field(default_factory=list)
+    forensic_data_required: List[str] = Field(default_factory=list)
+    cohort_size: int = 0
+    tickets_with_data: int = 0
+    empty: bool = True
+
+
+# ─────────────────────────────────────────────────────────────
+# Sprint 12.7 — Escalation Handoff Note (LLM-generated).
+# POST /tier1/journey/{sid}/escalation-handoff-note returns this.
+# ─────────────────────────────────────────────────────────────
+class EscalationHandoffNoteResponse(BaseModel):
+    note: str
+    # Diagnostic flag — true when the deterministic template-fill
+    # fallback fired (LLM call failed). Frontend can show a small
+    # indicator so the engineer knows to expect a less polished
+    # diagnostic-summary sentence and re-run if desired.
+    used_fallback: bool = False
 
 
 class Stage1bDoNotChase(BaseModel):
@@ -137,6 +189,14 @@ class HistoricalMatchCard(BaseModel):
     #                         + Key_Contributors.Key_Impact_Players[0].Hero_Action
     incident_summary: Optional[str] = None
     resolution_approach: Optional[str] = None
+    # Sprint 12.5 — Error-code fingerprints aggregated per ticket from:
+    #   - Metadata.Fingerprints                       (List[str])
+    #   - Operational_SOP.primary_error_fingerprint   (str)
+    #   - semantic_faq_block[*].related_signals       (List[str])
+    # Deduped case-insensitively, first-seen casing wins. Surfaces in
+    # the historical-match card so the engineer can grep these tokens
+    # against current-incident logs. Empty list when none populated.
+    error_codes: List[str] = Field(default_factory=list)
 
 
 class Stage2HistoricalMatches(BaseModel):
@@ -282,11 +342,39 @@ class PivotInsights(BaseModel):
 
 
 # ─────────────────────────────────────────────────────────────
+# Sprint 12.4 — Environment Context & Tech Component Profile.
+# Lead-in panel rendered ABOVE Stage 0. Aggregates the cohort's
+# technology landscape (domains, components, clusters, products,
+# technical entities) into a single deduplicated profile so the
+# engineer sees the full blast radius before drilling into any
+# single ticket. Source fields:
+#   - Metadata.Dynamic_Domain_Payload.Domain_Type       → domain_types
+#   - Metadata.component_category                       → component_categories
+#   - RAG_Potency_Metadata.Synaptic_Cluster_ID          → synaptic_cluster_ids
+#   - Engagement_Analysis.Products_Involved             → products_involved
+#   - Metadata.technical_entities                       → technical_entities
+# All five are deduped (case-insensitive) and emitted in first-seen
+# order across the cohort (rank-1 ticket's values lead).
+# ─────────────────────────────────────────────────────────────
+class EnvironmentProfile(BaseModel):
+    domain_types: List[str] = Field(default_factory=list)
+    component_categories: List[str] = Field(default_factory=list)
+    synaptic_cluster_ids: List[str] = Field(default_factory=list)
+    products_involved: List[str] = Field(default_factory=list)
+    technical_entities: List[str] = Field(default_factory=list)
+    cohort_size: int = 0
+    tickets_with_data: int = 0
+    empty: bool = True
+
+
+# ─────────────────────────────────────────────────────────────
 # /initial bundle — what paints on first journey load
 # Sprint 10.2 — stage_1a + stage_1b replaced with pivot_insights.
+# Sprint 12.4 — environment_profile prepended.
 # ─────────────────────────────────────────────────────────────
 class JourneyInitial(BaseModel):
     session_id: str
+    environment_profile: EnvironmentProfile
     stage_0: Stage0BestTicketDistillation
     pivot_insights: PivotInsights
 
@@ -306,6 +394,15 @@ class JourneyInitial(BaseModel):
 # existing caller (no body) keeps its prior behaviour byte-for-byte.
 class SearchKBHandoffRequest(BaseModel):
     prefilled_message_override: Optional[str] = None
+    # Sprint 12.1 — When the Stage 0 "Ask in Chat" button is clicked
+    # on a per-bullet step, the frontend extracts the bullet's source
+    # Incident_Number (parsed from the existing " - INC-XXX" suffix)
+    # and sends it here. The handoff persists it on the new
+    # chat_sessions row (scope_incident_id column, migration 042) so
+    # every subsequent /ask call in that chat session is scoped to
+    # this one ticket's chunks. NULL/omitted = original global
+    # Search-in-KB behavior is preserved.
+    scope_incident_id: Optional[str] = None
 
 
 class SearchKBHandoffResponse(BaseModel):
@@ -321,9 +418,10 @@ class JourneyEventRequest(BaseModel):
     # panel. Old "stage_1a" and "stage_1b" values stay so historical
     # event rows remain queryable; new events should use pivot_insights.
     stage: Literal[
+        "environment_context",   # Sprint 12.4 — lead-in profile panel
         "stage_0",
         "stage_1a", "stage_1b",  # legacy, kept for historical rows
-        "pivot_insights",        # NEW — merged 1A+1B
+        "pivot_insights",        # Sprint 10.2 — merged 1A+1B
         "stage_2", "stage_3", "stage_4", "stage_5",
     ]
     event_type: Literal[

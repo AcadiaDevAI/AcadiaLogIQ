@@ -285,6 +285,65 @@ def _resolution_steps(
     return out
 
 
+def _top5_first_steps(cohort: List[Dict[str, Any]]) -> List[str]:
+    """Sprint 12.2 — span the top-5 cohort tickets, ordered by
+    retrieval similarity (most similar first).
+
+    Design notes
+    ------------
+    Two orderings exist on the cohort and they are NOT the same:
+
+      * Retrieval similarity rank — produced by upstream retrieval
+        and reflected in the cohort's own list order (rank 1 first)
+        per ``ticket_loader.load_cohort_metadata``'s contract.
+      * Resolution_Quality_Score — used by ``_best_ticket()`` to
+        pick the *headline* ticket (the "Best fix came from INC-XXX"
+        line). High-quality writeups deserve the headline even if
+        they aren't the closest match.
+
+    The bullet list ("How they did it") tracks the FIRST ordering:
+    bullet 1 is the most-similar past ticket, bullet 2 the second
+    most-similar, and so on. The headline keeps tracking the SECOND
+    ordering. This lets the engineer read the bullet list as a
+    similarity-ranked tour of past evidence, while the headline
+    still surfaces the highest-quality precedent.
+
+    For each top-5 ticket in similarity order, we extract its first
+    resolution step via the existing ``_resolution_steps`` helper —
+    same field, same coercion logic, same trailing
+    ``" - <Incident_Number>"`` suffix that powers the per-bullet
+    Ask-in-Chat scope on the frontend. Tickets without an
+    extractable step are skipped (never padded). Return type is
+    ``List[str]``; the Stage 0 schema is unchanged.
+    """
+    if not cohort:
+        return []
+    # Preserve cohort order — index 0 = retrieval rank 1 = most
+    # similar to the engineer's incident. We do NOT re-sort by
+    # quality score here; that's `_best_ticket()`'s job for the
+    # headline.
+    seen_incidents: set = set()
+    out: List[str] = []
+    for ticket in cohort:
+        if not isinstance(ticket, dict):
+            continue
+        if len(out) >= 5:
+            break
+        inc = _safe_str(ticket, "Metadata", "Incident_Number")
+        # Defensive dedupe in case the cohort accidentally contains
+        # the same Incident_Number twice — never show duplicate
+        # sources side-by-side.
+        if inc and inc in seen_incidents:
+            continue
+        steps = _resolution_steps(ticket, inc)
+        if not steps:
+            continue
+        out.append(steps[0])
+        if inc:
+            seen_incidents.add(inc)
+    return out
+
+
 def _avg_minutes_cohort(cohort: List[Dict[str, Any]]) -> Optional[int]:
     """Average time_to_resolve_minutes across cohort tickets that have
     parseable numeric values. Returns None when no ticket has one."""
@@ -335,12 +394,14 @@ def compute_stage0(
     best_quality = _safe_int(meta.get("Resolution_Quality_Score"))
     best_time = _safe_int(meta.get("time_to_resolve_minutes"))
     what_worked = _safe_str(best, "Symptom_Solution_Mapping", "Primary_Fix")
-    # Sprint 12 — pass the best ticket's Incident_Number so each
-    # "How they did it" step is suffixed with " - <ticket_id>".
-    # Lets the engineer (and Tier-2 if escalated) trace any step
-    # back to its source ticket without round-tripping through
-    # Stage 2.
-    how_they_did_it = _resolution_steps(best, best_incident)
+    # Sprint 12.1 — span the top-5 cohort tickets instead of pulling
+    # all bullets from the single best ticket. Each bullet now carries
+    # its own " - <Incident_Number>" suffix, so the per-bullet
+    # Ask-in-Chat handoff can extract the source incident from the
+    # suffix and scope the resulting chat session to that one ticket
+    # (see `_top5_first_steps` docstring above for the full rationale).
+    # Schema is unchanged — `how_they_did_it` is still List[str].
+    how_they_did_it = _top5_first_steps(cohort)
     critical_intervention = _safe_str(best, "Forensic_Performance_Audit", "Critical_Intervention")
 
     # ── Cohort stats (collapsed tail) ──

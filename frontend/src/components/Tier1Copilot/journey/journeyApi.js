@@ -62,6 +62,31 @@ export async function fetchStage5(sessionId) {
   return data;
 }
 
+// Sprint 12.7 — GET /tier1/journey/{session_id}/escalation-routing
+// → EscalationRouting (deduped Resolution_Groups + Team_Paths +
+// recommended Tier-2 entry candidates + forward-compat vendor data).
+// Fetched alongside /stage-5 when the engineer reveals Operational
+// Handoff. Fails gracefully — caller treats network error as "no
+// routing data, hide section" rather than blocking the page.
+export async function fetchEscalationRouting(sessionId) {
+  const { data } = await api.get(
+    `/tier1/journey/${encodeURIComponent(sessionId)}/escalation-routing`,
+  );
+  return data;
+}
+
+// Sprint 12.7 — POST /tier1/journey/{session_id}/escalation-handoff-note
+// → {note, used_fallback}. LLM-generated Tier-2 escalation note matching
+// the spec template. Triggered by the "Generate Tier 2 Escalation Handoff"
+// button. Backend is failure-open — never throws — so a non-2xx here
+// signals a transport-layer issue, not a generation failure.
+export async function generateEscalationHandoffNote(sessionId) {
+  const { data } = await api.post(
+    `/tier1/journey/${encodeURIComponent(sessionId)}/escalation-handoff-note`,
+  );
+  return data;
+}
+
 // Sprint 10.7 §4.4 — GET /tier1/journey/{session_id}/resume-state
 // → {session_id, current_stage, last_event_at}
 //
@@ -91,10 +116,27 @@ export async function getResumeState(sessionId) {
 // "Ask in chat" links carry an arbitrary step text into the chat
 // session instead of the journey's Stage 4 default. Empty / nullish
 // values fall through to default behaviour on the backend.
-export async function searchKbHandoff(sessionId, prefilledMessageOverride) {
-  const body = prefilledMessageOverride
-    ? { prefilled_message_override: prefilledMessageOverride }
-    : undefined;
+//
+// Sprint 12.1 — optional `scopeIncidentId` carries the bullet's source
+// Incident_Number (extracted by the caller from the bullet's trailing
+// " - INC-XXX" suffix). When present, the backend persists it on the
+// new chat_sessions row so every subsequent /ask in that chat session
+// is filtered to chunks belonging to that one ticket. NULL/omitted =
+// global Search-in-KB behaviour preserved (Stage 4 default handoff).
+export async function searchKbHandoff(
+  sessionId,
+  prefilledMessageOverride,
+  scopeIncidentId,
+) {
+  const body =
+    prefilledMessageOverride || scopeIncidentId
+      ? {
+          ...(prefilledMessageOverride
+            ? { prefilled_message_override: prefilledMessageOverride }
+            : {}),
+          ...(scopeIncidentId ? { scope_incident_id: scopeIncidentId } : {}),
+        }
+      : undefined;
   const { data } = await api.post(
     `/tier1/journey/${encodeURIComponent(sessionId)}/search-kb-handoff`,
     body,

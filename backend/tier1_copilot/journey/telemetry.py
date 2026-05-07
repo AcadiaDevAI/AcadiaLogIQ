@@ -17,6 +17,7 @@ logger = logging.getLogger("acadia-log-iq")
 
 
 _VALID_STAGES = {
+    "environment_context",    # Sprint 12.4 — lead-in profile panel
     "stage_0",
     "stage_1a", "stage_1b",   # Sprint 10 legacy — historical rows only
     "pivot_insights",          # Sprint 10.2 — merged 1A+1B panel

@@ -157,8 +157,12 @@ export default function PivotInsightsPanel({
   // Sprint 10.4 §3.2 — only render the "What to look for" half when
   // it carries genuinely new info (KB-derived pivot signal). The
   // primary_fix_fallback variant duplicated Stage 0; "empty" had
-  // nothing to show.
-  const showSmokingGun = smokingGun?.derived_from === "mental_pivot_aggregate";
+  // nothing to show. Sprint 12.3 — also render when a single ticket
+  // carries pivot data ("mental_pivot_single"); the data is real
+  // even if the cohort threshold wasn't met.
+  const showSmokingGun =
+    smokingGun?.derived_from === "mental_pivot_aggregate" ||
+    smokingGun?.derived_from === "mental_pivot_single";
 
   return (
     <Card style={{ marginBottom: 16, borderLeft: "4px solid #C9870B" }}>

@@ -4,6 +4,18 @@ Per spec §3.5: build a sequenced ledger from the cohort's diagnostic
 steps, deduplicating identical actions across tickets, and detecting
 divergent successful interventions as alternative branches.
 
+Sprint 12.6 — capping is per-category so interventions always reach
+the engineer. The pre-12.6 single ``max_steps`` cap let the priority
+order (diagnostic → timeline → intervention) silently truncate every
+intervention on a 5-ticket BGP cohort (5 diag + 5 timeline filled
+the cap of 8; all 30 candidate interventions were dropped). The
+spec's "Attempt Fix A; if it fails, proceed to Fix B" framing is
+unreachable when zero fixes survive the cap. New defaults guarantee
+slots for each category; if a category has fewer candidates than
+its quota, the leftover slots refill from any category in
+sequencing order (so heavy diagnostic-only cohorts still cap cleanly
+at ``max_steps``).
+
 Algorithm:
   1. Extract candidate Step records from every cohort ticket. Sources:
        - Operational_SOP.diagnostic_logic_chunks[]
@@ -26,10 +38,14 @@ Pure function — no LLM, no DB.
 """
 from __future__ import annotations
 
+import logging
 import re
 from collections import defaultdict
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+
+logger = logging.getLogger("acadia-log-iq")
 
 from .schemas import (
     DiagnosticLogicEntry,
@@ -168,6 +184,38 @@ def _harvest_steps(ticket: Dict[str, Any], cohort_rank: int = 0) -> List[_Step]:
             category="context",
             cohort_rank=cohort_rank,
         ))
+
+    # ── Source 3 — Troubleshooting_Ledger.Diagnostic_Tests_Executed[] ──
+    # Sprint 12.6 — re-added (Sprint 10.8.1 dropped it as 0/180 in the
+    # then-corpus; still 0/213 today, but the field is in the user's
+    # spec so we wire it forward-compatibly: when a future ticket
+    # populates it, no code change required). Treated as `diagnostic`
+    # — these are explicit tests/checks the prior engineer ran.
+    # Accepts list-of-str and list-of-dict (name | description | test
+    # | action keys), mirroring _build_diagnostic_tests_executed.
+    tests = _safe_get(ticket, "Troubleshooting_Ledger", "Diagnostic_Tests_Executed")
+    if isinstance(tests, list):
+        for i, entry in enumerate(tests):
+            if isinstance(entry, dict):
+                action = _safe_str(
+                    entry.get("name")
+                    or entry.get("description")
+                    or entry.get("test")
+                    or entry.get("action")
+                )
+            else:
+                action = _safe_str(entry)
+            if not action:
+                continue
+            steps.append(_Step(
+                action=action,
+                incident=inc,
+                source_field="Diagnostic_Tests_Executed",
+                ordinal=i,
+                metadata_json=ticket,
+                category="diagnostic",
+                cohort_rank=cohort_rank,
+            ))
 
     # ── Source 4 — Operational_SOP.diagnostic_logic_chunks[] ──
     # The ONLY source that populates Intent + Pivot + Command.
@@ -561,8 +609,11 @@ def _build_per_ticket_details(
 
 def build_stage3(
     cohort: List[Dict[str, Any]],
-    max_steps: int = 8,
+    max_steps: int = 18,
     *,
+    max_diagnostic_steps: int = 6,
+    max_timeline_steps: int = 4,
+    max_intervention_steps: int = 8,
     max_details_shown: int = 5,
     filter_empty_details: bool = True,
 ) -> Stage3TroubleshootingApproach:
@@ -578,6 +629,18 @@ def build_stage3(
     that carry no useful signal — same usefulness contract as
     Stage 2's _is_useful_card. Pass False to keep the raw 1:1
     build (resilience tests use this).
+
+    Sprint 12.6 — per-category caps. Each category gets a guaranteed
+    quota (default diag=6 / timeline=4 / intervention=8); ``max_steps``
+    is the absolute total. After per-category quotas are spent, any
+    remaining slots up to ``max_steps`` are filled from candidates
+    skipped solely due to quota (preserving the ordered sequencing).
+    A category with fewer candidates than its quota silently donates
+    the leftover slots to other categories. Default ``max_steps``
+    raised 8→18 so a 5-ticket cohort with the typical category mix
+    (~5 diag + ~5 timeline + ~10 intervention) surfaces all of them.
+    Callers passing an explicit lower ``max_steps`` still get exact
+    capping — the per-category quotas are advisory upper-bounds.
     """
     if not cohort:
         return Stage3TroubleshootingApproach(
@@ -704,7 +767,56 @@ def build_stage3(
 
     total_unique = len(sequenced)
 
-    # ── Build output, capped at max_steps ──
+    # ── Sprint 12.6 — per-category two-pass admission ──
+    # Pass 1: walk in sequenced order; admit each item if its category
+    # quota isn't exhausted AND total < max_steps. Pass 2: walk the
+    # same list again admitting anything skipped in pass 1, up to
+    # max_steps. The two-pass shape means heavy diagnostic-only
+    # cohorts still fill to max_steps with diagnostics (existing
+    # behaviour, used by tests) while mixed cohorts guarantee
+    # interventions reach the engineer.
+    quota_remaining: Dict[str, int] = {
+        "diagnostic":   max_diagnostic_steps,
+        "timeline":     max_timeline_steps,
+        "intervention": max_intervention_steps,
+    }
+    admitted_keys: set = set()
+    admitted: List = []
+    for key, g in sequenced:
+        if len(admitted) >= max_steps:
+            break
+        cat = g.category
+        if quota_remaining.get(cat, 0) <= 0:
+            continue
+        admitted.append((key, g))
+        admitted_keys.add(key)
+        quota_remaining[cat] = quota_remaining.get(cat, 0) - 1
+
+    # Pass 2 — fill remaining max_steps with quota-skipped items.
+    if len(admitted) < max_steps:
+        for key, g in sequenced:
+            if len(admitted) >= max_steps:
+                break
+            if key in admitted_keys:
+                continue
+            admitted.append((key, g))
+            admitted_keys.add(key)
+
+    # Per-category breakdown for the observability log line below.
+    shown_by_cat: Dict[str, int] = {"diagnostic": 0, "timeline": 0, "intervention": 0}
+    for _key, g in admitted:
+        shown_by_cat[g.category] = shown_by_cat.get(g.category, 0) + 1
+
+    logger.info(
+        "[stage3] cohort=%d raw_unique=%d shown=%d "
+        "(diag=%d timeline=%d intervention=%d)",
+        len(cohort), total_unique, len(admitted),
+        shown_by_cat.get("diagnostic", 0),
+        shown_by_cat.get("timeline", 0),
+        shown_by_cat.get("intervention", 0),
+    )
+
+    # ── Build output ──
     # Sprint 10.8 §3.6 — among intervention steps, the FIRST one keeps
     # is_fallback=False; every subsequent intervention that ALSO has a
     # non-overlapping incident set is marked is_fallback=True.
@@ -712,7 +824,7 @@ def build_stage3(
     seen_intervention_incidents: set = set()
     interventions_emitted = 0
 
-    for n, (key, g) in enumerate(sequenced[:max_steps], start=1):
+    for n, (key, g) in enumerate(admitted, start=1):
         intent = (
             _pick_canonical(g.intent_candidates) if g.intent_candidates
             else (" / ".join(g.intents[:2]) if g.intents else None)

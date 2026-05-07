@@ -134,6 +134,69 @@ _flatten_field = _flatten
 _read_path = _safe_get
 
 
+def _harvest_error_codes(ticket: Dict[str, Any]) -> List[str]:
+    """Sprint 12.5 — collect per-ticket error-code fingerprints from
+    three independent fields, deduplicated case-insensitively with
+    first-seen casing preserved.
+
+    Sources (all optional — silently skipped when missing):
+      - ``Metadata.Fingerprints``                       (List[str])
+      - ``Operational_SOP.primary_error_fingerprint``   (str)
+      - ``semantic_faq_block[*].related_signals``       (List[str])
+
+    The three streams are intentionally merged into one list rather
+    than kept separate: from the engineer's perspective they are all
+    "tokens you can grep against the current incident" — a single
+    deduped chip row reads cleaner than three near-empty rows.
+    """
+    if not isinstance(ticket, dict):
+        return []
+
+    seen: Dict[str, str] = {}      # casefold key → first-seen casing
+    ordered: List[str] = []
+
+    def _add(value: Any) -> None:
+        if value is None:
+            return
+        s = str(value).strip()
+        if not s:
+            return
+        key = s.casefold()
+        if key in seen:
+            return
+        seen[key] = s
+        ordered.append(s)
+
+    # Metadata.Fingerprints — list of strings
+    fps = _safe_get(ticket, "Metadata", "Fingerprints")
+    if isinstance(fps, list):
+        for fp in fps:
+            _add(fp)
+    elif isinstance(fps, str):
+        _add(fps)
+
+    # Operational_SOP.primary_error_fingerprint — single string
+    pef = _safe_get(ticket, "Operational_SOP", "primary_error_fingerprint")
+    _add(pef)
+
+    # semantic_faq_block[*].related_signals — list of dicts, each
+    # carrying a related_signals list. Walked across ALL faq entries
+    # (not just [0]) so every populated block contributes.
+    faq = ticket.get("semantic_faq_block")
+    if isinstance(faq, list):
+        for entry in faq:
+            if not isinstance(entry, dict):
+                continue
+            sigs = entry.get("related_signals")
+            if isinstance(sigs, list):
+                for sig in sigs:
+                    _add(sig)
+            elif isinstance(sigs, str):
+                _add(sigs)
+
+    return ordered
+
+
 def _resolution_bullets(ticket: Dict[str, Any]) -> List[str]:
     """Concat Resolution_Steps + Critical_Intervention + Hero_Action.
     Resolution_Steps may be a list-of-strings, list-of-dicts, or a single
@@ -248,6 +311,9 @@ def _build_card(rank: int, ticket: Dict[str, Any]) -> HistoricalMatchCard:
         _flatten(_safe_get(ticket, "Key_Contributors", "Key_Impact_Players", "Hero_Action")),
     )
 
+    # Sprint 12.5 — harvest the three fingerprint streams.
+    error_codes = _harvest_error_codes(ticket)
+
     return HistoricalMatchCard(
         rank=rank,
         incident_number=incident_number,
@@ -262,6 +328,7 @@ def _build_card(rank: int, ticket: Dict[str, Any]) -> HistoricalMatchCard:
         technical_snapshot=technical_snapshot,
         incident_summary=incident_summary,
         resolution_approach=resolution_approach,
+        error_codes=error_codes,
     )
 
 

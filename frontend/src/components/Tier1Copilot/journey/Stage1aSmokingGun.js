@@ -24,12 +24,15 @@ const { Title, Paragraph, Text } = Typography;
 // telling the engineer this isn't a pivot signal.
 const TITLE_BY_DERIVATION = {
   mental_pivot_aggregate: "Smoking Gun",
+  mental_pivot_single:    "Smoking Gun",
   primary_fix_fallback:   "Best Historical Fix",
   empty:                  "Smoking Gun",
 };
 
 const CAPTION_BY_DERIVATION = {
   mental_pivot_aggregate: null,
+  mental_pivot_single:
+    "(documented in only one cohort ticket — pattern not yet repeated)",
   primary_fix_fallback:
     "(distilled from highest-rated past resolution — pivot signal data not available for this cohort)",
   empty:                  null,
@@ -87,7 +90,8 @@ export default function Stage1aSmokingGun({
             <Text italic type="secondary" style={{ fontSize: 12 }}>{caption}</Text>
           ) : null}
         </div>
-        {derivation === "mental_pivot_aggregate" && data.frequency_in_cohort_percent ? (
+        {(derivation === "mental_pivot_aggregate" || derivation === "mental_pivot_single")
+          && data.frequency_in_cohort_percent ? (
           <Tag color="orange">{data.frequency_in_cohort_percent}% of cohort</Tag>
         ) : null}
       </div>

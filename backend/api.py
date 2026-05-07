@@ -3118,18 +3118,68 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
                 sorted(k for k in (_journey_ctx or {}).keys() if not k.startswith("_")),
             )
 
-    retrieval = orchestrator_retrieve(
-        query=bm25_query_text,
-        raw_query=req.q,
-        query_embedding=q_emb,
-        owner_id=owner_id,
-        allowed_file_ids=active_file_ids,
-        file_type="kb",
-        generate_fn=safe_generate,
-        bm25_search_fn=bm25.search if bm25 and bm25.size > 0 else None,
-        vector_search_fn=pgvector_search,
-        doc_kinds=_effective_doc_kinds,
-    )
+    # ── Sprint 12.1 — per-bullet "Ask in Chat" scope lookup ──
+    # When the chat session was created via the Stage 0 per-bullet
+    # handoff (Stage0BestTicketDistillation.js → /search-kb-handoff),
+    # chat_sessions.scope_incident_id holds the source ticket the
+    # bullet was tagged with. Honor that scope by passing it to the
+    # orchestrator so retrieval is filtered to that one ticket's
+    # chunks. NULL = global Search-in-KB behavior (unchanged path).
+    #
+    # Failure-open: any read error leaves scope as None — chat falls
+    # back to today's behavior rather than breaking the demo.
+    _scope_incident_ids = None
+    try:
+        from sqlalchemy import text as _scope_sql_text
+        from backend.db.connection import engine as _scope_engine
+        with _scope_engine.connect() as _conn:
+            _row = _conn.execute(
+                _scope_sql_text(
+                    "SELECT scope_incident_id FROM chat_sessions WHERE id = :sid"
+                ),
+                {"sid": session_id},
+            ).mappings().first()
+        if _row and _row.get("scope_incident_id"):
+            _scope_incident_ids = [str(_row["scope_incident_id"]).strip()]
+            logger.info(
+                "[scope] chat=%s scoped to incident=%s",
+                session_id, _scope_incident_ids[0],
+            )
+    except Exception as _scope_exc:
+        logger.warning(
+            "[scope] lookup failed for chat=%s err=%s — falling back to global",
+            session_id, _scope_exc,
+        )
+
+    # ── Sprint 12.2 — scoped vs global retrieval branch ──
+    # When the chat session is scoped to a single Incident_Number,
+    # delegate to the dedicated scoped-retrieval module. Otherwise
+    # take the original global hybrid path. The two paths are
+    # entirely separate code routes; the global orchestrator is
+    # never aware of scope, and the scoped module never touches
+    # BM25 / fusion / rerank. This eliminates the "filter-too-late"
+    # empty-result class of bug while keeping Search-in-KB
+    # byte-identical to its pre-scope behavior.
+    if _scope_incident_ids:
+        from backend.retrieval.scoped_retrieval import retrieve_within_incident
+        retrieval = retrieve_within_incident(
+            scope_incident_id=_scope_incident_ids[0],
+            query_embedding=q_emb,
+            allowed_file_ids=active_file_ids,
+        )
+    else:
+        retrieval = orchestrator_retrieve(
+            query=bm25_query_text,
+            raw_query=req.q,
+            query_embedding=q_emb,
+            owner_id=owner_id,
+            allowed_file_ids=active_file_ids,
+            file_type="kb",
+            generate_fn=safe_generate,
+            bm25_search_fn=bm25.search if bm25 and bm25.size > 0 else None,
+            vector_search_fn=pgvector_search,
+            doc_kinds=_effective_doc_kinds,
+        )
 
     # ── Clean "not found" short-circuit when an identifier was asked for
     # but no such record is indexed. The retrieval layer signals this via
@@ -3175,6 +3225,99 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             },
         )
 
+    # ── Sprint 12.1 — Scoped chat polite no-answer short-circuit ──
+    # When this chat session is scoped to a single Incident_Number
+    # (per-bullet "Ask in Chat" handoff from Stage 0) and retrieval
+    # returns zero chunks from that ticket for the user's question,
+    # the user wants a natural, polite acknowledgement — NOT a
+    # general-knowledge answer (the corpus is the source of truth)
+    # and NOT a generic "no results" string.
+    #
+    # We call Claude Haiku via safe_generate with a tight prompt
+    # that:
+    #   - Names the source incident explicitly
+    #   - States the question is not covered in that ticket's data
+    #   - Suggests Search-in-KB as the next step
+    #   - Forbids answering from general knowledge
+    #
+    # Failure-open: any LLM error falls through to a deterministic
+    # template so the chat still responds politely. Demo-day safety.
+    if _scope_incident_ids and not retrieval.ranked:
+        _scoped_id = _scope_incident_ids[0]
+        # Conversational chat reply — not a letter. The previous prompt
+        # was producing "Dear Engineer / Best regards / [Your Name]"
+        # signature blocks because the framing implied formal
+        # correspondence. This prompt explicitly forbids any salutation,
+        # signoff, or signature placeholder so the output reads like a
+        # natural chat message.
+        _polite_prompt = (
+            f"You are a chat assistant. The current chat is restricted "
+            f"to one source ticket only: {_scoped_id}. A search across "
+            f"that ticket's content returned no relevant passages for "
+            f"the user's latest message.\n\n"
+            f"User's message:\n{req.q}\n\n"
+            f"Reply with ONE short, plain-text chat sentence (max two "
+            f"sentences) that:\n"
+            f"- mentions {_scoped_id} by name,\n"
+            f"- says the answer wasn't found in that ticket,\n"
+            f"- suggests using Search KB for a wider lookup.\n\n"
+            f"Hard rules:\n"
+            f"- Plain conversational prose, like a chat reply.\n"
+            f"- No salutation (no 'Dear ...', no 'Hi ...').\n"
+            f"- No signoff (no 'Best regards', no 'Thanks', no '[Your Name]', "
+            f"no '[Your Role]').\n"
+            f"- No bullet points, no headings, no markdown.\n"
+            f"- Do NOT answer from general knowledge or from other tickets.\n"
+            f"- Do NOT invent commands or configuration values.\n\n"
+            f"Reply:"
+        )
+        try:
+            _polite_answer = safe_generate(_polite_prompt, max_tokens=160).strip()
+            # Defensive scrub — strip residual letter framing if the
+            # model still slips one in. Cheap belt-and-suspenders.
+            for _bad in (
+                "Dear Engineer,", "Dear Engineer", "Dear engineer,",
+                "Best regards,", "Best regards", "Sincerely,",
+                "[Your Name]", "[Your Role]", "[Team]",
+            ):
+                _polite_answer = _polite_answer.replace(_bad, "").strip()
+            if not _polite_answer:
+                raise RuntimeError("empty LLM response after scrub")
+        except Exception as _polite_exc:
+            logger.warning(
+                "[scope_no_answer] LLM polite reply failed for chat=%s "
+                "scope=%s err=%s — using template fallback",
+                session_id, _scoped_id, _polite_exc,
+            )
+            _polite_answer = (
+                f"I couldn't find that in {_scoped_id}. Try Search KB to "
+                f"look across the wider knowledge base."
+            )
+        save_message_to_session(
+            session_id=session_id,
+            role="assistant",
+            content=_polite_answer,
+            owner_id=owner_id,
+            sources={"docs": []},
+        )
+        logger.info(
+            "[scope_no_answer] chat=%s scope=%s — returned polite redirect",
+            session_id, _scoped_id,
+        )
+        return AnswerResponse(
+            answer=_polite_answer,
+            sources=[],
+            confidence=1.0,
+            processing_time_ms=int((time.perf_counter() - start) * 1000),
+            session_id=session_id,
+            context_stats={
+                "scoped_no_answer": True,
+                "scope_incident_id": _scoped_id,
+                "cache_hit": False,
+                **retrieval.stats,
+            },
+        )
+
     # ── Fallback: try variant queries if primary retrieval found nothing ──
     # if not retrieval.ranked and len(expanded.variants) > 1:
     #     logger.info("Primary retrieval empty — trying %d variant queries", len(expanded.variants) - 1)
@@ -3201,8 +3344,17 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     # meaning the chunks don't actually contain the query's key terms.
     # This catches cases like "toDC" where normalization ("to DC") would
     # retrieve from the correct document.
+    #
+    # Sprint 12.2 fix — variant retry calls the *unscoped* global
+    # orchestrator, which would silently overwrite `retrieval` with
+    # chunks from any ticket in the corpus. For a scope-locked chat
+    # that's a data breach (chat answers leaking from other tickets),
+    # so we skip variant retry entirely when scope is set. The
+    # in-scope cosine ranking from `retrieve_within_incident` is the
+    # only retrieval result this chat is allowed to use.
     should_try_variants = (
-        len(expanded.variants) > 1
+        not _scope_incident_ids
+        and len(expanded.variants) > 1
         and (
             not retrieval.ranked
             or not has_sufficient_document_support(
@@ -3394,6 +3546,84 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     doc_ctx, doc_src = assemble_context(doc_ranked, max_ctx_chars)
 
     if not doc_ctx or not has_sufficient_document_support(effective_query, doc_ranked, expanded_keywords=expanded.expanded_keywords):
+        # Sprint 12.2 fix — for scope-locked chats the conversational
+        # fallback below is unsafe: `run_conversational_fallback` is
+        # given NO ticket context and would emit a free-form LLM
+        # answer drawn from training data only (the breach +
+        # hallucination the engineer is reporting). When this chat
+        # is locked to one incident, never invoke it; redirect to
+        # the same polite no-answer path the empty-retrieval branch
+        # uses above so the reply stays grounded in the scope.
+        if _scope_incident_ids:
+            _scoped_id = _scope_incident_ids[0]
+            _polite_prompt = (
+                f"You are a chat assistant. The current chat is restricted "
+                f"to one source ticket only: {_scoped_id}. The retrieved "
+                f"passages from that ticket do not contain enough relevant "
+                f"information to answer the user's latest message.\n\n"
+                f"User's message:\n{req.q}\n\n"
+                f"Reply with ONE short, plain-text chat sentence (max two "
+                f"sentences) that:\n"
+                f"- mentions {_scoped_id} by name,\n"
+                f"- says the answer wasn't found in that ticket,\n"
+                f"- suggests using Search KB for a wider lookup.\n\n"
+                f"Hard rules:\n"
+                f"- Plain conversational prose, like a chat reply.\n"
+                f"- No salutation (no 'Dear ...', no 'Hi ...').\n"
+                f"- No signoff (no 'Best regards', no 'Thanks', no '[Your Name]', "
+                f"no '[Your Role]').\n"
+                f"- No bullet points, no headings, no markdown.\n"
+                f"- Do NOT answer from general knowledge or from other tickets.\n"
+                f"- Do NOT invent commands or configuration values.\n\n"
+                f"Reply:"
+            )
+            try:
+                _polite_answer = safe_generate(_polite_prompt, max_tokens=160).strip()
+                for _bad in (
+                    "Dear Engineer,", "Dear Engineer", "Dear engineer,",
+                    "Best regards,", "Best regards", "Sincerely,",
+                    "[Your Name]", "[Your Role]", "[Team]",
+                ):
+                    _polite_answer = _polite_answer.replace(_bad, "").strip()
+                if not _polite_answer:
+                    raise RuntimeError("empty LLM response after scrub")
+            except Exception as _polite_exc:
+                logger.warning(
+                    "[scope_no_answer] LLM polite reply failed (insufficient "
+                    "support) chat=%s scope=%s err=%s — using template fallback",
+                    session_id, _scoped_id, _polite_exc,
+                )
+                _polite_answer = (
+                    f"I couldn't find that in {_scoped_id}. Try Search KB to "
+                    f"look across the wider knowledge base."
+                )
+            save_message_to_session(
+                session_id=session_id,
+                role="assistant",
+                content=_polite_answer,
+                owner_id=owner_id,
+                sources={"docs": []},
+            )
+            logger.info(
+                "[scope_no_answer] chat=%s scope=%s — insufficient support, "
+                "returned polite redirect (suppressed unscoped fallback)",
+                session_id, _scoped_id,
+            )
+            return AnswerResponse(
+                answer=_polite_answer,
+                sources=[],
+                confidence=1.0,
+                processing_time_ms=int((time.perf_counter() - start) * 1000),
+                session_id=session_id,
+                context_stats={
+                    "scoped_no_answer": True,
+                    "scoped_no_answer_reason": "insufficient_support",
+                    "scope_incident_id": _scoped_id,
+                    "cache_hit": False,
+                    **retrieval.stats,
+                },
+            )
+
         # No supporting docs — run the conversational fallback (Clarifier +
         # support-engineer-style reply). Never raises; legacy text on failure.
         from backend.agents.fallback_responder import run_conversational_fallback
@@ -3537,6 +3767,27 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         agent_reason = f"{agent_reason} [intent={intent_result.intent}]"
     if stage_enforced_mode and requested_mode != MODE_HYBRID:
         agent_reason = f"{agent_reason} [stage={stage_result.stage}:{stage_result.escalate_reason}]"
+
+    # Sprint 12.2 fix — the agent pipeline builds a per-step retriever
+    # from the *unscoped* `orchestrator_retrieve`, so any agent run
+    # inside a scope-locked chat would issue follow-up retrievals that
+    # span the entire corpus and re-introduce the leak this fix is
+    # closing. Force the simple grounded path for scoped chats — the
+    # ticket's chunks are a small, fully-known set; agent decomposition
+    # adds no value here. Search-in-KB and other unscoped flows are
+    # untouched.
+    if _scope_incident_ids and (should_agent or force_agent_mode):
+        logger.info(
+            "[scope] suppressing agent pipeline for scoped chat=%s scope=%s "
+            "(would have used: %s)",
+            session_id, _scope_incident_ids[0], agent_reason,
+        )
+        should_agent = False
+        force_agent_mode = False
+        agent_reason = (
+            f"{agent_reason} [scope_locked={_scope_incident_ids[0]} "
+            f"agents_suppressed]"
+        )
 
     if should_agent or force_agent_mode:
         if force_agent_mode and not should_agent:

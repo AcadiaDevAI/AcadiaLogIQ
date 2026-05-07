@@ -38,7 +38,12 @@ export default function useChatHandoff(journeySessionId) {
   const [busy, setBusy] = useState(false);
 
   const askInChat = useCallback(
-    async (prefilledMessage) => {
+    // Sprint 12.1 — optional 2nd arg `scopeIncidentId` lets per-bullet
+    // callers (Stage 0 "Ask in Chat") scope the resulting chat session
+    // to the bullet's source ticket. When omitted (Stage 4 / generic
+    // callers), the chat opens with the existing global Search-in-KB
+    // behaviour — no behavioural change for prior callers.
+    async (prefilledMessage, scopeIncidentId) => {
       const text = (prefilledMessage || "").trim();
       if (!text) return;
       if (busy) return;
@@ -51,6 +56,7 @@ export default function useChatHandoff(journeySessionId) {
         const { chat_session_id } = await searchKbHandoff(
           journeySessionId,
           text,
+          scopeIncidentId || null,
         );
 
         dispatch({
@@ -100,6 +106,9 @@ export default function useChatHandoff(journeySessionId) {
         setBusy(false);
       }
     },
+    // Sprint 12.1 — scopeIncidentId is captured per-call (passed as a
+    // function arg, not closed over), so it's intentionally NOT listed
+    // in the dependency array.
     [journeySessionId, dispatch, busy],
   );
 

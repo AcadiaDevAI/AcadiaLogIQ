@@ -77,7 +77,11 @@
       "Bash(curl -i -s -X OPTIONS http://localhost:8000/chat/sessions -H \"Origin: http://127.0.0.1:8001\" -H \"Access-Control-Request-Method: GET\")",
       "Bash(python -m pytest backend/tier1_copilot/tests/test_escalation_package.py -v)",
       "Bash(python -c ' *)",
-      "Bash(python -m pytest backend/tier1_copilot/tests/ -v)"
+      "Bash(python -m pytest backend/tier1_copilot/tests/ -v)",
+      "Bash(python -m py_compile backend/api.py backend/retrieval/scoped_retrieval.py)",
+      "Bash(python -m py_compile backend/retrieval/scoped_retrieval.py)",
+      "Bash(python -m py_compile backend/tier1_copilot/journey/stage1_smoking_gun.py backend/tier1_copilot/journey/schemas.py)",
+      "Bash(python -m py_compile backend/tier1_copilot/journey/stage0_environment.py backend/tier1_copilot/journey/schemas.py backend/tier1_copilot/journey/routes.py backend/tier1_copilot/journey/telemetry.py)"
     ]
   }
 }

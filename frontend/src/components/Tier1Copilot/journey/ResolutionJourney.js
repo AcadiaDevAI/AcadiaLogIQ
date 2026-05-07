@@ -20,6 +20,12 @@ import SkeletonCard from "../SkeletonCard";
 // Stage 1A + 1B merged into PivotInsightsPanel. Old standalone
 // Stage1a/1b components are no longer mounted; their files stay on
 // disk for one cycle as deprecated references.
+// Sprint 12.4 — Environment Context lead-in panel added above Stage 0.
+// Sprint 12.8 — Preliminary checks header + Preserve-evidence footer
+// wrap every journey load (static, data-free, always visible).
+import EnvironmentContextPanel from "./EnvironmentContextPanel";
+import PreliminaryTier1ChecksHeader from "./PreliminaryTier1ChecksHeader";
+import PreserveEvidenceFooter from "./PreserveEvidenceFooter";
 import Stage0BestTicketDistillation from "./Stage0BestTicketDistillation";
 import PivotInsightsPanel from "./PivotInsightsPanel";
 import Stage2HistoricalMatches from "./Stage2HistoricalMatches";
@@ -158,7 +164,8 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
         // Sprint 10.2 — fire stage_rendered telemetry for the merged
         // pivot_insights panel (replacing the separate stage_1a /
         // stage_1b events).
-        for (const stage of ["stage_0", "pivot_insights"]) {
+        // Sprint 12.4 — environment_context joins the eager-paint set.
+        for (const stage of ["environment_context", "stage_0", "pivot_insights"]) {
           postJourneyEvent(sessionId, stage, "stage_rendered").catch(() => {});
         }
       } catch (err) {
@@ -184,7 +191,18 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
         stage_4: fetchStage4,
         stage_5: fetchStage5,
       }[toStage];
-      if (!fetcher) return;
+      if (!fetcher) {
+        // Sprint 12.4 — Environment-Context's NextStageButton points
+        // at "stage_0", which is auto-revealed and ships in /initial
+        // (no separate fetcher). The click is still meaningful: it
+        // records the engineer's "I read the env profile, advancing"
+        // intent so /resume-state can place them at Stage 0 on the
+        // next remount. Fire stage_advanced telemetry and exit.
+        if (toStage === "stage_0") {
+          postJourneyEvent(sessionId, "stage_0", "stage_advanced").catch(() => {});
+        }
+        return;
+      }
 
       try {
         const payload = await fetcher(sessionId);
@@ -251,6 +269,28 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
   return (
     <div className="flex-1 overflow-y-auto px-4 py-6 t-bg-primary">
       <div className="w-full max-w-6xl mx-auto">
+        {/* Sprint 12.8 — Preliminary Tier 1 Checks header. Static
+            informational card; always rendered at the very top,
+            ahead of every cohort-derived panel. Engineer's pre-flight
+            checklist (Define Impact / Validate via Change Logs /
+            Verify Basic Connectivity / Monitor Resource & Service
+            Health). No data dependency, no API call. */}
+        <PreliminaryTier1ChecksHeader />
+
+        {/* Sprint 12.4 — Environment Context & Tech Component Profile.
+            Lead-in panel: deduped domains, components, clusters,
+            products, and technical entities aggregated across the
+            top-5 cohort. Footer matches the journey's standard
+            pattern (Helpful + Escalate + advance-to-Stage-0). */}
+        <EnvironmentContextPanel
+          data={initial.environment_profile}
+          sessionId={sessionId}
+          onMarkedHelpful={markHelpful}
+          onStartNewTicket={startNewTicket}
+          onReveal={reveal}
+          helpfulMarked={!!helpfulPerStage.environment_context}
+        />
+
         {/* Sprint 10.2 — Stage 0 best-ticket distillation (replaces
             ConfidenceLead). Sprint 11 — sessionId now passed so the
             "How they did it" steps can offer per-step "Ask in chat"
@@ -324,6 +364,12 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
             autoExpand={resumedAtStage5}
           />
         ) : null}
+
+        {/* Sprint 12.8 — Preserve Evidence & Escalate footer. Static
+            instruction; always rendered at the very bottom of the
+            journey, regardless of which stages have been revealed.
+            Pairs with PreliminaryTier1ChecksHeader at the top. */}
+        <PreserveEvidenceFooter />
       </div>
     </div>
   );

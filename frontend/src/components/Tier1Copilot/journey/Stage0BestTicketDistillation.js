@@ -37,6 +37,26 @@ function ringColor(cleanPct) {
 }
 
 
+// Sprint 12.1 — Each "How they did it" bullet ends with " - INC-XXX"
+// (suffix appended by backend `_resolution_steps`). Extract that
+// trailing incident id so the per-bullet "Ask in chat" handoff can
+// scope the resulting chat session to that source ticket only.
+//
+// Returns the incident id string (e.g. "INC-PHOENIX-402") or null
+// when no recognisable suffix is found — a null scope just means the
+// chat opens unscoped (global Search-in-KB behaviour), which is a
+// safe fall-back. Tolerant matcher: accepts a hyphenated alphanumeric
+// id with at least one dash, matching the project's INC-* / TKT-*
+// patterns without hard-coding a specific prefix.
+function extractTrailingIncidentId(stepText) {
+  if (typeof stepText !== "string") return null;
+  // Pattern: " - <UPPERCASE-TOKEN-WITH-DASH>" anchored at end of string,
+  // optional trailing whitespace tolerated.
+  const m = stepText.match(/\s-\s([A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+)\s*$/);
+  return m ? m[1] : null;
+}
+
+
 // Sprint 10.4 §2.2 — plain-English headlines by evidence_strength.
 // "We found N similar past tickets" replaces the old "We've seen this
 // issue N times" preamble. Score-3 ticket gets honest framing without
@@ -134,6 +154,15 @@ export default function Stage0BestTicketDistillation({ data, sessionId, onReveal
               // baked into the source string. Otherwise the React index
               // prefix below produces "1. 1. Incident..." double-numbering.
               const cleaned = stripLeadingNumber(s);
+              // Sprint 12.1 — Pull the trailing " - INC-XXX" off the
+              // bullet so we can (a) scope this bullet's "Ask in chat"
+              // handoff to that source ticket, and (b) tell the user
+              // explicitly which past ticket the step came from.
+              // Falls back to data.best_incident when the suffix is
+              // missing, so legacy bullets (or fields without the
+              // " - INC-XXX" tail) still get a sensible scope.
+              const bulletIncident =
+                extractTrailingIncidentId(cleaned) || data.best_incident || null;
               return (
                 <List.Item
                   key={i}
@@ -148,18 +177,27 @@ export default function Stage0BestTicketDistillation({ data, sessionId, onReveal
                     {i + 1}. {cleaned}
                   </span>
                   {/* Sprint 11 — per-step "Ask in chat" link.
-                      Disabled while a handoff is in flight (and when the
-                      step text is empty for any reason). Click → opens
-                      a new chat with this step text as the question and
-                      auto-fires /ask. */}
+                      Sprint 12.1 — also passes the bullet's source
+                      Incident_Number so the chat session is scoped to
+                      that one ticket (chat answers only from that
+                      ticket's chunks). When the bullet has no parsable
+                      source, we fall back to data.best_incident so the
+                      user never lands in an unscoped chat from a
+                      Stage 0 bullet click. */}
                   {sessionId && cleaned ? (
-                    <Tooltip title="Ask this step in a new chat">
+                    <Tooltip
+                      title={
+                        bulletIncident
+                          ? `Ask this step in a new chat — answers will be scoped to ${bulletIncident}`
+                          : "Ask this step in a new chat"
+                      }
+                    >
                       <Button
                         type="link"
                         size="small"
                         icon={<MessageOutlined />}
                         loading={handoffBusy}
-                        onClick={() => askInChat(cleaned)}
+                        onClick={() => askInChat(cleaned, bulletIncident)}
                         style={{ paddingLeft: 0, paddingRight: 0 }}
                       >
                         Ask in chat

@@ -11,7 +11,12 @@ Per spec §3.2:
        - recommended_action = quality-weighted canonical pick
        - seen_in_incidents  = first 5 incident numbers
        - frequency_percent  = round(count / N * 100)
-  5. Empty when no group meets threshold.
+  5. When threshold isn't met but at least one ticket has documented
+     pivot data, surface that observation (derived_from=
+     "mental_pivot_single"). Sparse-data cohorts shouldn't have
+     real findings hidden behind a pure-aggregation gate.
+  6. Primary_Fix fallback only when zero tickets have any pivot data.
+  7. Empty only when even the Primary_Fix fields are missing.
 
 Sprint 10.1 corrections:
   - Quality-weighted canonical pick: when picking text from a group,
@@ -23,14 +28,23 @@ Sprint 10.1 corrections:
     Executive_Sharable_RCA.Root_Cause_Technical_High_Level. Mark
     derived_from="primary_fix_fallback" so the frontend re-labels.
 
-Pure function — no DB, no LLM, no logging beyond debug.
+Logging:
+  Emits one INFO line per call summarising cohort coverage:
+  ``[stage1a] cohort=N with_pivot=M (P%) threshold=T derived=...``
+  This makes ingestion-quality regressions (pivot fields missing
+  from a new batch of tickets) visible in prod without requiring
+  every caller to inspect the result object.
 """
 from __future__ import annotations
 
+import logging
 import math
 import re
 from collections import defaultdict
 from typing import Any, Dict, List, Optional
+
+
+logger = logging.getLogger("acadia-log-iq")
 
 from .schemas import Stage1aSmokingGun
 
@@ -73,6 +87,48 @@ def _kb_entries(ticket: Dict[str, Any]) -> List[Dict[str, Any]]:
     if isinstance(kb, list):
         return [k for k in kb if isinstance(k, dict)]
     return []
+
+
+def _pivot_payload(kb_entry: Dict[str, Any]) -> Dict[str, Any]:
+    """Return ``{the_mental_pivot, diagnostic_logic}`` for a KB entry,
+    tolerating two known shapes:
+
+    * Nested (current ingest):
+        ``semantic_unit_educational.diagnostic_pathway.the_mental_pivot``
+        ``semantic_unit_educational.diagnostic_logic``
+    * Flat (legacy / hand-written tickets):
+        ``the_mental_pivot`` and ``diagnostic_logic`` at the KB root.
+
+    Always returns a dict with both keys; missing pieces become ``{}`` so
+    the caller can ``.get(...)`` without None-guards. Field paths come
+    from the gold-ticket schema actually present in
+    ``chunks.metadata_json`` for the cohort tickets — see commit message.
+    """
+    if not isinstance(kb_entry, dict):
+        return {"the_mental_pivot": {}, "diagnostic_logic": {}}
+
+    sue = kb_entry.get("semantic_unit_educational")
+    if not isinstance(sue, dict):
+        sue = {}
+
+    pathway = sue.get("diagnostic_pathway")
+    if not isinstance(pathway, dict):
+        pathway = {}
+
+    nested_pivot = pathway.get("the_mental_pivot")
+    nested_logic = sue.get("diagnostic_logic")
+
+    flat_pivot = kb_entry.get("the_mental_pivot")
+    flat_logic = kb_entry.get("diagnostic_logic")
+
+    pivot = nested_pivot if isinstance(nested_pivot, dict) else (
+        flat_pivot if isinstance(flat_pivot, dict) else {}
+    )
+    logic = nested_logic if isinstance(nested_logic, dict) else (
+        flat_logic if isinstance(flat_logic, dict) else {}
+    )
+
+    return {"the_mental_pivot": pivot, "diagnostic_logic": logic}
 
 
 def _pick_canonical(group_members: List[Dict[str, Any]]) -> str:
@@ -164,41 +220,31 @@ def build_stage1a(
 
     threshold = max(1, math.ceil(n * float(min_frequency_ratio)))
 
-    # ── First, scan whether ANY ticket has a usable mental_pivot ──
-    # If zero tickets have populated KB.the_mental_pivot.pivot_data_point,
-    # we go straight to the Primary_Fix fallback rather than running the
-    # aggregator on empty input.
-    any_pivot_present = False
-    for ticket in cohort:
-        for kb in _kb_entries(ticket):
-            mp = kb.get("the_mental_pivot") if isinstance(kb.get("the_mental_pivot"), dict) else {}
-            if mp and str(mp.get("pivot_data_point", "")).strip():
-                any_pivot_present = True
-                break
-        if any_pivot_present:
-            break
-
-    if not any_pivot_present:
-        return _primary_fix_fallback(cohort)
-
     # Group by normalised pivot_data_point. Each candidate text is
     # tracked alongside its source ticket's metadata_json so the
-    # quality-weighted pick has the score available.
+    # quality-weighted pick has the score available. `_pivot_payload`
+    # resolves both the current nested layout
+    # (``Knowledge_Base[*].semantic_unit_educational.diagnostic_pathway
+    # .the_mental_pivot``) and the legacy flat layout, so callers get
+    # the same answer regardless of ingestion vintage.
     groups: Dict[str, Dict[str, Any]] = defaultdict(lambda: {
         "raw_signals": [],     # [{"text": str, "metadata_json": dict}, ...]
         "shift_strings": [],   # [{"text": str, "metadata_json": dict}, ...]
         "actions": [],         # [{"text": str, "metadata_json": dict}, ...]
         "incidents": [],       # incident numbers
     })
+    tickets_with_pivot: int = 0
 
     for ticket in cohort:
         inc = _incident_number(ticket) or ""
+        ticket_contributed = False
         for kb in _kb_entries(ticket):
-            mental_pivot = kb.get("the_mental_pivot") if isinstance(kb.get("the_mental_pivot"), dict) else {}
-            diagnostic_logic = kb.get("diagnostic_logic") if isinstance(kb.get("diagnostic_logic"), dict) else {}
-            pivot_raw = mental_pivot.get("pivot_data_point") if isinstance(mental_pivot, dict) else None
-            shift_raw = mental_pivot.get("shift_in_logic") if isinstance(mental_pivot, dict) else None
-            action_raw = diagnostic_logic.get("the_pivot_signal") if isinstance(diagnostic_logic, dict) else None
+            payload = _pivot_payload(kb)
+            mental_pivot = payload["the_mental_pivot"]
+            diagnostic_logic = payload["diagnostic_logic"]
+            pivot_raw = mental_pivot.get("pivot_data_point")
+            shift_raw = mental_pivot.get("shift_in_logic")
+            action_raw = diagnostic_logic.get("the_pivot_signal")
 
             if not pivot_raw or not str(pivot_raw).strip():
                 continue
@@ -211,26 +257,84 @@ def build_stage1a(
                 g["actions"].append({"text": str(action_raw), "metadata_json": ticket})
             if inc and inc not in g["incidents"]:
                 g["incidents"].append(inc)
+            ticket_contributed = True
+        if ticket_contributed:
+            tickets_with_pivot += 1
 
+    coverage_pct = round(100.0 * tickets_with_pivot / n) if n else 0
+
+    def _emit(result: Stage1aSmokingGun) -> Stage1aSmokingGun:
+        # One log line per call so prod monitoring can spot ingestion
+        # regressions (e.g. a batch of tickets without populated
+        # mental_pivot fields shows up as a coverage drop).
+        logger.info(
+            "[stage1a] cohort=%d with_pivot=%d (%d%%) threshold=%d "
+            "derived=%s freq_pct=%d",
+            n, tickets_with_pivot, coverage_pct, threshold,
+            result.derived_from, result.frequency_in_cohort_percent,
+        )
+        return result
+
+    # No usable pivot anywhere in the cohort → degrade to Primary_Fix
+    # distillation from the highest-quality ticket. Same behaviour as
+    # the legacy "no any_pivot_present" early-out, just deferred so
+    # the coverage log line still fires.
     if not groups:
-        # Edge case: pivot_present=True but normalising stripped them all
-        return _primary_fix_fallback(cohort)
+        return _emit(_primary_fix_fallback(cohort))
 
-    # Pick highest-frequency group above threshold (count = unique-incident count)
+    # Aggregate path — at least `threshold` cohort tickets share the
+    # same normalized pivot_data_point. This is the strongest signal.
     candidates = [
         (key, g, len(g["incidents"]))
         for key, g in groups.items()
         if len(g["incidents"]) >= threshold
     ]
-    if not candidates:
-        # Cohort has KB pivot data but nothing repeats enough — fall
-        # back to Primary_Fix from the highest-quality ticket.
-        return _primary_fix_fallback(cohort)
+    if candidates:
+        candidates.sort(key=lambda x: x[2], reverse=True)
+        _, winner, count = candidates[0]
+        pivot_signal = _pick_canonical(winner["raw_signals"])
+        bypass_instruction = (
+            _pick_canonical(winner["shift_strings"]) if winner["shift_strings"] else None
+        )
+        recommended_action = (
+            _pick_canonical(winner["actions"]) if winner["actions"] else None
+        )
+        return _emit(Stage1aSmokingGun(
+            pivot_signal=pivot_signal or None,
+            bypass_instruction=bypass_instruction or None,
+            recommended_action=recommended_action or None,
+            frequency_in_cohort_percent=round(100.0 * count / n),
+            seen_in_incidents=winner["incidents"][:5],
+            empty=False,
+            derived_from="mental_pivot_aggregate",
+        ))
 
-    candidates.sort(key=lambda x: x[2], reverse=True)
-    _, winner, count = candidates[0]
+    # Single-pivot path — at least one ticket has documented pivot
+    # data, but nothing repeats often enough to clear the threshold.
+    # Production prefers surfacing the lone observation over hiding
+    # it behind a Primary_Fix fallback that duplicates Stage 0. Pick
+    # the group with the highest-quality canonical text — same
+    # quality-weighted comparator used inside `_pick_canonical` —
+    # so we always lead with the best-rated ticket's pivot.
+    def _group_best_score(g: Dict[str, Any]) -> int:
+        best = 0
+        for m in g["raw_signals"]:
+            try:
+                s = int(((m.get("metadata_json") or {}).get("Metadata") or {})
+                        .get("Resolution_Quality_Score") or 0)
+            except (ValueError, TypeError):
+                s = 0
+            if s > best:
+                best = s
+        return best
 
-    # Quality-weighted canonical pick for each text field.
+    ranked_groups = sorted(
+        groups.values(),
+        key=lambda g: (_group_best_score(g), len(g["incidents"])),
+        reverse=True,
+    )
+    winner = ranked_groups[0]
+    count = len(winner["incidents"])
     pivot_signal = _pick_canonical(winner["raw_signals"])
     bypass_instruction = (
         _pick_canonical(winner["shift_strings"]) if winner["shift_strings"] else None
@@ -238,13 +342,12 @@ def build_stage1a(
     recommended_action = (
         _pick_canonical(winner["actions"]) if winner["actions"] else None
     )
-
-    return Stage1aSmokingGun(
+    return _emit(Stage1aSmokingGun(
         pivot_signal=pivot_signal or None,
         bypass_instruction=bypass_instruction or None,
         recommended_action=recommended_action or None,
         frequency_in_cohort_percent=round(100.0 * count / n),
         seen_in_incidents=winner["incidents"][:5],
         empty=False,
-        derived_from="mental_pivot_aggregate",
-    )
+        derived_from="mental_pivot_single",
+    ))

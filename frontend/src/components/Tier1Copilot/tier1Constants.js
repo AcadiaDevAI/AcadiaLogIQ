@@ -117,6 +117,7 @@ export const TIER1_JOURNEY_ON =
   process.env.REACT_APP_LOGIQ_TIER1_JOURNEY_FRONTEND === "true";
 
 export const STAGE_LABELS = {
+  environment_context: "Environment Context & Tech Component Profile",
   stage_0: "Best Historical Match & Recommended Resolution",
   stage_1a: "Smoking Gun",
   stage_1b: "Do Not Chase",
