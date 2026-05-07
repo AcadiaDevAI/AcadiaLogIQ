@@ -25,6 +25,7 @@ import { CopyOutlined, ExportOutlined, LoadingOutlined } from "@ant-design/icons
 // (and the JSX block below) if the Sprint 7 package view is ever
 // brought back.
 // import EscalationPackageCard from "../EscalationPackageCard";
+import DislikeButton from "./DislikeButton";
 import HelpfulButton from "./HelpfulButton";
 import {
   fetchEscalationRouting,
@@ -323,13 +324,19 @@ export default function Stage5EscalationPackage({
           alignItems: "center",
         }}
       >
-        <HelpfulButton
-          sessionId={sessionId}
-          stage="stage_5"
-          onMarkedHelpful={onMarkedHelpful}
-          onStartNewTicket={onStartNewTicket}
-          disabled={helpfulMarked}
-        />
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <HelpfulButton
+            sessionId={sessionId}
+            stage="stage_5"
+            onMarkedHelpful={onMarkedHelpful}
+            onStartNewTicket={onStartNewTicket}
+            disabled={helpfulMarked}
+          />
+          <DislikeButton
+            sessionId={sessionId}
+            stage="stage_5"
+          />
+        </div>
         <div style={{ display: "flex", gap: 8 }}>
           {/* Sprint 12.7.1 — "Show escalation package" CTA suppressed:
               with autoExpand=true (default) the package is already

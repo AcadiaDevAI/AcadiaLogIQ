@@ -10,6 +10,7 @@
 import React, { useState } from "react";
 import { Button, Card, Collapse, Space, Tag, Typography } from "antd";
 
+import DislikeButton from "./DislikeButton";
 import EscalateButton from "./EscalateButton";
 import HelpfulButton from "./HelpfulButton";
 import NextStageButton from "./NextStageButton";
@@ -228,13 +229,19 @@ export default function Stage2HistoricalMatches({
           alignItems: "center",
         }}
       >
-        <HelpfulButton
-          sessionId={sessionId}
-          stage="stage_2"
-          onMarkedHelpful={onMarkedHelpful}
-          onStartNewTicket={onStartNewTicket}
-          disabled={helpfulMarked}
-        />
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <HelpfulButton
+            sessionId={sessionId}
+            stage="stage_2"
+            onMarkedHelpful={onMarkedHelpful}
+            onStartNewTicket={onStartNewTicket}
+            disabled={helpfulMarked}
+          />
+          <DislikeButton
+            sessionId={sessionId}
+            stage="stage_2"
+          />
+        </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {/* Sprint 11 — Escalate from Stage 2. Click → traversal log
               records "Stage 2 — viewed, advanced at HH:MM UTC" then

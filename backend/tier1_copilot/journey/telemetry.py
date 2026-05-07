@@ -27,6 +27,12 @@ _VALID_STAGES = {
 _VALID_EVENT_TYPES = {
     "stage_rendered",
     "helpful_clicked",
+    # Sprint 13.2 — engineer disagreement signal. Mirrors chat's
+    # dislike: fired when an engineer clicks the Dislike button on
+    # any stage panel. The negative-feedback modal opens client-side
+    # in parallel; the telemetry row is the always-on signal even if
+    # the engineer cancels the modal without writing a comment.
+    "disliked_clicked",
     "next_stage_clicked",
     "abandoned",
     # Sprint 10.5 §3.2 — fired when an engineer clicks "Escalate

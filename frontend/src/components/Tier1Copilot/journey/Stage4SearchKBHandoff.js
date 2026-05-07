@@ -19,6 +19,7 @@ import { LoadingOutlined, MessageOutlined } from "@ant-design/icons";
 
 import { useChat } from "../../../hooks/ChatContext";
 import { askQuestion, getSession } from "../../../services/api";
+import DislikeButton from "./DislikeButton";
 import HelpfulButton from "./HelpfulButton";
 import NextStageButton from "./NextStageButton";
 import { STAGE_LABELS } from "../tier1Constants";
@@ -181,13 +182,19 @@ export default function Stage4SearchKBHandoff({
           alignItems: "center",
         }}
       >
-        <HelpfulButton
-          sessionId={sessionId}
-          stage="stage_4"
-          onMarkedHelpful={onMarkedHelpful}
-          onStartNewTicket={onStartNewTicket}
-          disabled={helpfulMarked}
-        />
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <HelpfulButton
+            sessionId={sessionId}
+            stage="stage_4"
+            onMarkedHelpful={onMarkedHelpful}
+            onStartNewTicket={onStartNewTicket}
+            disabled={helpfulMarked}
+          />
+          <DislikeButton
+            sessionId={sessionId}
+            stage="stage_4"
+          />
+        </div>
         <NextStageButton
           sessionId={sessionId}
           fromStage="stage_4"

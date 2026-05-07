@@ -299,6 +299,9 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
           data={initial.stage_0}
           sessionId={sessionId}
           onReveal={reveal}
+          onMarkedHelpful={markHelpful}
+          onStartNewTicket={startNewTicket}
+          helpfulMarked={!!helpfulPerStage.stage_0}
         />
 
         {/* Sprint 10.2 — merged Pivot Insights panel (Smoking Gun +

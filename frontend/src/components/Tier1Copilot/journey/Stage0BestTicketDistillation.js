@@ -14,7 +14,9 @@ import { Button, Card, List, Tag, Tooltip, Typography } from "antd";
 import { MessageOutlined } from "@ant-design/icons";
 
 import CorpusStatsTail from "./CorpusStatsTail";
+import DislikeButton from "./DislikeButton";
 import EscalateButton from "./EscalateButton";
+import HelpfulButton from "./HelpfulButton";
 import { stripLeadingNumber } from "./stepText";
 import useChatHandoff from "./useChatHandoff";
 
@@ -96,7 +98,18 @@ function buildHeadline(data) {
 }
 
 
-export default function Stage0BestTicketDistillation({ data, sessionId, onReveal }) {
+export default function Stage0BestTicketDistillation({
+  data,
+  sessionId,
+  onReveal,
+  // Sprint 13.2 — Stage 0 now carries Helpful + Dislike alongside
+  // the existing Escalate. Parent passes the same onMarkedHelpful /
+  // onStartNewTicket / helpfulMarked plumbing it already supplies
+  // to every other stage panel.
+  onMarkedHelpful,
+  onStartNewTicket,
+  helpfulMarked,
+}) {
   // Sprint 11 — per-step "Ask in chat" links. Hook is a no-op when
   // sessionId is missing (defensive — Stage 0 should always have one).
   const { busy: handoffBusy, askInChat } = useChatHandoff(sessionId);
@@ -233,9 +246,28 @@ export default function Stage0BestTicketDistillation({ data, sessionId, onReveal
             paddingTop: 12,
             borderTop: "1px solid var(--border-color, #f0f0f0)",
             display: "flex",
-            justifyContent: "flex-end",
+            flexWrap: "wrap",
+            gap: 12,
+            justifyContent: "space-between",
+            alignItems: "center",
           }}
         >
+          {/* Sprint 13.2 — Helpful + Dislike pair, mirrors every
+              other stage's footer. Helpful opens the positive-feedback
+              modal (chat parity); Dislike opens the negative one. */}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <HelpfulButton
+              sessionId={sessionId}
+              stage="stage_0"
+              onMarkedHelpful={onMarkedHelpful}
+              onStartNewTicket={onStartNewTicket}
+              disabled={helpfulMarked}
+            />
+            <DislikeButton
+              sessionId={sessionId}
+              stage="stage_0"
+            />
+          </div>
           <EscalateButton
             sessionId={sessionId}
             fromStage="stage_0"

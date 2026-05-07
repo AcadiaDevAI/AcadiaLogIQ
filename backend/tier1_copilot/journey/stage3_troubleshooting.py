@@ -54,6 +54,11 @@ from .schemas import (
     TimelineEntry,
     TroubleshootingStep,
 )
+# Sprint 13 — new per-ticket pipeline. Imported lazily-safe (no
+# circular dep: stage3_guided_workflows depends only on schemas +
+# stage2_historical helpers).
+from .stage3_guided_workflows import build_guided_workflows
+from .stage3_synthesis import synthesize_workflows
 # Sprint 10.8.1 §3 — share the array-aware path walker + flattener
 # from stage2_historical so both stages traverse the corpus the same
 # way. (Defining once, used twice — single source of truth.)
@@ -609,6 +614,73 @@ def _build_per_ticket_details(
 
 def build_stage3(
     cohort: List[Dict[str, Any]],
+    *,
+    max_details_shown: int = 5,
+    filter_empty_details: bool = True,
+) -> Stage3TroubleshootingApproach:
+    """Sprint 13 — replaced the merged-ledger pipeline with per-ticket
+    Guided Workflows. The Sprint 10/12.6 consolidated ``steps`` list
+    is gone; engineers now see one Collapse panel per cohort ticket
+    with its OWN local 1..N numbering, so cross-ticket Pivot
+    references like *"go to Step 2"* can no longer dangle.
+
+    Per-ticket detail (Sprint 11) is preserved verbatim — same
+    builder, same schema fields, same render. Only the consolidated
+    surface changed.
+
+    Pipeline:
+        1. ``build_guided_workflows`` — pure structural per-ticket
+           harvest (verbatim Intent/Pivot from source where present).
+        2. ``synthesize_workflows`` — one Haiku call per ticket;
+           rewrites Intent + Pivot to human decision text and
+           generates a 3-7 word topical header. Failure-open: each
+           workflow falls back to verbatim with
+           ``synthesis_skipped=True``.
+        3. ``_build_per_ticket_details`` — Sprint 11 raw breakdown,
+           untouched.
+    """
+    if not cohort:
+        return Stage3TroubleshootingApproach(
+            guided_workflows=[],
+            cohort_size=0,
+            per_ticket_details=[],
+            total_available_details=0,
+            max_details_shown=max_details_shown,
+        )
+
+    # Per-ticket raw breakdown — Sprint 11, preserved unchanged.
+    per_ticket_details = _build_per_ticket_details(
+        cohort, filter_empty=filter_empty_details,
+    )
+
+    # Sprint 13 — Guided Workflows: harvest + LLM synthesis.
+    workflows = build_guided_workflows(cohort)
+    ticket_lookup: Dict[str, Dict[str, Any]] = {}
+    for t in cohort:
+        if not isinstance(t, dict):
+            continue
+        inc = _safe_get(t, "Metadata", "Incident_Number")
+        if isinstance(inc, str) and inc.strip():
+            ticket_lookup[inc.strip()] = t
+    workflows = synthesize_workflows(workflows, ticket_lookup)
+
+    return Stage3TroubleshootingApproach(
+        guided_workflows=workflows,
+        cohort_size=len(cohort),
+        per_ticket_details=per_ticket_details,
+        total_available_details=len(per_ticket_details),
+        max_details_shown=max_details_shown,
+    )
+
+
+# Sprint 13 — the merged-ledger helpers below this point are dead
+# code under the new schema (the Stage3TroubleshootingApproach.steps
+# field they wrote into has been removed). They remain in the file
+# for one cycle as deprecated references; the new pipeline is built
+# in stage3_guided_workflows.py + stage3_synthesis.py and orchestrated
+# by build_stage3 above. Schedule for deletion in a follow-up cleanup.
+def _build_stage3_legacy_unused(
+    cohort: List[Dict[str, Any]],
     max_steps: int = 18,
     *,
     max_diagnostic_steps: int = 6,
@@ -616,48 +688,20 @@ def build_stage3(
     max_intervention_steps: int = 8,
     max_details_shown: int = 5,
     filter_empty_details: bool = True,
-) -> Stage3TroubleshootingApproach:
-    """See module docstring.
-
-    Sprint 11 — `max_details_shown` is a frontend rendering hint for
-    the per-ticket detail accordion; backend returns ALL useful
-    details, frontend caps display at `max_details_shown` and
-    surfaces a "View more ticket details" reveal for the rest.
-    Mirrors the Stage 2 contract added in the same sprint.
-
-    `filter_empty_details=True` (default) hides per-ticket details
-    that carry no useful signal — same usefulness contract as
-    Stage 2's _is_useful_card. Pass False to keep the raw 1:1
-    build (resilience tests use this).
-
-    Sprint 12.6 — per-category caps. Each category gets a guaranteed
-    quota (default diag=6 / timeline=4 / intervention=8); ``max_steps``
-    is the absolute total. After per-category quotas are spent, any
-    remaining slots up to ``max_steps`` are filled from candidates
-    skipped solely due to quota (preserving the ordered sequencing).
-    A category with fewer candidates than its quota silently donates
-    the leftover slots to other categories. Default ``max_steps``
-    raised 8→18 so a 5-ticket cohort with the typical category mix
-    (~5 diag + ~5 timeline + ~10 intervention) surfaces all of them.
-    Callers passing an explicit lower ``max_steps`` still get exact
-    capping — the per-category quotas are advisory upper-bounds.
+):
+    """Sprint 12.6 merged-ledger build. Retained as a reference so
+    the per-category cap algorithm and the branching detection
+    logic stay in version history during the Sprint 13 transition.
+    Not called from anywhere; pydantic would reject the old field
+    names against the new schema.
     """
     if not cohort:
-        return Stage3TroubleshootingApproach(
-            steps=[], total_unique_steps_before_cap=0, cohort_size=0,
-            per_ticket_details=[],
-            total_available_details=0,
-            max_details_shown=max_details_shown,
-        )
+        return None
 
-    # Sprint 11 — per-ticket raw breakdown is built once, in rank order,
-    # independent of the consolidation pipeline. Returned alongside the
-    # consolidated `steps` list so the frontend can render both views.
     per_ticket_details = _build_per_ticket_details(
         cohort, filter_empty=filter_empty_details,
     )
 
-    # Harvest + group
     groups: Dict[str, _Group] = {}
     ci_keys_per_incident: Dict[str, set] = defaultdict(set)
 

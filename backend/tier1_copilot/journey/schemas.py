@@ -300,12 +300,38 @@ class TicketTroubleshootingDetail(BaseModel):
     diagnostic_tests_executed: List[str] = Field(default_factory=list)
 
 
+# ─────────────────────────────────────────────────────────────
+# Sprint 13 — Per-ticket Guided Workflows (replaces the merged
+# ledger surface). Each cohort ticket renders as one collapsible
+# panel; numbering is local to the ticket; Intent + Pivot rewritten
+# by an LLM synthesis pass to read as human decision text rather
+# than verbatim source strings.
+# ─────────────────────────────────────────────────────────────
+class GuidedWorkflowStep(BaseModel):
+    step_number: int            # 1..N within this workflow only
+    action: str                  # verbatim from source — never LLM-rewritten
+    intent: Optional[str] = None     # LLM-synthesized (or verbatim source if synthesis skipped)
+    pivot: Optional[str] = None      # LLM-synthesized prose; never references step numbers
+    command: Optional[str] = None    # verbatim from source when present
+    source_field: str = ""           # diagnostic_logic_chunks | Resolution_Steps | etc.
+
+
+class GuidedWorkflow(BaseModel):
+    match_rank: int                   # 1, 2, 3, ... — re-numbered after sibling drops
+    incident_number: str
+    header: str = ""                 # 3-7 word topical title (LLM-synthesized; falls back to Incident_Summary.INCIDENT)
+    technical_snapshot: Optional[str] = None
+    expanded_by_default: bool = False
+    steps: List[GuidedWorkflowStep] = Field(default_factory=list)
+    synthesis_skipped: bool = False  # true when LLM call failed → action+intent+pivot are verbatim
+
+
 class Stage3TroubleshootingApproach(BaseModel):
-    steps: List[TroubleshootingStep] = Field(default_factory=list)
-    # Sprint 10.8 §3.8 — diagnostics for operators / acceptance tests.
-    # total_unique_steps_before_cap counts grouped (deduped) steps
-    # BEFORE the cap-at-8 trim, so the §3.10 cap test can assert it.
-    total_unique_steps_before_cap: int = 0
+    # Sprint 13 — primary content of the Stage 3 panel. One workflow
+    # per cohort ticket, in match-rank order. Frontend renders these
+    # as a Collapse accordion under the singular "Guided
+    # Troubleshooting Workflow" heading.
+    guided_workflows: List[GuidedWorkflow] = Field(default_factory=list)
     cohort_size: int = 0
     # Sprint 11 — per-ticket raw breakdown (companion to `steps`).
     # See DiagnosticLogicEntry / TimelineEntry / TicketTroubleshootingDetail
@@ -426,6 +452,8 @@ class JourneyEventRequest(BaseModel):
     ]
     event_type: Literal[
         "stage_rendered", "helpful_clicked",
+        # Sprint 13.2 — engineer disagreement signal (Dislike button).
+        "disliked_clicked",
         "next_stage_clicked", "abandoned",
         # Sprint 10.5 §3.2 — fired when an engineer clicks
         # "Escalate Ticket" inline on a chat message footer. Recorded

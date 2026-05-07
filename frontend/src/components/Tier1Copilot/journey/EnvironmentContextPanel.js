@@ -20,6 +20,7 @@ import React from "react";
 import { Card, Tag, Typography, Space } from "antd";
 import { ApartmentOutlined } from "@ant-design/icons";
 
+import DislikeButton from "./DislikeButton";
 import HelpfulButton from "./HelpfulButton";
 import NextStageButton from "./NextStageButton";
 import EscalateButton from "./EscalateButton";
@@ -154,13 +155,19 @@ function Footer({
         alignItems: "center",
       }}
     >
-      <HelpfulButton
-        sessionId={sessionId}
-        stage="environment_context"
-        onMarkedHelpful={onMarkedHelpful}
-        onStartNewTicket={onStartNewTicket}
-        disabled={helpfulMarked}
-      />
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+        <HelpfulButton
+          sessionId={sessionId}
+          stage="environment_context"
+          onMarkedHelpful={onMarkedHelpful}
+          onStartNewTicket={onStartNewTicket}
+          disabled={helpfulMarked}
+        />
+        <DislikeButton
+          sessionId={sessionId}
+          stage="environment_context"
+        />
+      </div>
       <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
         <EscalateButton
           sessionId={sessionId}

@@ -1,22 +1,28 @@
 // Sprint 10 Stage 3 — The Troubleshooting Approach.
 //
-// Per spec §3.5 + §9: numbered vertical list with Intent + Pivot per
-// step. Branch labels render as a small chip when present
-// ("Primary", "Alt A", etc.).
+// Sprint 13 — replaces the merged-ledger flat list with one Collapse
+// panel per cohort ticket (`guided_workflows[]`). Match 1 is open by
+// default; Match 2+ are collapsed. Each step inside a panel uses
+// LLM-synthesised Intent + Pivot prose; the action text stays
+// verbatim. The `Per-ticket troubleshooting detail` accordion
+// underneath is preserved unchanged from Sprint 11.
 //
-// Sprint 11 — per-ticket detail accordion below the consolidated
-// playbook. Each cohort ticket gets a collapsible card with sections
-// for every Stage 3 source (Technical Snapshot with Show more/less,
-// Resolution Steps, Diagnostic Logic with Action/Intent/Pivot/Command,
-// Timeline, Critical Intervention, Hero Action, Diagnostic Tests
-// Executed). Missing sections are omitted — never rendered as "N/A".
-//
-// [Helpful] [Search KB / SOP ▶]
+// Layout:
+//   Card title: "Guided Troubleshooting Workflow"   ← single heading
+//     ┌─ Collapse panel: MATCH 1 — INC-XXX — <synthesised header>
+//     │    Step 1: <action>     <command>?
+//     │      Why: <intent>
+//     │      Outcome: <pivot prose>
+//     │    ...
+//     └─ Collapse panel: MATCH 2 — INC-YYY — ... (collapsed)
+//   Per-ticket troubleshooting detail (N)            ← Sprint 11
+//   [Helpful] [Search KB / SOP ▶]
 
 import React, { useState } from "react";
-import { Button, Card, Collapse, List, Tag, Tooltip, Typography } from "antd";
+import { Button, Card, Collapse, List, Tooltip, Typography } from "antd";
 import { MessageOutlined } from "@ant-design/icons";
 
+import DislikeButton from "./DislikeButton";
 import EscalateButton from "./EscalateButton";
 import HelpfulButton from "./HelpfulButton";
 import NextStageButton from "./NextStageButton";
@@ -29,11 +35,10 @@ const { Title, Paragraph, Text } = Typography;
 const SNAPSHOT_TRUNCATE_AT = 400;
 
 
-function branchColor(label) {
-  if (!label) return undefined;
-  if (label === "Primary") return "green";
-  return "blue";
-}
+// Sprint 13 — `branchColor` from the Sprint 10.8 merged-ledger render
+// is dead now (no branch_label / Primary / Fallback pills in the new
+// per-ticket schema). Kept removed; reinstate alongside the legacy
+// flat list if the merged ledger ever returns.
 
 
 // Sprint 11 — local Show more / Show less toggle for long narrative
@@ -66,48 +71,103 @@ function TruncatedText({ text }) {
 }
 
 
-function ConsolidatedStepItem({ s }) {
+// ────────────────────────────────────────────────────────────
+// Sprint 13 — Guided Workflow rendering (per-ticket grouped).
+// One Collapse panel per cohort ticket; each panel contains that
+// ticket's full step playbook with LLM-synthesised Intent + Pivot.
+// ────────────────────────────────────────────────────────────
+function GuidedWorkflowStepItem({ step }) {
   return (
-    <List.Item key={s.step_number}>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 8 }}>
-        <div>
-          <Text strong>
-            {/* Sprint 10.8 §3.6 — second distinct successful
-                intervention is prefixed "(Fallback)" so engineers
-                see clear "try this if Step N didn't work" framing. */}
-            Step {s.step_number}:{" "}
-            {s.is_fallback ? "(Fallback) " : ""}
-          </Text>
-          <Text>{s.action}</Text>
-        </div>
-        {s.branch_label ? (
-          <Tag color={branchColor(s.branch_label)}>{s.branch_label}</Tag>
-        ) : null}
+    <li
+      key={step.step_number}
+      style={{ marginBottom: 12 }}
+    >
+      <div>
+        <Text strong>Step {step.step_number}: </Text>
+        <Text>{step.action}</Text>
       </div>
-      {s.command ? (
+      {step.command ? (
         <div style={{ marginTop: 4 }}>
-          <Text code>{s.command}</Text>
+          <Text code>{step.command}</Text>
         </div>
       ) : null}
-      {s.intent ? (
-        <Paragraph style={{ marginTop: 4, marginBottom: 4 }}>
-          <Text type="secondary">Intent: </Text>{s.intent}
+      {step.intent ? (
+        <Paragraph style={{ marginTop: 4, marginBottom: 2 }}>
+          <Text type="secondary">Why: </Text>{step.intent}
         </Paragraph>
       ) : null}
-      {s.pivot ? (
-        <Paragraph style={{ marginTop: 0, marginBottom: 4 }}>
-          <Text type="secondary">Pivot: </Text>{s.pivot}
+      {step.pivot ? (
+        <Paragraph style={{ marginTop: 0, marginBottom: 0 }}>
+          <Text type="secondary">Outcome: </Text>{step.pivot}
         </Paragraph>
       ) : null}
-      {s.seen_in_incidents && s.seen_in_incidents.length > 0 ? (
-        <div>
-          <Text type="secondary" style={{ fontSize: 12 }}>
-            {/* Sprint 10.2 §6 — comma-join the incident-ID array. */}
-            Seen in: {s.seen_in_incidents.join(", ")}
-          </Text>
-        </div>
+    </li>
+  );
+}
+
+
+function GuidedWorkflowPanelBody({ workflow }) {
+  return (
+    <div>
+      {workflow.technical_snapshot ? (
+        <Paragraph
+          type="secondary"
+          style={{ marginTop: 0, marginBottom: 12, fontStyle: "italic" }}
+        >
+          <TruncatedText text={workflow.technical_snapshot} />
+        </Paragraph>
       ) : null}
-    </List.Item>
+
+      <ol style={{ paddingLeft: 20, marginBottom: 0, listStyleType: "none" }}>
+        {workflow.steps.map((s) => (
+          <GuidedWorkflowStepItem key={s.step_number} step={s} />
+        ))}
+      </ol>
+
+      {workflow.synthesis_skipped ? (
+        <Paragraph
+          type="secondary"
+          style={{ marginTop: 8, marginBottom: 0, fontSize: 12 }}
+        >
+          (Showing verbatim source text — LLM synthesis unavailable for this ticket.)
+        </Paragraph>
+      ) : null}
+    </div>
+  );
+}
+
+
+function GuidedWorkflows({ workflows }) {
+  if (!workflows || workflows.length === 0) return null;
+
+  // Build one Collapse panel per workflow. Default-active key = the
+  // workflow flagged `expanded_by_default` (always Match 1 today).
+  const items = workflows.map((wf) => ({
+    key: `match-${wf.match_rank}`,
+    label: (
+      <span>
+        <Text strong>MATCH {wf.match_rank}</Text>
+        <Text> — {wf.incident_number}</Text>
+        {wf.header && wf.header !== wf.incident_number ? (
+          <Text> — {wf.header}</Text>
+        ) : null}
+      </span>
+    ),
+    children: <GuidedWorkflowPanelBody workflow={wf} />,
+  }));
+
+  const defaultActiveKeys = workflows
+    .filter((wf) => wf.expanded_by_default)
+    .map((wf) => `match-${wf.match_rank}`);
+
+  return (
+    <Collapse
+      // `accordion` deliberately off — engineers may want to compare
+      // two tickets' playbooks side-by-side after expanding both.
+      defaultActiveKey={defaultActiveKeys}
+      items={items}
+      style={{ marginBottom: 16 }}
+    />
   );
 }
 
@@ -333,10 +393,11 @@ export default function Stage3TroubleshootingApproach({
   // the busy state covers all of them at once.
   const { busy: handoffBusy, askInChat } = useChatHandoff(sessionId);
 
-  // Sprint 11 — render when EITHER consolidated steps OR per-ticket
-  // details have content. Sparse cohorts where dedup eliminates every
-  // step but raw per-ticket fields exist still get a meaningful page.
-  const hasSteps = data && Array.isArray(data.steps) && data.steps.length > 0;
+  // Sprint 13 — guided_workflows is the new primary surface.
+  // Per-ticket details (Sprint 11) is preserved unchanged.
+  const hasGuidedWorkflows = (
+    data && Array.isArray(data.guided_workflows) && data.guided_workflows.length > 0
+  );
   const hasDetails = (
     data && Array.isArray(data.per_ticket_details)
     && data.per_ticket_details.length > 0
@@ -351,14 +412,14 @@ export default function Stage3TroubleshootingApproach({
     ))
   );
 
-  if (!hasSteps && !hasDetails) {
+  if (!hasGuidedWorkflows && !hasDetails) {
     return (
       <Card style={{ marginBottom: 16, borderLeft: "4px solid #6B6B6B" }}>
         <Title level={5} style={{ marginTop: 0 }}>
           Guided Troubleshooting Workflow
         </Title>
         <Paragraph type="secondary">
-          No consolidated steps available for these similar tickets.
+          No troubleshooting workflows available for these similar tickets.
         </Paragraph>
       </Card>
     );
@@ -370,13 +431,8 @@ export default function Stage3TroubleshootingApproach({
         Guided Troubleshooting Workflow
       </Title>
 
-      {hasSteps ? (
-        <List
-          itemLayout="vertical"
-          size="small"
-          dataSource={data.steps}
-          renderItem={(s) => <ConsolidatedStepItem s={s} />}
-        />
+      {hasGuidedWorkflows ? (
+        <GuidedWorkflows workflows={data.guided_workflows} />
       ) : null}
 
       {hasDetails ? (
@@ -400,13 +456,19 @@ export default function Stage3TroubleshootingApproach({
           alignItems: "center",
         }}
       >
-        <HelpfulButton
-          sessionId={sessionId}
-          stage="stage_3"
-          onMarkedHelpful={onMarkedHelpful}
-          onStartNewTicket={onStartNewTicket}
-          disabled={helpfulMarked}
-        />
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <HelpfulButton
+            sessionId={sessionId}
+            stage="stage_3"
+            onMarkedHelpful={onMarkedHelpful}
+            onStartNewTicket={onStartNewTicket}
+            disabled={helpfulMarked}
+          />
+          <DislikeButton
+            sessionId={sessionId}
+            stage="stage_3"
+          />
+        </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {/* Sprint 11 — Escalate from Stage 3. Click → traversal log
               records "Stage 3 — viewed, advanced at HH:MM UTC" then

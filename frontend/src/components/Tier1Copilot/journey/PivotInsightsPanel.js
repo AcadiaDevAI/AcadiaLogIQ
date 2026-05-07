@@ -14,6 +14,7 @@ import React from "react";
 import { Card, Divider, List, Tag, Typography } from "antd";
 import { ThunderboltOutlined, CloseCircleOutlined } from "@ant-design/icons";
 
+import DislikeButton from "./DislikeButton";
 import HelpfulButton from "./HelpfulButton";
 import EscalateButton from "./EscalateButton";
 import NextStageButton from "./NextStageButton";
@@ -183,13 +184,19 @@ export default function PivotInsightsPanel({
           alignItems: "center",
         }}
       >
-        <HelpfulButton
-          sessionId={sessionId}
-          stage="pivot_insights"
-          onMarkedHelpful={onMarkedHelpful}
-          onStartNewTicket={onStartNewTicket}
-          disabled={helpfulMarked}
-        />
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+          <HelpfulButton
+            sessionId={sessionId}
+            stage="pivot_insights"
+            onMarkedHelpful={onMarkedHelpful}
+            onStartNewTicket={onStartNewTicket}
+            disabled={helpfulMarked}
+          />
+          <DislikeButton
+            sessionId={sessionId}
+            stage="pivot_insights"
+          />
+        </div>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {/* Sprint 11 — Escalate option alongside the primary
               "advance to next stage" CTA. fromStage matches the

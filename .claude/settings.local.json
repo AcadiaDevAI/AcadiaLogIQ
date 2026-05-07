@@ -81,7 +81,11 @@
       "Bash(python -m py_compile backend/api.py backend/retrieval/scoped_retrieval.py)",
       "Bash(python -m py_compile backend/retrieval/scoped_retrieval.py)",
       "Bash(python -m py_compile backend/tier1_copilot/journey/stage1_smoking_gun.py backend/tier1_copilot/journey/schemas.py)",
-      "Bash(python -m py_compile backend/tier1_copilot/journey/stage0_environment.py backend/tier1_copilot/journey/schemas.py backend/tier1_copilot/journey/routes.py backend/tier1_copilot/journey/telemetry.py)"
+      "Bash(python -m py_compile backend/tier1_copilot/journey/stage0_environment.py backend/tier1_copilot/journey/schemas.py backend/tier1_copilot/journey/routes.py backend/tier1_copilot/journey/telemetry.py)",
+      "Bash(python -m py_compile backend/tier1_copilot/journey/stage3_guided_workflows.py backend/tier1_copilot/journey/stage3_synthesis.py backend/tier1_copilot/journey/schemas.py backend/tier1_copilot/journey/stage3_troubleshooting.py backend/tier1_copilot/journey/routes.py)",
+      "Bash(python -m py_compile backend/tier1_copilot/journey/stage3_synthesis.py)",
+      "Bash(python -m py_compile backend/tier1_copilot/journey/telemetry.py backend/tier1_copilot/journey/schemas.py)",
+      "Bash(python -m py_compile backend/tier1_copilot/journey/stage3_synthesis.py backend/tier1_copilot/journey/telemetry.py backend/tier1_copilot/journey/schemas.py)"
     ]
   }
 }
