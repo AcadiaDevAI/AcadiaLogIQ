@@ -140,6 +140,19 @@ export default function SuggestionCard({ card, onUse }) {
         </div>
       </div>
 
+      {/* Sprint 13.27 — Customer row removed from the suggestion card.
+          Engineers describe the alert type they're seeing — not their
+          customer's name — when they ping. So the reactive card now
+          mirrors the proactive form's required-fields focus
+          (severity · asset · alert_type), keeping the engineer's
+          mental model consistent across the two modes. The customer
+          field STILL flows through to the form prefill when the
+          extractor surfaces it (it's an optional field in the
+          downstream Tier1IntakeForm), so no data is lost — just not
+          competing for visual real estate on the card. Reinstate by
+          un-commenting the block below if customer needs to be
+          surfaced on the card again. */}
+      {/*
       {(customerDisplay || v.customer_status === "unknown") && (
         <div className="mb-2 t-text text-sm">
           <span className="t-text-muted" style={{ fontSize: 11 }}>Customer</span>
@@ -148,6 +161,7 @@ export default function SuggestionCard({ card, onUse }) {
           </div>
         </div>
       )}
+      */}
 
       {(card.location || card.users_impacted_count) && (
         <div className="mb-2 t-text-muted" style={{ fontSize: 12 }}>

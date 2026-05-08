@@ -39,7 +39,7 @@ Output schema (JSON array):
   {{
     "severity": "P1" | "P2" | "P3" | "P4" | null,
     "asset_name": "<verbatim asset/system mentioned>" | null,
-    "alert_type": "<verbatim issue description from content>" | null,
+    "alert_type": "<verbatim log signature / error code / fingerprint, OR human description as fallback>" | null,
     "customer": "<verbatim customer/organization name>" | null,
     "location": "<verbatim location>" | null,
     "users_impacted_count": integer | null,
@@ -52,6 +52,31 @@ Output schema (JSON array):
   }},
   ...
 ]
+
+ALERT TYPE EXTRACTION — STRICT PRIORITY HIERARCHY:
+The `alert_type` field must reflect the most MACHINE-GREPPABLE form of the issue mentioned in the content. Tier-2 engineers grep these strings against current-incident logs, so a log signature beats a human paraphrase every time.
+
+When the content contains MORE THAN ONE form of the issue, pick the highest-priority form below:
+
+  Priority 1 — LOG SIGNATURES (cisco-style or similar log lines).
+    Format: %FACILITY-SEVERITY-MNEMONIC: <message>
+    Examples that MUST be picked verbatim when present:
+      "%BFD-6-ADJ_CHANGE: Adj Down - Control Timer Expired"
+      "%BGP-5-ADJCHANGE: neighbor 10.255.0.1 Down - BFD down"
+      "%LINEPROTO-5-UPDOWN: Line protocol on Interface ..."
+      "%LINK-3-UPDOWN: Interface ... changed state to down"
+
+  Priority 2 — ERROR CODES / TICKET FINGERPRINTS.
+    Examples: "ERR-1234", "BGP-3-NOTIFICATION", "INSIDE_WIRING_FAIL",
+    "Control Plane CPU > 95%", "TTL 252 (Actual)", "Authentication failure".
+
+  Priority 3 — HUMAN DESCRIPTION (fallback ONLY when no log line / error code is in the content).
+    Examples: "BGP neighbor down", "Slow checkout transaction",
+    "Fax line not working".
+
+If a log signature AND a human paraphrase both appear in the content, you MUST pick the log signature. Do NOT pick "BGP neighbor down" when the content also says "%BFD-6-ADJ_CHANGE: Adj Down - Control Timer Expired" — pick the latter.
+
+The `evidence.alert_type` substring MUST be the verbatim source text for whichever priority you picked.
 
 Severity decoding (apply only what's actually written):
 - "P1" / "P2" / "P3" / "P4" / "Sev 1-4" / "Severity 1-4" → use directly

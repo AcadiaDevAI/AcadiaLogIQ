@@ -20,8 +20,8 @@ import { LoadingOutlined, MessageOutlined } from "@ant-design/icons";
 import { useChat } from "../../../hooks/ChatContext";
 import { askQuestion, getSession } from "../../../services/api";
 import DislikeButton from "./DislikeButton";
+import EscalateButton from "./EscalateButton";
 import HelpfulButton from "./HelpfulButton";
-import NextStageButton from "./NextStageButton";
 import { STAGE_LABELS } from "../tier1Constants";
 import { postJourneyEvent, searchKbHandoff } from "./journeyApi";
 
@@ -195,12 +195,20 @@ export default function Stage4SearchKBHandoff({
             stage="stage_4"
           />
         </div>
-        <NextStageButton
+        {/* Sprint 13.28 — Stage 4's "advance" CTA IS the escalation, so
+            we wire it through EscalateButton (same component every other
+            stage uses) instead of a relabeled NextStageButton. This
+            restores the trigger-classification modal that NextStageButton
+            doesn't know about. EscalateButton internally posts the same
+            `next_stage_clicked` telemetry with `{to: "stage_5"}` and
+            invokes onReveal("stage_5"), so the post-modal flow is
+            byte-identical to the previous behaviour — only the modal
+            popup is added on top. */}
+        <EscalateButton
           sessionId={sessionId}
           fromStage="stage_4"
-          toStage="stage_5"
-          label="Escalate to Tier-2"
           onReveal={onReveal}
+          label="Escalate to Tier-2"
         />
       </div>
     </Card>
