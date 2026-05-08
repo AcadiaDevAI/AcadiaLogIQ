@@ -161,7 +161,7 @@ export default function Stage0BestTicketDistillation({
           (Resolution_Steps) to `top5_incident_summaries`
           (Incident_Summary.INCIDENT). Heading renamed "How they did
           it" → "Possible details are". Per-bullet button label
-          renamed "Ask in chat" → "Discuss with Logic". The
+          renamed "Ask in chat" → "Discuss with LogIQ". The
           ` - INC-XXX` suffix shape is preserved on the new field so
           `extractTrailingIncidentId` keeps scoping the per-bullet
           chat handoff to the right source ticket. The legacy

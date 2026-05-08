@@ -114,7 +114,7 @@ def _opening_paragraph(
     Time data sources:
       * Stage 3 (Guided Troubleshooting Workflow) duration
       * Stage 4 (Search KB / SOP Reference) duration
-      * Discuss-with-Logic chat sessions (count + total seconds)
+      * Discuss-with-LogIQ chat sessions (count + total seconds)
       * Search-KB chat sessions (count + total seconds)
     """
     metrics = time_metrics or {}
@@ -135,7 +135,7 @@ def _opening_paragraph(
     kb_secs = int(metrics.get("kb_chat_seconds", 0) or 0)
     total_secs = int(metrics.get("total_journey_seconds", 0) or 0)
 
-    # Set of incident IDs the engineer engaged via Discuss-with-Logic
+    # Set of incident IDs the engineer engaged via Discuss-with-LogIQ
     # chat. Powers the historical bullet's engagement-aware phrasing —
     # opening a per-ticket chat IS opening that ticket "in detail" even
     # when Stage 2's panel was never visited.
@@ -153,7 +153,7 @@ def _opening_paragraph(
     # the engineer's natural triage flow:
     #   1. triage complete (always)
     #   2. historical tickets (Stage 0 / 2 / pivot — surfaced first)
-    #   3. discuss with logic (per-bullet chats off the historical list)
+    #   3. discuss with LogIQ (per-bullet chats off the historical list)
     #   4. guided troubleshooting workflow (Stage 3)
     #   5. search KB / SOP reference (Stage 4 — last-resort lookup)
     #   6. total time
@@ -179,7 +179,7 @@ def _opening_paragraph(
     inc_str = ", ".join(incidents) if incidents else ""
 
     # Sprint 13.29 — engagement-aware phrasing. If the engineer
-    # opened a Discuss-with-Logic chat on at least one of the cohort
+    # opened a Discuss-with-LogIQ chat on at least one of the cohort
     # tickets, that ticket WAS opened in detail — even if Stage 2's
     # panel was never visited. Cohort-restricted set so a stray chat
     # scoped to a non-cohort ticket doesn't change the framing.
@@ -219,7 +219,7 @@ def _opening_paragraph(
         else:
             bullets.append(header[:-1] + ".")
 
-    # ── 3. Discuss with Logic — per-bullet ticket chats ──────────
+    # ── 3. Discuss with LogIQ — per-bullet ticket chats ──────────
     # Sprint 13.29 — name the engaged ticket(s) alongside their
     # individual durations. Single chat → "INC-X (1m 21s)";
     # multi-chat → "INC-A (1m 21s), INC-B (45s); 2m 6s total".
@@ -231,7 +231,7 @@ def _opening_paragraph(
         )
         if discuss_count == 1:
             bullets.append(
-                f"- Discuss with Logic: per-ticket chat for {per_chat}."
+                f"- Discuss with LogIQ: per-ticket chat for {per_chat}."
             )
         else:
             total_str = (
@@ -239,7 +239,7 @@ def _opening_paragraph(
                 if discuss_secs > 0 else ""
             )
             bullets.append(
-                f"- Discuss with Logic: {discuss_count} per-ticket chat "
+                f"- Discuss with LogIQ: {discuss_count} per-ticket chat "
                 f"sessions — {per_chat}{total_str}."
             )
     elif discuss_count > 0:
@@ -251,13 +251,13 @@ def _opening_paragraph(
             if discuss_secs > 0 else ""
         )
         bullets.append(
-            f"- Discuss with Logic: {discuss_count} per-ticket chat session"
+            f"- Discuss with LogIQ: {discuss_count} per-ticket chat session"
             + ("s" if discuss_count != 1 else "")
             + dur_str + "."
         )
     else:
         bullets.append(
-            "- Discuss with Logic: no per-ticket chat sessions opened."
+            "- Discuss with LogIQ: no per-ticket chat sessions opened."
         )
 
     # ── 4. Guided Troubleshooting Workflow ───────────────────────

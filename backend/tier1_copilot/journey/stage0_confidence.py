@@ -352,7 +352,7 @@ def _top5_incident_summaries(cohort: List[Dict[str, Any]]) -> List[str]:
     Used by the Stage 0 "Possible details are" bullet list. Replaces
     `_top5_first_steps` as the rendered bullet content while keeping
     the same retrieval-rank ordering and the same trailing-incident
-    suffix contract — so the per-bullet "Discuss with Logic" button
+    suffix contract — so the per-bullet "Discuss with LogIQ" button
     can still extract the ticket id and scope the chat to that
     ticket without any frontend regex changes.
 

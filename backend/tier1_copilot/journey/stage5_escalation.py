@@ -69,7 +69,7 @@ def compute_journey_time_metrics(session_id: str) -> Dict[str, Any]:
       * `stage_durations` — {stage_id: int_seconds, ...} for any
         stage with two or more events (rendered + advance).
       * `discuss_chat_count`, `discuss_chat_seconds` — Stage 0
-        per-bullet "Discuss with Logic" chats (chat_sessions where
+        per-bullet "Discuss with LogIQ" chats (chat_sessions where
         `scope_incident_id` is set + `metadata.journey_session_id`
         matches this journey).
       * `kb_chat_count`, `kb_chat_seconds` — Stage 4 Search-KB
@@ -84,7 +84,7 @@ def compute_journey_time_metrics(session_id: str) -> Dict[str, Any]:
         "stage_durations": {},
         "discuss_chat_count": 0,
         "discuss_chat_seconds": 0,
-        # Sprint 13.29 — per-chat breakdown for the Discuss-with-Logic
+        # Sprint 13.29 — per-chat breakdown for the Discuss-with-LogIQ
         # bullet so the handoff note can name the engaged ticket(s)
         # alongside total time. Each entry: {"incident_id": str,
         # "seconds": int}. Order matches chat_sessions.created_at ASC.
@@ -148,7 +148,7 @@ def compute_journey_time_metrics(session_id: str) -> Dict[str, Any]:
         except Exception:
             pass
 
-    # ── Chat-session aggregates: Discuss-with-Logic vs Search-KB ──
+    # ── Chat-session aggregates: Discuss-with-LogIQ vs Search-KB ──
     # Sprint 13.28 — corrected JOIN. The journey_session_id is NOT on
     # chat_sessions (that table has no metadata_json column); it's
     # folded into the FIRST chat_messages row's sources_json under the
@@ -158,7 +158,7 @@ def compute_journey_time_metrics(session_id: str) -> Dict[str, Any]:
     # The pre-13.28 query targeted a column that doesn't exist, so
     # discuss_chat_count and kb_chat_count were always 0 in the
     # Tier-2 handoff opener — even when the engineer had clearly
-    # opened a Discuss-with-Logic chat. Fix: EXISTS sub-select against
+    # opened a Discuss-with-LogIQ chat. Fix: EXISTS sub-select against
     # chat_messages.sources_json.
     # `scope_incident_id` (a real column on chat_sessions, set by the
     # per-bullet handoff's UPDATE) still distinguishes Discuss chats

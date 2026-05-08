@@ -32,7 +32,7 @@ class Stage0BestTicketDistillation(BaseModel):
     # lines, suffixed with " - <Incident_Number>". Drives the Stage 0
     # "Possible details are" bullet list. Same retrieval-rank order
     # and same trailing-id contract as `how_they_did_it` so the
-    # per-bullet Discuss-with-Logic scoping regex still works.
+    # per-bullet Discuss-with-LogIQ scoping regex still works.
     top5_incident_summaries: List[str] = Field(default_factory=list)
     critical_intervention: Optional[str] = None
     # Collapsed stats tail (frontend renders behind a <Collapse>)

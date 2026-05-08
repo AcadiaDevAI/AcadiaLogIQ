@@ -1,8 +1,8 @@
-"""Sprint 13.15 — JSON-first scoped chat for "Discuss with Logic".
+"""Sprint 13.15 — JSON-first scoped chat for "Discuss with LogIQ".
 
 When a chat session is scoped to a specific Incident_Number (set via
 ``chat_sessions.scope_incident_id`` by the per-bullet
-Discuss-with-Logic handoff), every ``/ask`` should answer from THAT
+Discuss-with-LogIQ handoff), every ``/ask`` should answer from THAT
 ticket's complete structured JSON — not via cosine-similarity search
 over a subset of its chunks.
 

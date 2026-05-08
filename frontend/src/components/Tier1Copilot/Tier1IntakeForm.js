@@ -60,6 +60,27 @@ function SourceAwareIntake(props) {
   return (
     <div className="flex-1 overflow-y-auto px-4 py-6 t-bg-primary">
       <div className="w-full" style={{ maxWidth: 1280, margin: "0 auto" }}>
+        {/* Sprint 13.30 — page-level title above the Proactive | Reactive
+            split. Sized noticeably larger than the per-column headers
+            (Proactive / Reactive at 18px) so it reads as the section
+            title for the whole intake landing. The bottom margin pushes
+            the two columns down a little so the title has breathing
+            room. */}
+        <div style={{ textAlign: "center", marginBottom: 28 }}>
+          <h1
+            className="t-text"
+            style={{
+              fontSize: 28,
+              fontWeight: 700,
+              letterSpacing: "-0.02em",
+              margin: 0,
+              lineHeight: 1.25,
+            }}
+          >
+            LogIQ – Operational Intelligence Platform
+          </h1>
+        </div>
+
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
           {/* Proactive — structured alert form */}
           <div>
