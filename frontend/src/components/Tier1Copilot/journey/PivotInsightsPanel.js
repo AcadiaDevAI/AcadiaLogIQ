@@ -103,37 +103,50 @@ function DoNotChaseSection({ data }) {
     <div>
       <Title level={5} style={{ marginTop: 0 }}>
         <CloseCircleOutlined style={{ marginRight: 8 }} />
-        {/* Sprint 10.4 §2.1 — "What NOT to chase" → "Known dead ends" */}
-        Known dead ends
+        {/* Sprint 13.3 — reverted "Known dead ends" → "What NOT to chase"
+            so the heading matches the spec wording the LLM synthesis
+            prompt is also based on. */}
+        What NOT to chase
       </Title>
 
       {isEmpty ? (
         <Paragraph type="secondary">{emptyCopy}</Paragraph>
       ) : (
-        <List
-          itemLayout="vertical"
-          size="small"
-          dataSource={data.entries}
-          renderItem={(entry, idx) => (
-            <List.Item key={`${entry.misleading_signal}-${idx}`} style={{ paddingBottom: 8 }}>
-              <div>
-                <Text strong>{entry.misleading_signal}</Text>
-                <Tag style={{ marginLeft: 8 }}>seen {entry.occurrence_count}×</Tag>
-              </div>
-              {entry.rule_out_logic ? (
-                <Paragraph style={{ marginTop: 4, marginBottom: 4 }}>
-                  <Text type="secondary">Why: </Text>
-                  {entry.rule_out_logic}
-                </Paragraph>
-              ) : null}
-              {entry.seen_in_incidents && entry.seen_in_incidents.length > 0 ? (
-                <Text type="secondary" style={{ fontSize: 12 }}>
-                  Seen in: {entry.seen_in_incidents.join(", ")}
-                </Text>
-              ) : null}
-            </List.Item>
-          )}
-        />
+        <>
+          {/* Sprint 13.4 — render strictly to spec: misleading_signal +
+              rule-out logic. The previous "seen N×" tag, "Why:" prefix,
+              and "Seen in: <incident>" footer were UI decoration not
+              in the procedure spec — they made the panel feel cluttered
+              and competed with the LLM-synthesised prose. */}
+          <List
+            itemLayout="vertical"
+            size="small"
+            dataSource={data.entries}
+            renderItem={(entry, idx) => (
+              <List.Item key={`${entry.misleading_signal}-${idx}`} style={{ paddingBottom: 8 }}>
+                <div>
+                  <Text strong>{entry.misleading_signal}</Text>
+                </div>
+                {entry.rule_out_logic ? (
+                  <Paragraph style={{ marginTop: 4, marginBottom: 0 }}>
+                    {entry.rule_out_logic}
+                  </Paragraph>
+                ) : null}
+              </List.Item>
+            )}
+          />
+          {/* Sprint 13.3 — small footnote when the LLM polish pass
+              didn't run; engineer sees verbatim source text. Mirrors
+              Stage 3's "(verbatim source — synthesis unavailable)". */}
+          {data.synthesis_skipped ? (
+            <Paragraph
+              type="secondary"
+              style={{ marginTop: 4, marginBottom: 0, fontSize: 12 }}
+            >
+              (Showing verbatim source text — synthesis unavailable.)
+            </Paragraph>
+          ) : null}
+        </>
       )}
     </div>
   );
@@ -167,9 +180,23 @@ export default function PivotInsightsPanel({
 
   return (
     <Card style={{ marginBottom: 16, borderLeft: "4px solid #C9870B" }}>
-      {showSmokingGun && <SmokingGunSection data={smokingGun} />}
+      {/* Sprint 13.10 — "What to look for" (Smoking Gun) section
+          suppressed at the user's request. Backend still computes
+          `smoking_gun` and ships it on /initial; only the JSX render
+          is commented. Reinstate by un-commenting the line below
+          if the Smoking Gun half is ever wanted again. */}
+      {/* {showSmokingGun && <SmokingGunSection data={smokingGun} />} */}
+      {/* Sprint 13.9 — "What NOT to chase" section suppressed at the
+          user's request. Backend still computes `do_not_chase` and
+          ships it on /initial; only the JSX render is commented.
+          The Divider above it is also suppressed since with
+          DoNotChaseSection gone there's nothing for it to separate.
+          Reinstate by un-commenting the two lines below; no other
+          plumbing change required. */}
+      {/*
       {showSmokingGun && <Divider style={{ margin: "16px 0" }} />}
       <DoNotChaseSection data={doNotChase} />
+      */}
 
       {/* Single Helpful + single next-stage button. */}
       <div

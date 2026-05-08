@@ -75,14 +75,29 @@ export async function fetchEscalationRouting(sessionId) {
   return data;
 }
 
-// Sprint 12.7 — POST /tier1/journey/{session_id}/escalation-handoff-note
-// → {note, used_fallback}. LLM-generated Tier-2 escalation note matching
-// the spec template. Triggered by the "Generate Tier 2 Escalation Handoff"
-// button. Backend is failure-open — never throws — so a non-2xx here
-// signals a transport-layer issue, not a generation failure.
-export async function generateEscalationHandoffNote(sessionId) {
+// Sprint 13.19 — POST /tier1/journey/{session_id}/escalation-handoff-note
+// → {note, used_fallback}. Body now carries the Stage 3 checkbox
+// state ({attempted_step_numbers: [1, 3]}) so the deterministic
+// note backend can include only the steps the engineer actually
+// ticked. Empty array (or missing body) → no diagnostic bullets;
+// the note honestly states the engineer didn't mark any steps.
+//
+// Sprint 13.24 PERF — `force` flag bypasses the session-keyed
+// consolidated-ledger cache. Auto-fetch on mount uses cache (fast);
+// the Regenerate button passes force=true for a fresh LLM call.
+export async function generateEscalationHandoffNote(
+  sessionId,
+  attemptedStepNumbers,
+  { force = false } = {},
+) {
   const { data } = await api.post(
     `/tier1/journey/${encodeURIComponent(sessionId)}/escalation-handoff-note`,
+    {
+      attempted_step_numbers: Array.isArray(attemptedStepNumbers)
+        ? attemptedStepNumbers
+        : [],
+      force: !!force,
+    },
   );
   return data;
 }

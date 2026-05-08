@@ -29,12 +29,18 @@ import { Button, Tooltip, message as antMessage } from "antd";
 import { ArrowLeftOutlined, ExportOutlined } from "@ant-design/icons";
 
 import { useChat } from "../../hooks/ChatContext";
+import EscalationReasonModal from "../Tier1Copilot/journey/EscalationReasonModal";
 import { postJourneyEvent } from "../Tier1Copilot/journey/journeyApi";
 
 
 export default function JourneyMessageActions({ journeySessionId }) {
   const { dispatch } = useChat();
   const [escalating, setEscalating] = React.useState(false);
+  // Sprint 13.25 — chat-side Escalate to Tier 2 also opens the
+  // trigger-classification modal first, mirroring the in-journey
+  // EscalateButton. Click → modal → Submit → existing telemetry +
+  // RESUME_JOURNEY dispatch.
+  const [modalOpen, setModalOpen] = React.useState(false);
 
   if (!journeySessionId) return null;
 
@@ -49,8 +55,15 @@ export default function JourneyMessageActions({ journeySessionId }) {
     });
   };
 
-  const handleEscalate = async () => {
+  const handleEscalateClick = () => {
     if (escalating) return;
+    setModalOpen(true);
+  };
+
+  // Sprint 13.25 — `handleEscalateProceed` is the body of the
+  // pre-13.25 click handler. The modal calls this AFTER the
+  // engineer submits the trigger-classification form.
+  const handleEscalateProceed = async () => {
     setEscalating(true);
     try {
       // Sprint 10.7 §4.3 — fire TWO events in order:
@@ -108,11 +121,18 @@ export default function JourneyMessageActions({ journeySessionId }) {
           size="small"
           icon={<ExportOutlined />}
           loading={escalating}
-          onClick={handleEscalate}
+          onClick={handleEscalateClick}
         >
           Escalate to Tier 2
         </Button>
       </Tooltip>
+      <EscalationReasonModal
+        open={modalOpen}
+        sessionId={journeySessionId}
+        fromStage="chat"
+        onClose={() => setModalOpen(false)}
+        onProceed={handleEscalateProceed}
+      />
     </>
   );
 }

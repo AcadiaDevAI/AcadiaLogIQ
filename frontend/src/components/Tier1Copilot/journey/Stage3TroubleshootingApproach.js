@@ -19,7 +19,7 @@
 //   [Helpful] [Search KB / SOP ▶]
 
 import React, { useState } from "react";
-import { Button, Card, Collapse, List, Tooltip, Typography } from "antd";
+import { Button, Card, Checkbox, Collapse, List, Tooltip, Typography } from "antd";
 import { MessageOutlined } from "@ant-design/icons";
 
 import DislikeButton from "./DislikeButton";
@@ -72,9 +72,143 @@ function TruncatedText({ text }) {
 
 
 // ────────────────────────────────────────────────────────────
+// Sprint 13.12 — Consolidated 5-step Tier-1 read-only ledger.
+// Single flat numbered list replacing the per-ticket Guided
+// Workflows view. LLM filters for safe show/read-only actions and
+// caps at 5 steps; backend handles synthesis + safety enforcement.
+// ────────────────────────────────────────────────────────────
+// Sprint 13.14.1 — gray border + gray checked fill so the box is
+// visible against the white card background. AntD's default border
+// is near-invisible on light themes; we override the inner element's
+// border + background via a scoped class injected once below. The
+// strikethrough on the action text was removed at the user's
+// request — checked rows now stay full-strength so the engineer
+// can still re-read the step content.
+const ATTEMPTED_CHECKBOX_CSS = `
+.acadia-attempted-checkbox .ant-checkbox-inner {
+  border-color: #6b7280;
+  background-color: #ffffff;
+}
+.acadia-attempted-checkbox:hover .ant-checkbox-inner,
+.acadia-attempted-checkbox .ant-checkbox-checked .ant-checkbox-inner {
+  border-color: #4b5563;
+}
+.acadia-attempted-checkbox .ant-checkbox-checked .ant-checkbox-inner {
+  background-color: #6b7280;
+}
+.acadia-attempted-checkbox .ant-checkbox-checked .ant-checkbox-inner::after {
+  border-color: #ffffff;
+}
+`;
+
+
+function ConsolidatedSteps({ steps, attemptedSteps, onToggleAttempt }) {
+  // Sprint 13.14 — per-step "attempted" tracking.
+  // Sprint 13.19 — state LIFTED to ResolutionJourney. The lifted
+  // state is what the Stage 5 handoff note reads via POST body so
+  // the Tier-2 report only references checks the engineer actually
+  // ticked. ConsolidatedSteps is now a controlled component:
+  // `attemptedSteps` map + `onToggleAttempt` callback come in via
+  // props.
+  const safeMap = attemptedSteps || {};
+  const handleToggle = (stepNumber) => {
+    if (typeof onToggleAttempt === "function") {
+      onToggleAttempt(stepNumber);
+    }
+  };
+
+  if (!steps || steps.length === 0) return null;
+  return (
+    <>
+      {/* Sprint 13.14.1 — scoped gray-tone styles for the attempted
+          checkboxes. Rendered once per component mount; the class
+          name is unique enough to avoid colliding with any global
+          AntD overrides. */}
+      <style>{ATTEMPTED_CHECKBOX_CSS}</style>
+      {/* Sprint 13.14.2 — instruction line so the engineer knows
+          why the checkboxes are there. The Tier-2 wiring is queued
+          for a follow-up sprint, but the copy already references
+          escalation so engineers form the right habit now. */}
+      <Paragraph
+        type="secondary"
+        style={{ fontSize: 12, marginTop: 4, marginBottom: 8 }}
+      >
+        Tick any step you have already tried that did not resolve the
+        issue. Your selections flow into the Tier-2 handoff note when
+        the ticket is escalated, so the next engineer can pick up
+        where you left off.
+      </Paragraph>
+      <ol
+        style={{
+          paddingLeft: 20,
+          marginBottom: 16,
+          marginTop: 8,
+          listStyleType: "none",
+        }}
+      >
+        {steps.map((s) => {
+          const checked = !!safeMap[s.step_number];
+          return (
+            <li key={s.step_number} style={{ marginBottom: 14 }}>
+              <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                <Tooltip
+                  title={
+                    checked
+                      ? "Marked attempted — will be included in the Tier-2 escalation handoff."
+                      : "Mark this step as attempted"
+                  }
+                >
+                  <Checkbox
+                    checked={checked}
+                    onChange={() => handleToggle(s.step_number)}
+                    className="acadia-attempted-checkbox"
+                    style={{ marginTop: 4 }}
+                    aria-label={`Mark Step ${s.step_number} as attempted`}
+                  />
+                </Tooltip>
+                <div style={{ flex: 1 }}>
+                  <div>
+                    <Text strong>Step {s.step_number}: </Text>
+                    {/* Sprint 13.14.1 — strikethrough on checked rows
+                        removed at the user's request; action text
+                        stays full-strength regardless of state. */}
+                    <Text>{s.action}</Text>
+                  </div>
+                  {s.command ? (
+                    <div style={{ marginTop: 4 }}>
+                      <Text code>{s.command}</Text>
+                    </div>
+                  ) : null}
+                  {s.intent ? (
+                    <Paragraph style={{ marginTop: 4, marginBottom: 2 }}>
+                      <Text type="secondary">Why: </Text>
+                      {s.intent}
+                    </Paragraph>
+                  ) : null}
+                  {s.pivot ? (
+                    <Paragraph style={{ marginTop: 0, marginBottom: 0 }}>
+                      <Text type="secondary">Outcome: </Text>
+                      {s.pivot}
+                    </Paragraph>
+                  ) : null}
+                </div>
+              </div>
+            </li>
+          );
+        })}
+      </ol>
+    </>
+  );
+}
+
+
+// ────────────────────────────────────────────────────────────
 // Sprint 13 — Guided Workflow rendering (per-ticket grouped).
 // One Collapse panel per cohort ticket; each panel contains that
 // ticket's full step playbook with LLM-synthesised Intent + Pivot.
+// Sprint 13.12 — kept on disk but no longer rendered. Reinstate
+// the JSX call in the main component if the per-ticket view is
+// ever wanted again.
 // ────────────────────────────────────────────────────────────
 function GuidedWorkflowStepItem({ step }) {
   return (
@@ -387,16 +521,26 @@ export default function Stage3TroubleshootingApproach({
   onStartNewTicket,
   onReveal,
   helpfulMarked,
+  // Sprint 13.19 — checkbox state lifted to ResolutionJourney so
+  // Stage 5's handoff-note POST can read it. Stage 3 is now a
+  // controlled passthrough: receives the map, forwards toggles
+  // back via the callback. Defaults make it backward-compatible
+  // for any callsite that doesn't pass these props yet.
+  attemptedStepsByStep3 = {},
+  onToggleAttemptedStep,
 }) {
   // Sprint 11 — single chat-handoff hook for the whole stage.
   // Shared between every per-ticket Resolution Step "Ask" link so
   // the busy state covers all of them at once.
   const { busy: handoffBusy, askInChat } = useChatHandoff(sessionId);
 
-  // Sprint 13 — guided_workflows is the new primary surface.
-  // Per-ticket details (Sprint 11) is preserved unchanged.
-  const hasGuidedWorkflows = (
-    data && Array.isArray(data.guided_workflows) && data.guided_workflows.length > 0
+  // Sprint 13.12 — `consolidated_steps` is the new primary surface:
+  // a single LLM-merged 5-step Tier-1 read-only ledger. The Sprint 13
+  // per-ticket `guided_workflows` view has been retired from the UI
+  // (kept on the schema for back-compat). Per-ticket detail
+  // accordion (Sprint 11) is preserved unchanged.
+  const hasConsolidated = (
+    data && Array.isArray(data.consolidated_steps) && data.consolidated_steps.length > 0
   );
   const hasDetails = (
     data && Array.isArray(data.per_ticket_details)
@@ -412,7 +556,7 @@ export default function Stage3TroubleshootingApproach({
     ))
   );
 
-  if (!hasGuidedWorkflows && !hasDetails) {
+  if (!hasConsolidated && !hasDetails) {
     return (
       <Card style={{ marginBottom: 16, borderLeft: "4px solid #6B6B6B" }}>
         <Title level={5} style={{ marginTop: 0 }}>
@@ -431,10 +575,35 @@ export default function Stage3TroubleshootingApproach({
         Guided Troubleshooting Workflow
       </Title>
 
-      {hasGuidedWorkflows ? (
-        <GuidedWorkflows workflows={data.guided_workflows} />
+      {/* Sprint 13.12 — single 5-step read-only ledger replaces the
+          per-ticket Guided Workflows render. LLM-synthesised; safe
+          for a Tier-1 engineer with read-only access. When the
+          backend ships an empty list (LLM down or no candidates),
+          a small footnote replaces the list and the per-ticket
+          detail accordion below still renders. */}
+      {hasConsolidated ? (
+        <ConsolidatedSteps
+          steps={data.consolidated_steps}
+          attemptedSteps={attemptedStepsByStep3}
+          onToggleAttempt={onToggleAttemptedStep}
+        />
+      ) : data?.consolidated_synthesis_skipped ? (
+        // Sprint 13.13 — "see per-ticket detail below" reference
+        // dropped because the per-ticket detail accordion is now
+        // commented out. Engineer sees a generic "unavailable" line.
+        <Paragraph type="secondary" style={{ fontSize: 12, marginBottom: 12 }}>
+          (Consolidated playbook unavailable — please retry or escalate.)
+        </Paragraph>
       ) : null}
 
+      {/* Sprint 13.13 — "Per-ticket troubleshooting detail (N)"
+          accordion suppressed at the user's request. The Sprint 11
+          PerTicketDetails component, the data builder
+          `_build_per_ticket_details`, and the `per_ticket_details[]`
+          schema field all remain on disk so reinstating is a single
+          comment-toggle. Backend still computes and ships the data
+          on /stage-3; only the JSX render is commented. */}
+      {/*
       {hasDetails ? (
         <PerTicketDetails
           details={data.per_ticket_details}
@@ -443,6 +612,7 @@ export default function Stage3TroubleshootingApproach({
           askInChatBusy={handoffBusy}
         />
       ) : null}
+      */}
 
       <div
         style={{

@@ -1,31 +1,54 @@
-"""Sprint 12.7 — Tier-2 Escalation Handoff Note generator.
+"""Sprint 13.19 — Tier-2 Escalation Handoff Note generator (deterministic).
 
-Implements the user-supplied prompt verbatim. The note is produced
-when an engineer clicks "Generate Tier 2 Escalation Handoff" on the
-Operational Handoff card; the resulting text is meant to be pasted
-straight into the Tier-2 ticket / ServiceNow / runbook.
+Architectural reset: the prior LLM-driven generator was hallucinating
+diagnostic checks pulled from cohort context even when the engineer
+had never opened the Guided Troubleshooting Workflow or ticked any
+boxes. Every section of this note is structured data with a 1:1
+mapping to text — there is no synthesis task left for an LLM to add
+value to. So this module now does pure template-fill and returns the
+same shape (`(note: str, used_fallback: bool)`) the route expects.
 
-Inputs (per cohort ticket):
-  - Metadata.Incident_Number                              → list of IDs
-  - Executive_Sharable_RCA.Resolution_Steps               → diagnostic context
-  - Operational_SOP.diagnostic_logic_chunks               → diagnostic context
-  - Troubleshooting_Ledger.Diagnostic_Tests_Executed      → diagnostic context
+Inputs the route gathers and passes in:
+  * cohort               — for incident-number list
+  * attempted_steps      — Stage 3 consolidated steps the engineer
+                           ACTUALLY ticked (filtered upstream by the
+                           POST body's `attempted_step_numbers`).
+                           When the list is empty, no diagnostic
+                           bullets render.
+  * stage_3_visited      — bool from traversal_log.
+  * stage_4_visited      — bool from traversal_log.
+  * kb_chat_engaged      — bool (whether engineer chatted with the
+                           KB after opening Stage 4).
+  * routing              — Stage 5 routing aggregation.
+  * contacts_payload     — affected_customer + customer_contacts +
+                           vendor_contacts + directory_contacts.
 
-Output:
-  Plain-text note matching the spec template (4 sections: header,
-  ticket-list line, Diagnostic Summary, Reason for Escalation).
+Output rules — strict, no LLM:
+  * Diagnostic Summary section adapts to the engineer's actual
+    journey:
+      - Stage 3 visited AND ≥ 1 step ticked → bulleted list of
+        ticked steps' action text.
+      - Stage 3 visited AND zero ticks       → "Tier 1 reviewed the
+        Guided Troubleshooting Workflow but did not mark any
+        individual steps as attempted."
+      - Stage 3 NOT visited                   → "Tier 1 did not open
+        the Guided Troubleshooting Workflow during this triage."
+  * Stage 4 / KB chat status appended as a short coverage note when
+    the engineer didn't open Search KB / SOP or didn't engage the
+    chat — so Tier-2 sees gaps explicitly.
+  * Reason for Escalation, Routing & Vendor block, Contact Details
+    block — bullets, deterministic.
 
-Failure stance:
-  Failure-open. LLM errors fall back to a deterministic template-fill
-  using a heuristic 1-sentence summary so the button never produces
-  a blank. ``used_fallback=True`` flagged on the response so callers
-  can surface a small "regenerate" hint.
+`used_fallback` always returns False under this pure-deterministic
+build (the prior flag tracked LLM failure; with no LLM there's no
+failure mode to flag). Kept on the response for back-compat.
 """
 from __future__ import annotations
 
 import logging
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
+from .schemas import ConsolidatedStep, EscalationRouting
 from .stage2_historical import _flatten, _safe_get
 
 
@@ -33,7 +56,7 @@ logger = logging.getLogger("acadia-log-iq")
 
 
 # ─────────────────────────────────────────────────────────────
-# Source extraction
+# Source extraction helpers
 # ─────────────────────────────────────────────────────────────
 def _coerce_str(v: Any) -> Optional[str]:
     if v is None:
@@ -55,160 +78,344 @@ def _extract_incident_numbers(cohort: List[Dict[str, Any]]) -> List[str]:
     return out
 
 
-def _extract_diagnostic_corpus(cohort: List[Dict[str, Any]]) -> List[str]:
-    """Pull every diagnostic-relevant string from the three source
-    fields. The LLM reads this flat list and synthesises a 1-2
-    sentence summary; the heuristic fallback also uses it.
+# ─────────────────────────────────────────────────────────────
+# Block builders — each one is independent and never invents data
+# ─────────────────────────────────────────────────────────────
+def _format_duration_secs(seconds: int) -> str:
+    """Local copy of stage5_escalation._format_duration so the handoff
+    note module stays import-light (no circular dep risk)."""
+    if seconds is None or seconds < 0:
+        return "0s"
+    s = int(round(seconds))
+    if s < 60:
+        return f"{s}s"
+    m, sec = divmod(s, 60)
+    if m < 60:
+        return f"{m}m {sec}s" if sec > 0 else f"{m}m"
+    h, m2 = divmod(m, 60)
+    return f"{h}h {m2}m" if m2 > 0 else f"{h}h"
+
+
+def _opening_paragraph(
+    incidents: List[str],
+    stage_2_visited: bool,
+    stage_3_visited: bool,
+    stage_4_visited: bool,
+    kb_chat_engaged: bool,
+    time_metrics: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Sprint 13.20 / 13.26 — dynamic bullet-formatted opener.
+
+    Each clause that used to be in a single prose sentence is now its
+    own bullet, with time-on-task data appended when available
+    (stage durations from tier1_journey_events; chat-session totals
+    from chat_sessions joined by journey_session_id metadata).
+
+    Time data sources:
+      * Stage 3 (Guided Troubleshooting Workflow) duration
+      * Stage 4 (Search KB / SOP Reference) duration
+      * Discuss-with-Logic chat sessions (count + total seconds)
+      * Search-KB chat sessions (count + total seconds)
     """
-    bag: List[str] = []
-    seen: set = set()
+    metrics = time_metrics or {}
+    stage_durations: Dict[str, int] = metrics.get("stage_durations", {}) or {}
 
-    def _add(s: Any) -> None:
-        v = _coerce_str(s)
-        if v and v.casefold() not in seen:
-            seen.add(v.casefold())
-            bag.append(v)
+    def _dur_for(stage_id: str) -> Optional[str]:
+        secs = stage_durations.get(stage_id)
+        if secs and secs > 0:
+            return _format_duration_secs(int(secs))
+        return None
 
-    for ticket in cohort or []:
-        if not isinstance(ticket, dict):
-            continue
+    discuss_count = int(metrics.get("discuss_chat_count", 0) or 0)
+    discuss_secs = int(metrics.get("discuss_chat_seconds", 0) or 0)
+    kb_count = int(metrics.get("kb_chat_count", 0) or 0)
+    kb_secs = int(metrics.get("kb_chat_seconds", 0) or 0)
+    total_secs = int(metrics.get("total_journey_seconds", 0) or 0)
 
-        # Resolution_Steps
-        rsteps = _safe_get(ticket, "Executive_Sharable_RCA", "Resolution_Steps")
-        if isinstance(rsteps, list):
-            for s in rsteps:
-                if isinstance(s, dict):
-                    _add(s.get("description") or s.get("action") or s.get("step"))
-                else:
-                    _add(s)
-        elif isinstance(rsteps, str):
-            _add(rsteps)
+    bullets: List[str] = []
+    bullets.append("- Tier 1 has completed initial triage.")
 
-        # diagnostic_logic_chunks → action + intent (context)
-        chunks = _safe_get(ticket, "Operational_SOP", "diagnostic_logic_chunks")
-        if isinstance(chunks, list):
-            for ch in chunks:
-                if not isinstance(ch, dict):
-                    continue
-                _add(ch.get("action") or ch.get("step_id") or ch.get("step"))
-                _add(ch.get("context") or ch.get("rationale") or ch.get("intent"))
+    # Search KB / SOP reference
+    stage4_dur = _dur_for("stage_4")
+    if stage_4_visited and kb_chat_engaged:
+        bits = ["consulted"]
+        if stage4_dur:
+            bits.append(f"{stage4_dur} on the panel")
+        if kb_count > 0 and kb_secs > 0:
+            bits.append(
+                f"{kb_count} chat session"
+                + ("s" if kb_count != 1 else "")
+                + f", {_format_duration_secs(kb_secs)} total"
+            )
+        elif kb_count > 0:
+            bits.append(f"{kb_count} chat session" + ("s" if kb_count != 1 else ""))
+        bullets.append(
+            f"- Search KB / SOP reference: {' (' .join([bits[0]] + [', '.join(bits[1:])]) + ')' if len(bits) > 1 else bits[0]}."
+        )
+    elif stage_4_visited:
+        bits = ["opened, no chat engaged"]
+        if stage4_dur:
+            bits.append(f"{stage4_dur} on the panel")
+        bullets.append(
+            f"- Search KB / SOP reference: {bits[0]}"
+            + (f" ({bits[1]})" if len(bits) > 1 else "")
+            + "."
+        )
+    else:
+        bullets.append(
+            "- Search KB / SOP reference: NOT consulted during this triage."
+        )
 
-        # Troubleshooting_Ledger.Diagnostic_Tests_Executed
-        tests = _safe_get(ticket, "Troubleshooting_Ledger", "Diagnostic_Tests_Executed")
-        if isinstance(tests, list):
-            for entry in tests:
-                if isinstance(entry, dict):
-                    _add(
-                        entry.get("name")
-                        or entry.get("description")
-                        or entry.get("test")
-                        or entry.get("action")
-                    )
-                else:
-                    _add(entry)
+    # Guided Troubleshooting Workflow
+    stage3_dur = _dur_for("stage_3")
+    if stage_3_visited:
+        bullets.append(
+            "- Guided Troubleshooting Workflow: opened"
+            + (f" ({stage3_dur} on the panel)" if stage3_dur else "")
+            + "."
+        )
+    else:
+        bullets.append(
+            "- Guided Troubleshooting Workflow: NOT opened during this triage."
+        )
 
-    return bag
+    # Discuss-with-Logic per-bullet ticket chats
+    if discuss_count > 0:
+        dur_str = (
+            f", {_format_duration_secs(discuss_secs)} total"
+            if discuss_secs > 0 else ""
+        )
+        bullets.append(
+            f"- Discuss with Logic: {discuss_count} per-ticket chat session"
+            + ("s" if discuss_count != 1 else "")
+            + dur_str + "."
+        )
+    else:
+        bullets.append(
+            "- Discuss with Logic: no per-ticket chat sessions opened."
+        )
+
+    # Historical tickets — list always present; phrasing depends on
+    # whether Stage 2 was opened in detail.
+    inc_str = ", ".join(incidents) if incidents else ""
+    if stage_2_visited:
+        if inc_str:
+            bullets.append(
+                f"- Similar historical tickets reviewed in detail: {inc_str}."
+            )
+        else:
+            bullets.append("- Similar historical tickets reviewed in detail.")
+    else:
+        if inc_str:
+            bullets.append(
+                f"- Historical tickets surfaced for context (not opened in "
+                f"detail): {inc_str}."
+            )
+
+    # Total journey time (when meaningfully > 0)
+    if total_secs > 0:
+        bullets.append(
+            f"- Total time on this triage: {_format_duration_secs(total_secs)}."
+        )
+
+    return (
+        "Please review this ticket for advanced intervention. The "
+        "triage activity summary is below:\n"
+        + "\n".join(bullets)
+    )
 
 
-# ─────────────────────────────────────────────────────────────
-# LLM prompt — spec verbatim
-# ─────────────────────────────────────────────────────────────
-_SYSTEM_PROMPT = """*Role & Objective:*
-You are an Expert IT Service Management Assistant. When the user triggers the "Generate Tier 2 Escalation Handoff" action, your task is to analyze the provided JSON payload of historical tickets and generate a concise, professional escalation note.
+def _diagnostic_block(
+    attempted_steps: List[ConsolidatedStep],
+    stage_3_visited: bool,
+    stage_4_visited: bool,
+    kb_chat_engaged: bool,
+) -> str:
+    """Diagnostic Summary — strictly mirrors the engineer's journey.
 
-The note must instill confidence in Tier 2 that Tier 1 did their job, while clearly stating that Tier 1 reached a hard knowledge/tooling boundary.
+    Bullets ONLY render for steps the engineer explicitly ticked;
+    coverage gaps for Stage 3 / Stage 4 / KB chat are appended as
+    short status sentences so Tier-2 sees what was and wasn't done.
+    """
+    lines: List[str] = []
 
-*Data Extraction Rules:*
-1. *Ticket Numbers:* Extract all ticket numbers from the Metadata.Incident_Number field in the provided JSON and combine them into a comma-separated list.
-2. *Diagnostic Summary:* Extract the execution steps from Executive_Sharable_RCA.Resolution_Steps, Operational_SOP.diagnostic_logic_chunks and Troubleshooting_Ledger.Diagnostic_Tests_Executed. Synthesize these steps into a single, brief summary sentence that describes the types of diagnostics performed (e.g., "We validated X, monitored Y for resource exhaustion, and evaluated Z."). Do not list individual steps, commands, intents, or pivots.
+    # Primary line — Stage 3 ticks
+    if not stage_3_visited:
+        lines.append(
+            "Tier 1 did not open the Guided Troubleshooting Workflow "
+            "during this triage."
+        )
+    elif not attempted_steps:
+        lines.append(
+            "Tier 1 reviewed the Guided Troubleshooting Workflow but "
+            "did not mark any individual steps as attempted."
+        )
+    else:
+        lines.append(
+            "Tier 1 has already reviewed/attempted the following "
+            "diagnostic checks:"
+        )
+        for s in attempted_steps:
+            lines.append(f"- {s.action}")
 
-*Output Constraint:*
-Do not output any conversational filler (e.g., "Here is your note"). Output ONLY the following formatted template, replacing the bracketed [...] sections with the dynamically generated data.
+    # Coverage gap — Stage 4 (Search KB / SOP)
+    if not stage_4_visited:
+        lines.append("")
+        lines.append(
+            "- Search KB / SOP reference was not consulted during "
+            "this triage."
+        )
+    elif not kb_chat_engaged:
+        lines.append("")
+        lines.append(
+            "- Search KB / SOP reference was opened, but no chat "
+            "was engaged with it."
+        )
 
----
-*Escalation to Tier 2: Triage Complete*
-
-Please review this ticket for advanced intervention. Tier 1 has completed all initial triage and exhausted standard operating procedures (SOPs). We have verified the core symptoms and performed a comprehensive review of similar historical tickets (*[Insert Comma-Separated List of Ticket Numbers here]*).
-
-*Diagnostic Summary:*
-[Insert the dynamically generated 1-2 sentence summary of the diagnostic actions performed here.]
-
-*Reason for Escalation:*
-While we successfully identified the issue pattern and completed the diagnostics mentioned above, the historical documentation lacks the granular, issue-specific details required for Tier 1 to safely execute a final fix in the current environment. Due to strict knowledge and access boundaries for this specific scenario, we have reached the limit of our capabilities. We are referring this to your queue for advanced investigation and resolution.
-"""
-
-
-def _render_payload(incidents: List[str], diagnostic_bag: List[str]) -> str:
-    """Compact JSON-ish payload the prompt analyses. We don't ship the
-    raw cohort dicts (too noisy for a 1-sentence synthesis); just the
-    fields the prompt actually reads, pre-extracted."""
-    lines = ["{"]
-    lines.append('  "Metadata": [')
-    for inc in incidents:
-        lines.append(f'    {{"Incident_Number": "{inc}"}},')
-    if incidents:
-        lines[-1] = lines[-1].rstrip(",")
-    lines.append("  ],")
-    lines.append('  "diagnostic_actions": [')
-    for s in diagnostic_bag:
-        # JSON-escape just the dangerous chars; we're inside a prompt,
-        # not strict JSON, so a lightweight sanitiser is enough.
-        clean = s.replace("\\", "\\\\").replace('"', '\\"').replace("\n", " ")
-        lines.append(f'    "{clean}",')
-    if diagnostic_bag:
-        lines[-1] = lines[-1].rstrip(",")
-    lines.append("  ]")
-    lines.append("}")
     return "\n".join(lines)
 
 
-# ─────────────────────────────────────────────────────────────
-# Deterministic fallback — fires on LLM error / empty response
-# ─────────────────────────────────────────────────────────────
-def _heuristic_summary(diagnostic_bag: List[str]) -> str:
-    """Build a fallback 1-sentence diagnostic summary without an LLM.
-    Picks the 3 longest strings (most descriptive) and stitches them
-    into a single sentence. Not as polished as the LLM output, but
-    grounded in real source content rather than boilerplate."""
-    if not diagnostic_bag:
-        return (
-            "We completed the cohort's standard diagnostics; specific "
-            "actions were not surfaced in the historical record."
+def _routing_block(routing: Optional[EscalationRouting]) -> str:
+    """Escalation Routing & Vendor/OEM Engagement section."""
+    lines: List[str] = ["*Escalation Routing & Vendor/OEM Engagement:*"]
+    if routing is None or routing.empty:
+        lines.append("- Resolution Groups: None recorded in this cohort.")
+        lines.append("- Recommended Tier-2 entry: Not determinable from cohort.")
+        lines.append("- Historical team paths: None recorded.")
+        lines.append(
+            "- Forensic data required before vendor/OEM engagement: "
+            "No vendor/OEM engagement records found in this cohort."
         )
-    picks = sorted(diagnostic_bag, key=len, reverse=True)[:3]
-    # Lowercase the first letter of each clause for natural prose.
-    parts = [p[0].lower() + p[1:] if p else p for p in picks]
-    if len(parts) == 1:
-        return f"We {parts[0]}."
-    if len(parts) == 2:
-        return f"We {parts[0]}, and {parts[1]}."
-    return f"We {parts[0]}, {parts[1]}, and {parts[2]}."
+        return "\n".join(lines)
+
+    if routing.resolution_groups:
+        lines.append(
+            f"- Resolution Groups: {', '.join(routing.resolution_groups)}"
+        )
+    else:
+        lines.append("- Resolution Groups: None recorded in this cohort.")
+
+    if routing.recommended_tier2_teams:
+        teams = ", ".join(
+            f"{t.team} (×{t.occurrence_count})" if t.occurrence_count > 1 else t.team
+            for t in routing.recommended_tier2_teams
+        )
+        lines.append(f"- Recommended Tier-2 entry: {teams}")
+    else:
+        lines.append("- Recommended Tier-2 entry: Not determinable from cohort.")
+
+    if routing.team_paths:
+        lines.append("- Historical team paths:")
+        for p in routing.team_paths:
+            lines.append(f"  - {p}")
+    else:
+        lines.append("- Historical team paths: None recorded.")
+
+    if routing.forensic_data_required:
+        lines.append(
+            f"- Forensic data required before vendor/OEM engagement: "
+            f"{', '.join(routing.forensic_data_required)}"
+        )
+    else:
+        lines.append(
+            "- Forensic data required before vendor/OEM engagement: "
+            "No vendor/OEM engagement records found in this cohort."
+        )
+    return "\n".join(lines)
 
 
-def _render_template(incidents: List[str], summary_sentence: str) -> str:
-    """Template-fill the spec output verbatim. Used by both the
-    fallback path AND as a sanity wrapper if the LLM returns plain
-    summary text (we re-frame it into the template)."""
-    inc_str = ", ".join(incidents) if incidents else "(no incident numbers found)"
-    return (
-        "*Escalation to Tier 2: Triage Complete*\n\n"
-        "Please review this ticket for advanced intervention. Tier 1 has "
-        "completed all initial triage and exhausted standard operating "
-        "procedures (SOPs). We have verified the core symptoms and "
-        "performed a comprehensive review of similar historical tickets "
-        f"(*{inc_str}*).\n\n"
-        "*Diagnostic Summary:*\n"
-        f"{summary_sentence}\n\n"
-        "*Reason for Escalation:*\n"
-        "While we successfully identified the issue pattern and completed "
-        "the diagnostics mentioned above, the historical documentation "
-        "lacks the granular, issue-specific details required for Tier 1 "
-        "to safely execute a final fix in the current environment. Due "
-        "to strict knowledge and access boundaries for this specific "
-        "scenario, we have reached the limit of our capabilities. We are "
-        "referring this to your queue for advanced investigation and "
-        "resolution."
+def _contact_row(contact: Any) -> Optional[str]:
+    """Render a Tier1Contact-like object as 'Name (Role) — phone — email'."""
+    if contact is None:
+        return None
+    if hasattr(contact, "model_dump"):
+        c = contact.model_dump()
+    elif isinstance(contact, dict):
+        c = contact
+    else:
+        return None
+    name = (c.get("name") or "").strip()
+    role = (c.get("role") or "").strip()
+    phone = (c.get("phone") or "").strip()
+    email = (c.get("email") or "").strip()
+    if not (name or role or phone or email):
+        return None
+    pieces: List[str] = []
+    if name:
+        pieces.append(name + (f" ({role})" if role else ""))
+    elif role:
+        pieces.append(role)
+    if phone:
+        pieces.append(phone)
+    if email:
+        pieces.append(email)
+    return " — ".join(pieces) if pieces else None
+
+
+def _directory_row(contact: Any) -> Optional[str]:
+    """Render a Tier1DirectoryContact as '(Label) Name — detail'."""
+    if contact is None:
+        return None
+    if hasattr(contact, "model_dump"):
+        c = contact.model_dump()
+    elif isinstance(contact, dict):
+        c = contact
+    else:
+        return None
+    label = (c.get("label") or "").strip()
+    name = (c.get("name") or "").strip()
+    detail = (c.get("detail") or "").strip()
+    if not (label or name or detail):
+        return None
+    pieces: List[str] = []
+    if label and name:
+        pieces.append(f"({label}) {name}")
+    elif name:
+        pieces.append(name)
+    elif label:
+        pieces.append(f"({label})")
+    if detail:
+        pieces.append(detail)
+    return " — ".join(pieces) if pieces else None
+
+
+def _contacts_block(contacts_payload: Optional[Dict[str, Any]]) -> str:
+    lines: List[str] = ["*Contact Details:*"]
+    payload = contacts_payload or {}
+
+    affected = (payload.get("affected_customer") or "").strip()
+    lines.append(
+        f"- Affected Customer: {affected if affected else 'Not specified'}"
     )
+
+    customer = payload.get("customer_contacts") or []
+    customer_rows = [r for r in (_contact_row(c) for c in customer) if r]
+    if customer_rows:
+        lines.append("- Customer Contacts:")
+        for r in customer_rows:
+            lines.append(f"  - {r}")
+    else:
+        lines.append("- Customer Contacts: None recorded.")
+
+    vendor = payload.get("vendor_contacts") or []
+    vendor_rows = [r for r in (_contact_row(c) for c in vendor) if r]
+    if vendor_rows:
+        lines.append("- Vendor Contacts:")
+        for r in vendor_rows:
+            lines.append(f"  - {r}")
+    else:
+        lines.append("- Vendor Contacts: None recorded.")
+
+    directory = payload.get("directory_contacts") or []
+    directory_rows = [r for r in (_directory_row(c) for c in directory) if r]
+    if directory_rows:
+        lines.append("- Internal Directory:")
+        for r in directory_rows:
+            lines.append(f"  - {r}")
+    else:
+        lines.append("- Internal Directory: None recorded.")
+
+    return "\n".join(lines)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -217,73 +424,87 @@ def _render_template(incidents: List[str], summary_sentence: str) -> str:
 def generate_handoff_note(
     cohort: List[Dict[str, Any]],
     *,
-    generate_fn: Optional[Callable[[str, int], str]] = None,
+    attempted_steps: Optional[List[ConsolidatedStep]] = None,
+    stage_2_visited: bool = False,
+    stage_3_visited: bool = False,
+    stage_4_visited: bool = False,
+    kb_chat_engaged: bool = False,
+    routing: Optional[EscalationRouting] = None,
+    contacts_payload: Optional[Dict[str, Any]] = None,
+    # Sprint 13.26 — time metrics from compute_journey_time_metrics().
+    # Optional; when missing, the opener bullets render without
+    # duration suffixes (back-compat with older callers).
+    time_metrics: Optional[Dict[str, Any]] = None,
+    # Sprint 13.19 — `consolidated_steps`, `traversal_log`, and
+    # `generate_fn` accepted for back-compat with any caller that
+    # still passes them; ignored under the deterministic build.
+    consolidated_steps: Optional[List[ConsolidatedStep]] = None,
+    traversal_log: Optional[List[Dict[str, Any]]] = None,
+    generate_fn: Any = None,
 ) -> Tuple[str, bool]:
-    """Generate the Tier-2 escalation handoff note.
+    """Build the Tier-2 escalation handoff note (pure deterministic).
 
-    Args:
-        cohort: list of ticket metadata_json dicts (the same shape
-            ticket_loader.load_cohort_metadata returns).
-        generate_fn: LLM call. Signature ``(prompt, max_tokens) -> str``.
-            Defaults to :func:`backend.api.safe_generate`. Injected for
-            tests.
-
-    Returns:
-        ``(note_text, used_fallback)``. Never raises.
+    Returns ``(note_text, used_fallback)``. ``used_fallback`` is
+    always False under this build — there is no LLM to fail.
     """
     incidents = _extract_incident_numbers(cohort)
-    bag = _extract_diagnostic_corpus(cohort)
 
-    if generate_fn is None:
-        try:
-            from backend.api import safe_generate as generate_fn  # type: ignore
-        except Exception as exc:
-            logger.warning(
-                "[stage5_handoff_note] safe_generate import failed (%s) — "
-                "using deterministic template fallback", exc,
-            )
-            return (
-                _render_template(incidents, _heuristic_summary(bag)),
-                True,
-            )
+    steps = list(attempted_steps or [])
+    opener = _opening_paragraph(
+        incidents=incidents,
+        stage_2_visited=stage_2_visited,
+        stage_3_visited=stage_3_visited,
+        stage_4_visited=stage_4_visited,
+        kb_chat_engaged=kb_chat_engaged,
+        time_metrics=time_metrics,
+    )
+    diagnostic = _diagnostic_block(
+        attempted_steps=steps,
+        stage_3_visited=stage_3_visited,
+        stage_4_visited=stage_4_visited,
+        kb_chat_engaged=kb_chat_engaged,
+    )
+    routing_block = _routing_block(routing)
+    contacts_block = _contacts_block(contacts_payload)
 
-    payload = _render_payload(incidents, bag)
-    full_prompt = (
-        f"{_SYSTEM_PROMPT}\n\n"
-        f"---\n\n"
-        f"INPUT JSON PAYLOAD:\n{payload}\n\n"
-        f"BEGIN OUTPUT (template only, no preamble):"
+    # Sprint 13.21 — render structure trimmed at user's request:
+    #   * 2nd & 3rd Reason-for-Escalation bullets commented out
+    #   * Entire Escalation Routing block commented out
+    #   * Entire Contact Details block commented out
+    #   * Single bolded residual line at the end about vendor/OEM
+    # Reinstate any of the suppressed sections by uncommenting the
+    # f-string lines below — the helpers (_routing_block,
+    # _contacts_block) are still wired up so re-enabling is one edit.
+    note = (
+        "*Escalation to Tier 2: Triage Complete*\n\n"
+        f"{opener}\n\n"
+        "*Diagnostic Summary:*\n"
+        f"{diagnostic}\n\n"
+        "*Reason for Escalation:*\n"
+        "- Tier 1 has successfully identified the issue pattern and "
+        "completed the standard diagnostics. The ticket is being "
+        "handed off for further investigation.\n"
+        # "- Historical documentation lacks the granular, issue-specific "
+        # "details required for Tier 1 to safely execute a final fix in "
+        # "the current environment.\n"
+        # "- Strict knowledge and access boundaries for this specific "
+        # "scenario have been reached; referring to Tier 2 for advanced "
+        # "investigation and resolution.\n"
+        "\n"
+        # f"{routing_block}\n\n"
+        # f"{contacts_block}"
+        # Sprint 13.23 — bolded "No vendor/OEM engagement records ..."
+        # residual removed from the copy-paste note. The Tier-2 reader
+        # already sees that fact prominently in the
+        # EscalationRoutingSection card above the note (frontend
+        # styles the line as bold black there), so duplicating it
+        # inside the copyable note added clutter without info gain.
     )
 
-    try:
-        raw = generate_fn(full_prompt, 600)
-        out = (raw or "").strip()
-        # Strip an accidental "---" lead-in if the model echoed the
-        # prompt's separator.
-        if out.startswith("---"):
-            out = out[3:].lstrip("\n").lstrip()
-        # Strip a leading code-fence if the model wrapped the template.
-        if out.startswith("```"):
-            out = out.strip("`").lstrip("markdown").lstrip("text").strip()
-        if not out:
-            raise RuntimeError("empty LLM response")
-        # Sanity check — the spec template ALWAYS contains the literal
-        # header line "*Escalation to Tier 2: Triage Complete*". If the
-        # model went off-script we drop to fallback.
-        if "Escalation to Tier 2" not in out:
-            raise RuntimeError("LLM response missing template header")
-        logger.info(
-            "[stage5_handoff_note] LLM note generated incidents=%d "
-            "diag_signals=%d chars=%d",
-            len(incidents), len(bag), len(out),
-        )
-        return (out, False)
-    except Exception as exc:
-        logger.warning(
-            "[stage5_handoff_note] LLM call failed (%s) — falling back "
-            "to deterministic template", exc,
-        )
-        return (
-            _render_template(incidents, _heuristic_summary(bag)),
-            True,
-        )
+    logger.info(
+        "[stage5_handoff_note] deterministic note built incidents=%d "
+        "stage2=%s stage3=%s stage4=%s kb_chat=%s ticked_steps=%d",
+        len(incidents), stage_2_visited, stage_3_visited,
+        stage_4_visited, kb_chat_engaged, len(steps),
+    )
+    return (note, False)

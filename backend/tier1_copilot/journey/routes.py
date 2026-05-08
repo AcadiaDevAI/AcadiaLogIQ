@@ -23,6 +23,7 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from backend.config import settings
 
 from .schemas import (
+    EscalationHandoffNoteRequest,
     EscalationHandoffNoteResponse,
     EscalationRouting,
     JourneyEventRequest,
@@ -40,11 +41,17 @@ from .stage0_confidence import compute_stage0
 from .stage0_environment import build_environment_profile
 from .stage1_smoking_gun import build_stage1a
 from .stage1_do_not_chase import build_stage1b
+from .stage1_do_not_chase_synthesis import synthesize_do_not_chase
 from .stage2_historical import build_stage2
 from .stage3_troubleshooting import build_stage3
 from .stage4_kb_handoff import build_stage4
 from .stage4_search_kb_handoff import create_chat_session_with_handoff
-from .stage5_escalation import build_journey_escalation_package
+from .stage3_consolidated import build_consolidated_ledger
+from .stage5_escalation import (
+    build_journey_escalation_package,
+    compute_journey_time_metrics,
+    fetch_traversal_log,
+)
 from .stage5_handoff_note import generate_handoff_note
 from .stage5_routing import build_escalation_routing
 from .telemetry import record_event
@@ -89,16 +96,85 @@ def _cache_put(session_id: str, cohort: List[Dict[str, Any]]) -> None:
 def _reset_cache() -> None:
     """Test helper. Production code should never call this."""
     _cohort_cache.clear()
+    _consolidated_cache.clear()
 
 
 def _load_or_cache(session_id: str) -> List[Dict[str, Any]]:
-    """Single-flight cohort fetch. Cache miss → DB → cache."""
+    """Single-flight cohort fetch. Cache miss → DB → cache.
+    Sprint 13.24 PERF — when the cohort is reloaded from DB (cache
+    miss / TTL expiry), invalidate the dependent consolidated-ledger
+    cache so the next /stage-3 or /escalation-handoff-note rebuilds
+    from the fresh cohort. Stale consolidated-vs-fresh-cohort would
+    only matter on a re-ingest mid-session — rare but cheap to guard.
+    """
     cached = _cache_get(session_id)
     if cached is not None:
         return cached
     cohort = load_cohort_metadata(session_id)
     _cache_put(session_id, cohort)
+    _consolidated_invalidate(session_id)
     return cohort
+
+
+# ─────────────────────────────────────────────────────────────
+# Sprint 13.24 PERF — session-keyed cache for the LLM-synthesised
+# consolidated ledger. The ledger is built from the cohort and is
+# DETERMINISTIC for a given cohort, so caching by session_id is
+# safe (cohort is fixed for the life of the session). Two routes
+# call `build_consolidated_ledger`:
+#   * /stage-3 (build_stage3 → builder)
+#   * /escalation-handoff-note (when stage_3 was visited)
+# Without this cache, the second route runs a duplicate ~5s LLM
+# call. With it, both routes share one warm result.
+# Bypass via `force=True` to support a Regenerate UI affordance.
+# ─────────────────────────────────────────────────────────────
+_CONSOLIDATED_TTL_SECONDS = 1800   # 30 min — cohort doesn't change within a journey
+_CONSOLIDATED_CACHE_MAX = 256
+_consolidated_cache: "OrderedDict[str, Tuple[float, Tuple[List[Any], bool]]]" = OrderedDict()
+
+
+def _consolidated_get(session_id: str):
+    entry = _consolidated_cache.get(session_id)
+    if not entry:
+        return None
+    expires_at, payload = entry
+    if time.time() >= expires_at:
+        _consolidated_cache.pop(session_id, None)
+        return None
+    _consolidated_cache.move_to_end(session_id)
+    return payload
+
+
+def _consolidated_put(session_id: str, payload):
+    _consolidated_cache[session_id] = (
+        time.time() + _CONSOLIDATED_TTL_SECONDS, payload,
+    )
+    _consolidated_cache.move_to_end(session_id)
+    while len(_consolidated_cache) > _CONSOLIDATED_CACHE_MAX:
+        _consolidated_cache.popitem(last=False)
+
+
+def _consolidated_invalidate(session_id: str) -> None:
+    _consolidated_cache.pop(session_id, None)
+
+
+def get_or_compute_consolidated_ledger(
+    session_id: str,
+    cohort: List[Dict[str, Any]],
+    *,
+    force: bool = False,
+):
+    """Cache-aware wrapper around `build_consolidated_ledger`.
+    Returns the same ``(steps, used_fallback)`` tuple the underlying
+    builder returns.
+    """
+    if not force:
+        cached = _consolidated_get(session_id)
+        if cached is not None:
+            return cached
+    payload = build_consolidated_ledger(cohort)
+    _consolidated_put(session_id, payload)
+    return payload
 
 
 # ─────────────────────────────────────────────────────────────
@@ -143,6 +219,17 @@ async def get_initial(session_id: str) -> JourneyInitial:
     stage_0 = compute_stage0(cohort, lookback_months=lookback)
     smoking_gun = build_stage1a(cohort, min_frequency_ratio=threshold)
     do_not_chase = build_stage1b(cohort)
+    # Sprint 13.3 — LLM polish pass for "What NOT to chase" entries.
+    # Failure-open: any LLM error returns the verbatim Python output
+    # with synthesis_skipped=True.
+    # Sprint 13.24 PERF — call SKIPPED. The "What NOT to chase"
+    # panel was suppressed at the user's request in Sprint 13.10
+    # (PivotInsightsPanel render commented). Running the LLM polish
+    # pass on data that no UI surface renders cost ~5s on every
+    # /initial fetch. Reinstate by un-commenting the line below
+    # together with the PivotInsightsPanel JSX in
+    # ResolutionJourney.js.
+    # do_not_chase = synthesize_do_not_chase(do_not_chase, cohort)
 
     # Sprint 10.3 §5.2 — diagnostic-grade log. From one line you can
     # tell whether each panel got populated and why.
@@ -208,7 +295,18 @@ async def get_stage_2(session_id: str) -> Stage2HistoricalMatches:
 async def get_stage_3(session_id: str) -> Stage3TroubleshootingApproach:
     _require_flag()
     cohort = _load_or_cache(session_id)
-    return build_stage3(cohort)
+    # Sprint 13.24 PERF — share the consolidated-ledger LLM call with
+    # /escalation-handoff-note via the session-keyed cache. First
+    # call ~5s; subsequent calls (this route or the handoff note)
+    # are near-instant. New Ticket clears via _consolidated_invalidate.
+    consolidated_steps, consolidated_skipped = get_or_compute_consolidated_ledger(
+        session_id, cohort,
+    )
+    return build_stage3(
+        cohort,
+        consolidated_steps=consolidated_steps,
+        consolidated_synthesis_skipped=consolidated_skipped,
+    )
 
 
 # ─────────────────────────────────────────────────────────────
@@ -329,16 +427,176 @@ async def get_escalation_routing(session_id: str) -> EscalationRouting:
 # falls back to a deterministic template-fill on LLM error so the
 # button always returns a usable note.
 # ─────────────────────────────────────────────────────────────
+# ─────────────────────────────────────────────────────────────
+# Sprint 13.17 — POST /escalation-handoff-note reactivated with a
+# richer context payload. The note now reflects WHAT TIER-1 actually
+# did during the journey (Stage 3's consolidated read-only steps +
+# traversal log) rather than just dumping cohort raw text. Failure-
+# open: any LLM error returns a deterministic template-fill so the
+# panel never blanks.
+# ─────────────────────────────────────────────────────────────
 @router.post(
     "/{session_id}/escalation-handoff-note",
     response_model=EscalationHandoffNoteResponse,
 )
 async def post_escalation_handoff_note(
     session_id: str,
+    req: Optional[EscalationHandoffNoteRequest] = None,
 ) -> EscalationHandoffNoteResponse:
     _require_flag()
     cohort = _load_or_cache(session_id)
-    note, used_fallback = generate_handoff_note(cohort)
+
+    # ── Sprint 13.19 — full journey-driven dynamic gating ──
+    # The handoff note must reflect EXACTLY what Tier-1 did. Three
+    # signals drive the "what they did" picture:
+    #   1. tier1_journey_events — which stages they rendered (Stage
+    #      3 = Guided Troubleshooting Workflow, Stage 4 = Search KB).
+    #   2. The same events table — kb_chat_engaged fires after the
+    #      first /ask round-trip in a Stage-4-spawned chat session,
+    #      so we can tell "opened the panel" from "actually used it".
+    #   3. The POST body — `attempted_step_numbers` carries the
+    #      Stage 3 checkbox state lifted from the frontend. Empty
+    #      list = engineer didn't tick anything (or escalated
+    #      without ticking). We honour that strictly.
+    traversal_log = fetch_traversal_log(session_id)
+
+    stage2_label = "Related Incidents & Probable Causes"
+    stage3_label = "Guided Troubleshooting Workflow"
+    stage4_label = "Knowledge Base & SOP Reference"
+    stage2_visited = any(
+        (entry.get("step") or "").strip() == stage2_label
+        for entry in (traversal_log or [])
+    )
+    stage3_visited = any(
+        (entry.get("step") or "").strip() == stage3_label
+        for entry in (traversal_log or [])
+    )
+    stage4_visited = any(
+        (entry.get("step") or "").strip() == stage4_label
+        for entry in (traversal_log or [])
+    )
+
+    # kb_chat_engaged is logged as an event_type, not a step label.
+    # fetch_traversal_log rolls per-stage; we re-read the raw events
+    # table for this single signal so we don't widen the helper.
+    kb_chat_engaged = False
+    try:
+        from sqlalchemy import text as _t
+        from backend.db.connection import engine as _e
+        with _e.connect() as conn:
+            row = conn.execute(
+                _t(
+                    "SELECT 1 FROM tier1_journey_events "
+                    "WHERE session_id = :sid AND event_type = 'kb_chat_engaged' "
+                    "LIMIT 1"
+                ),
+                {"sid": session_id},
+            ).first()
+        kb_chat_engaged = row is not None
+    except Exception as _kb_exc:
+        logger.warning(
+            "[journey.handoff_note] kb_chat_engaged lookup failed sid=%s "
+            "err=%s — assuming False", session_id, _kb_exc,
+        )
+
+    # Sprint 13.19 — `attempted_step_numbers` from the POST body
+    # filters the consolidated ledger down to what the engineer
+    # ACTUALLY ticked. When stage 3 wasn't visited at all, we skip
+    # build_consolidated_ledger entirely (saves an LLM call).
+    attempted_step_numbers: List[int] = []
+    force_regen = False
+    if req is not None:
+        if isinstance(req.attempted_step_numbers, list):
+            attempted_step_numbers = [
+                int(n) for n in req.attempted_step_numbers
+                if isinstance(n, (int, float)) and int(n) > 0
+            ]
+        force_regen = bool(getattr(req, "force", False))
+
+    attempted_steps = []
+    if stage3_visited and attempted_step_numbers:
+        # Sprint 13.24 PERF — same session-keyed cache as /stage-3.
+        # When the engineer just came from Stage 3, this is a hot
+        # cache hit and the LLM call is skipped entirely.
+        # Regenerate button passes `force=True` to bypass cache.
+        all_consolidated, _ = get_or_compute_consolidated_ledger(
+            session_id, cohort, force=force_regen,
+        )
+        attempted_set = set(attempted_step_numbers)
+        attempted_steps = [
+            s for s in all_consolidated if s.step_number in attempted_set
+        ]
+        logger.info(
+            "[journey.handoff_note] sid=%s — stage3_visited=True "
+            "ticked=%d total_consolidated=%d",
+            session_id, len(attempted_steps), len(all_consolidated),
+        )
+    else:
+        logger.info(
+            "[journey.handoff_note] sid=%s — stage3_visited=%s "
+            "ticked_in_body=%d → no diagnostic bullets",
+            session_id, stage3_visited, len(attempted_step_numbers),
+        )
+
+    # Stage 5 escalation routing — Resolution_Groups + Team_Path +
+    # Vendor_OEM_Engagement aggregations. Drives the "Escalation
+    # Routing & Vendor/OEM Engagement" section.
+    routing = build_escalation_routing(cohort)
+
+    # Sprint 13.18 — Contact Details. Reuse the Sprint 7
+    # Tier1EscalationPackage that /stage-5 already builds; pull
+    # affected_customer + customer_contacts + vendor_contacts +
+    # directory_contacts from it. Failure-open: any error returns
+    # an empty contacts_payload so the note still renders.
+    contacts_payload: Dict[str, Any] = {}
+    try:
+        from sqlalchemy import text as _t
+        from backend.db.connection import engine as _e
+        alert_payload: Dict[str, Any] = {}
+        with _e.connect() as conn:
+            row = conn.execute(
+                _t("SELECT alert_payload FROM tier1_sessions WHERE id = :id"),
+                {"id": session_id},
+            ).mappings().first()
+        if row and isinstance(row.get("alert_payload"), dict):
+            alert_payload = row["alert_payload"]
+        top_md = cohort[0] if cohort else {}
+        package = build_journey_escalation_package(
+            session_id=session_id,
+            ticket_metadata=top_md,
+            alert_payload=alert_payload,
+        )
+        contacts_payload = {
+            "affected_customer": getattr(package, "affected_customer", None),
+            "customer_contacts": getattr(package, "customer_contacts", []) or [],
+            "vendor_contacts": getattr(package, "vendor_contacts", []) or [],
+            "directory_contacts": getattr(package, "directory_contacts", []) or [],
+        }
+    except Exception as _contacts_exc:
+        logger.warning(
+            "[journey.handoff_note] contacts fetch failed sid=%s err=%s "
+            "— shipping note without contact-details enrichment",
+            session_id, _contacts_exc,
+        )
+        contacts_payload = {}
+
+    # Sprint 13.26 — gather per-stage durations + chat-session time
+    # totals for the opener bullets. Failure-open: the helper
+    # returns whatever it could compute and never raises, so a DB
+    # hiccup just renders bullets without time suffixes.
+    time_metrics = compute_journey_time_metrics(session_id)
+
+    note, used_fallback = generate_handoff_note(
+        cohort,
+        attempted_steps=attempted_steps,
+        stage_2_visited=stage2_visited,
+        stage_3_visited=stage3_visited,
+        stage_4_visited=stage4_visited,
+        kb_chat_engaged=kb_chat_engaged,
+        routing=routing,
+        contacts_payload=contacts_payload,
+        time_metrics=time_metrics,
+    )
     return EscalationHandoffNoteResponse(note=note, used_fallback=used_fallback)
 
 

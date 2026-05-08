@@ -344,6 +344,48 @@ def _top5_first_steps(cohort: List[Dict[str, Any]]) -> List[str]:
     return out
 
 
+def _top5_incident_summaries(cohort: List[Dict[str, Any]]) -> List[str]:
+    """Sprint 13.7 — span the top-5 cohort tickets in retrieval-rank
+    order and emit each ticket's ``Incident_Summary.INCIDENT`` line
+    suffixed with ``" - <Incident_Number>"``.
+
+    Used by the Stage 0 "Possible details are" bullet list. Replaces
+    `_top5_first_steps` as the rendered bullet content while keeping
+    the same retrieval-rank ordering and the same trailing-incident
+    suffix contract — so the per-bullet "Discuss with Logic" button
+    can still extract the ticket id and scope the chat to that
+    ticket without any frontend regex changes.
+
+    Tickets without an extractable INCIDENT line OR without an
+    Incident_Number are skipped (never padded). Defensive dedupe by
+    Incident_Number prevents duplicate sources side-by-side.
+    """
+    if not cohort:
+        return []
+    seen_incidents: set = set()
+    out: List[str] = []
+    for ticket in cohort:
+        if not isinstance(ticket, dict):
+            continue
+        if len(out) >= 5:
+            break
+        inc = _safe_str(ticket, "Metadata", "Incident_Number")
+        if not inc:
+            continue
+        if inc in seen_incidents:
+            continue
+        headline = _safe_str(ticket, "Incident_Summary", "INCIDENT")
+        if not headline:
+            continue
+        # Match `_resolution_steps`'s suffix shape so the frontend's
+        # `extractTrailingIncidentId` regex picks up the ticket id
+        # from these bullets the same way it did for the resolution
+        # steps. Trailing whitespace tolerated by the regex.
+        out.append(f"{headline} - {inc}")
+        seen_incidents.add(inc)
+    return out
+
+
 def _avg_minutes_cohort(cohort: List[Dict[str, Any]]) -> Optional[int]:
     """Average time_to_resolve_minutes across cohort tickets that have
     parseable numeric values. Returns None when no ticket has one."""
@@ -402,6 +444,11 @@ def compute_stage0(
     # (see `_top5_first_steps` docstring above for the full rationale).
     # Schema is unchanged — `how_they_did_it` is still List[str].
     how_they_did_it = _top5_first_steps(cohort)
+    # Sprint 13.7 — companion field driving the Stage 0 "Possible
+    # details are" bullets. Same top-5 retrieval-rank order, same
+    # " - <Incident_Number>" suffix shape; only the headline source
+    # changes (Incident_Summary.INCIDENT instead of Resolution_Steps).
+    top5_incident_summaries = _top5_incident_summaries(cohort)
     critical_intervention = _safe_str(best, "Forensic_Performance_Audit", "Critical_Intervention")
 
     # ── Cohort stats (collapsed tail) ──
@@ -420,6 +467,7 @@ def compute_stage0(
         best_time_minutes=best_time,
         what_worked=what_worked,
         how_they_did_it=how_they_did_it,
+        top5_incident_summaries=top5_incident_summaries,
         critical_intervention=critical_intervention,
         clean_resolution_count=clean_count,
         clean_resolution_percent=clean_pct,

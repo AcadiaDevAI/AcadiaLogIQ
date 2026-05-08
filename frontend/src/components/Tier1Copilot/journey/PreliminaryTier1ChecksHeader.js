@@ -1,16 +1,19 @@
 // Sprint 12.8 — Preliminary Tier 1 Checks header.
 //
-// Always-visible, static informational card rendered at the top of
-// every Resolution Journey. The four checks below are the
-// pre-flight protocol Tier 1 must complete on every ticket
-// regardless of cohort data — surfaced verbatim per the spec so the
-// engineer sees them on every load (no data dependency, no LLM, no
-// gating). Pairs with PreserveEvidenceFooter at the bottom of the
-// journey container.
+// Static informational card rendered at the top of every Resolution
+// Journey. The four checks below are the pre-flight protocol Tier 1
+// must complete on every ticket regardless of cohort data — surfaced
+// verbatim per the spec.
+//
+// Sprint 13.5 — collapsed by default with a down-chevron expand
+// affordance, so the panel takes minimal vertical space on first
+// paint. Engineer can expand to read the full checklist; the title +
+// "expand" hint remain visible at all times so the panel never
+// disappears entirely. No data dependency, no LLM, no gating.
 
-import React from "react";
+import React, { useState } from "react";
 import { Card, Typography } from "antd";
-import { SafetyCertificateOutlined } from "@ant-design/icons";
+import { DownOutlined, RightOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
 
 const { Title, Paragraph, Text } = Typography;
 
@@ -51,6 +54,12 @@ const CHECKS = [
 
 
 export default function PreliminaryTier1ChecksHeader() {
+  // Sprint 13.5 — collapsed by default. Engineer clicks the header
+  // (or chevron) to expand. We use plain useState rather than AntD's
+  // Collapse so the title row + chevron can act as a single click
+  // target with the spec's exact title + intro copy.
+  const [expanded, setExpanded] = useState(false);
+
   return (
     <Card
       style={{
@@ -58,22 +67,59 @@ export default function PreliminaryTier1ChecksHeader() {
         borderLeft: "4px solid #1F6FEB",
         background: "var(--surface-2, #f7faff)",
       }}
+      bodyStyle={{ paddingTop: 12, paddingBottom: 12 }}
     >
-      <Title level={5} style={{ marginTop: 0, marginBottom: 8 }}>
-        <SafetyCertificateOutlined style={{ marginRight: 8 }} />
-        Preliminary Tier 1 Checks
-      </Title>
-      <Paragraph type="secondary" style={{ marginBottom: 12, fontSize: 12 }}>
+      <div
+        onClick={() => setExpanded((v) => !v)}
+        role="button"
+        tabIndex={0}
+        onKeyDown={(e) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            setExpanded((v) => !v);
+          }
+        }}
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          cursor: "pointer",
+          userSelect: "none",
+        }}
+        aria-expanded={expanded}
+      >
+        <Title level={5} style={{ marginTop: 0, marginBottom: 0 }}>
+          <SafetyCertificateOutlined style={{ marginRight: 8 }} />
+          Preliminary Tier 1 Checks
+        </Title>
+        {expanded ? (
+          <DownOutlined style={{ fontSize: 12, color: "#1F6FEB" }} />
+        ) : (
+          <RightOutlined style={{ fontSize: 12, color: "#1F6FEB" }} />
+        )}
+      </div>
+
+      {/* Sprint 13.6 — intro line moved out of the collapsed-only
+          block so it stays visible on the collapsed card too.
+          Engineer always sees what the panel is for, then clicks
+          to read the full four-bullet checklist underneath. */}
+      <Paragraph
+        type="secondary"
+        style={{ marginTop: 8, marginBottom: 0, fontSize: 12 }}
+      >
         Complete these pre-flight checks on every ticket before drilling
         into the cohort findings below.
       </Paragraph>
-      <ol style={{ marginBottom: 0, paddingLeft: 20 }}>
-        {CHECKS.map((c) => (
-          <li key={c.label} style={{ marginBottom: 6 }}>
-            <Text strong>{c.label}:</Text> {c.body}
-          </li>
-        ))}
-      </ol>
+
+      {expanded ? (
+        <ol style={{ marginTop: 12, marginBottom: 0, paddingLeft: 20 }}>
+          {CHECKS.map((c) => (
+            <li key={c.label} style={{ marginBottom: 6 }}>
+              <Text strong>{c.label}:</Text> {c.body}
+            </li>
+          ))}
+        </ol>
+      ) : null}
     </Card>
   );
 }

@@ -28,6 +28,12 @@ class Stage0BestTicketDistillation(BaseModel):
     best_time_minutes: Optional[int] = None
     what_worked: Optional[str] = None
     how_they_did_it: List[str] = Field(default_factory=list)
+    # Sprint 13.7 — top-5 cohort tickets' Incident_Summary.INCIDENT
+    # lines, suffixed with " - <Incident_Number>". Drives the Stage 0
+    # "Possible details are" bullet list. Same retrieval-rank order
+    # and same trailing-id contract as `how_they_did_it` so the
+    # per-bullet Discuss-with-Logic scoping regex still works.
+    top5_incident_summaries: List[str] = Field(default_factory=list)
     critical_intervention: Optional[str] = None
     # Collapsed stats tail (frontend renders behind a <Collapse>)
     clean_resolution_count: int = 0
@@ -127,6 +133,20 @@ class EscalationRouting(BaseModel):
 # Sprint 12.7 — Escalation Handoff Note (LLM-generated).
 # POST /tier1/journey/{sid}/escalation-handoff-note returns this.
 # ─────────────────────────────────────────────────────────────
+# Sprint 13.19 — request body for the handoff-note POST. Carries the
+# Tier-1 engineer's tick-box state (which Stage 3 consolidated steps
+# they marked attempted). Optional / defaults to empty so older
+# callers without the body still work — they'll see the "no steps
+# attempted" branch of the deterministic note.
+class EscalationHandoffNoteRequest(BaseModel):
+    attempted_step_numbers: List[int] = Field(default_factory=list)
+    # Sprint 13.24 PERF — when true, bypass the session-keyed
+    # consolidated-ledger cache and force a fresh LLM call. Powers
+    # the Regenerate button in the Stage 5 panel; default False so
+    # auto-fetch on mount uses the cache.
+    force: bool = False
+
+
 class EscalationHandoffNoteResponse(BaseModel):
     note: str
     # Diagnostic flag — true when the deterministic template-fill
@@ -153,6 +173,12 @@ class Stage1bDoNotChase(BaseModel):
         "no_data",
         "no_recurring",
     ] = "no_data"
+    # Sprint 13.3 — true when the LLM synthesis pass failed and the
+    # frontend is rendering the verbatim source text (today's pre-13.3
+    # behaviour). Lets the panel render a small "(verbatim source —
+    # synthesis unavailable)" footnote so engineers know to expect
+    # less polished prose.
+    synthesis_skipped: bool = False
 
 
 # ─────────────────────────────────────────────────────────────
@@ -326,11 +352,32 @@ class GuidedWorkflow(BaseModel):
     synthesis_skipped: bool = False  # true when LLM call failed → action+intent+pivot are verbatim
 
 
+# ─────────────────────────────────────────────────────────────
+# Sprint 13.12 — single consolidated 5-step ledger. Replaces the
+# per-ticket Guided Workflows surface as the primary Stage 3 view.
+# A Tier-1 engineer with read-only access doesn't need 8 steps × 5
+# tickets = 40 actions; they need the merged best-of-five sequence
+# of safe diagnostic checks. LLM filters out config-changing /
+# disruptive actions and synthesises Intent + Pivot for each step.
+# ─────────────────────────────────────────────────────────────
+class ConsolidatedStep(BaseModel):
+    step_number: int            # 1..5 (hard cap)
+    action: str                  # one safe, executable read-only action
+    intent: str                  # one-sentence hypothesis being tested
+    pivot: str                   # what the result means + what to do next
+    command: Optional[str] = None    # show / read-only command when applicable
+
+
 class Stage3TroubleshootingApproach(BaseModel):
-    # Sprint 13 — primary content of the Stage 3 panel. One workflow
-    # per cohort ticket, in match-rank order. Frontend renders these
-    # as a Collapse accordion under the singular "Guided
-    # Troubleshooting Workflow" heading.
+    # Sprint 13.12 — primary content of the Stage 3 panel. One merged
+    # ledger of up to 5 read-only-safe diagnostic steps for a Tier-1
+    # engineer. LLM-synthesised; failure-open to empty list.
+    consolidated_steps: List[ConsolidatedStep] = Field(default_factory=list)
+    consolidated_synthesis_skipped: bool = False
+    # Sprint 13 — per-ticket Guided Workflows. Kept on the schema for
+    # back-compat / future toggle; the frontend no longer renders this
+    # field as of Sprint 13.12. Backend still computes it so any
+    # downstream consumer (analytics, escalation package) keeps working.
     guided_workflows: List[GuidedWorkflow] = Field(default_factory=list)
     cohort_size: int = 0
     # Sprint 11 — per-ticket raw breakdown (companion to `steps`).

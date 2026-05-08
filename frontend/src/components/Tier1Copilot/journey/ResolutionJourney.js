@@ -58,19 +58,83 @@ const STAGE_ORDER = [
 ];
 
 
+// Sprint 13.22 — localStorage hydration helpers. ResolutionJourney
+// remounts when the engineer opens a Stage 4 KB chat (the chat handoff
+// flips the AppLayout mode → ChatArea mounts, journey unmounts) and
+// remounts again on return. Without persistence, every remount loses
+// `revealed` and the Stage 3 checkbox state — which surfaces as:
+//   * Stage 2 panel reappearing even when the engineer never visited
+//     it (the slice-based resume hydration did this).
+//   * Ticked diagnostic checkboxes resetting to unchecked.
+//
+// localStorage is keyed by session_id so different cohorts don't
+// collide. Failure-open: any read/write error returns/saves nothing
+// — the journey degrades to today's pre-13.22 behaviour.
+const _journeyStorageKey = (sessionId) =>
+  sessionId ? `tier1_journey_state_${sessionId}` : null;
+
+function _readJourneyState(sessionId) {
+  const key = _journeyStorageKey(sessionId);
+  if (!key) return null;
+  try {
+    const raw = localStorage.getItem(key);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function _writeJourneyState(sessionId, payload) {
+  const key = _journeyStorageKey(sessionId);
+  if (!key) return;
+  try {
+    localStorage.setItem(key, JSON.stringify(payload));
+  } catch {
+    /* quota exceeded / privacy-mode — degrade silently */
+  }
+}
+
+function _clearJourneyState(sessionId) {
+  const key = _journeyStorageKey(sessionId);
+  if (!key) return;
+  try {
+    localStorage.removeItem(key);
+  } catch {
+    /* ignore */
+  }
+}
+
+
 export default function ResolutionJourney({ sessionId, onNewAlert }) {
+  // Sprint 13.22 — initial state pulls from localStorage so it
+  // survives mid-flow remounts (Stage 4 KB chat round-trip is the
+  // common case). When localStorage is empty, falls back to the
+  // pre-13.22 defaults.
+  const _hydrated = _readJourneyState(sessionId);
+
   // Sprint 10.2 — pivot_insights replaces stage_1a + stage_1b in the
   // revealed map. The merged panel always renders alongside Stage 0.
   // Sprint 10.7 — initial values stay false beyond pivot_insights;
   // the resume-state effect below flips later stages to true when the
   // engineer is mid-journey on remount.
-  const [revealed, setRevealed] = useState({
-    stage_0: true,
-    pivot_insights: true,
-    stage_2: false,
-    stage_3: false,
-    stage_4: false,
-    stage_5: false,
+  const [revealed, setRevealed] = useState(() => {
+    const defaults = {
+      stage_0: true,
+      pivot_insights: true,
+      stage_2: false,
+      stage_3: false,
+      stage_4: false,
+      stage_5: false,
+    };
+    if (_hydrated && _hydrated.revealed) {
+      // Merge so any new stage keys added in future sprints inherit
+      // their default (today's add → tomorrow's hydrate of an old
+      // user's state).
+      return { ...defaults, ...(_hydrated.revealed || {}) };
+    }
+    return defaults;
   });
   // Sprint 10.7 §4.2 — true when the engineer arrived directly at
   // Stage 5 (e.g. via chat-Escalate). Stage5EscalationPackage uses
@@ -79,6 +143,24 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
   const [resumedAtStage5, setResumedAtStage5] = useState(false);
 
   const [helpfulPerStage, setHelpfulPerStage] = useState({});
+  // Sprint 13.19 — Stage 3 checkbox state lifted here so Stage 5's
+  // handoff-note POST can read it. Map of {step_number: bool}.
+  // Defaults empty; toggled via the callback passed down to
+  // Stage3TroubleshootingApproach.
+  // Sprint 13.22 — also hydrated from localStorage so checkboxes
+  // survive the chat round-trip remount.
+  const [attemptedStage3Steps, setAttemptedStage3Steps] = useState(() => {
+    if (_hydrated && _hydrated.attemptedStage3Steps && typeof _hydrated.attemptedStage3Steps === "object") {
+      return _hydrated.attemptedStage3Steps;
+    }
+    return {};
+  });
+  const toggleAttemptedStep = useCallback((stepNumber) => {
+    setAttemptedStage3Steps((prev) => ({
+      ...prev,
+      [stepNumber]: !prev[stepNumber],
+    }));
+  }, []);
   const [data, setData] = useState({
     initial: null,
     stage_2: null,
@@ -88,6 +170,18 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
   });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+
+  // Sprint 13.22 — persist `revealed` + `attemptedStage3Steps`
+  // back to localStorage on every change. Cheap (one stringify of
+  // a small object on each toggle); guarantees the state survives
+  // every unmount/remount cycle without any backend round-trip.
+  useEffect(() => {
+    if (!sessionId) return;
+    _writeJourneyState(sessionId, {
+      revealed,
+      attemptedStage3Steps,
+    });
+  }, [sessionId, revealed, attemptedStage3Steps]);
 
   // ── Initial fetch + Sprint 10.7 resume state ──
   // We run BOTH calls in parallel: /initial paints Stage 0 +
@@ -116,46 +210,104 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
         if (cancelled) return;
         setData((prev) => ({ ...prev, initial }));
 
-        // Stage 2-5 reveals based on the resumed stage. We only flip
-        // booleans here — the per-stage payload fetches happen as
-        // each panel is asked for via `reveal()` in the existing
-        // forward-flow path. For stages already passed, we trigger
-        // the same fetcher inline below.
+        // Sprint 13.22 — resume-state hydration tightened. The prior
+        // implementation called STAGE_ORDER.slice(2, resumedIdx+1) and
+        // revealed every stage in that range. That made false claims
+        // about the engineer's path: a journey of "Stage 0 → Stage 3
+        // → Stage 4" would re-mount with Stage 2 revealed too, even
+        // though the engineer never opened the Related Incidents
+        // panel. With localStorage-backed `revealed` from the hydration
+        // above, we already have the engineer's exact reveal map. The
+        // resume-state call now serves as a fallback for the very
+        // first mount (no localStorage yet) AND only flips the
+        // resumed stage itself — not the chain in between.
         const resumedStage = resume?.current_stage || "stage_0";
         const resumedIdx = STAGE_ORDER.indexOf(resumedStage);
-        if (resumedIdx > 1) {
-          // Stages 2..N need their data prefetched so the panels
-          // render with content (not empty cards). Run in parallel.
-          const stagesToFetch = STAGE_ORDER.slice(2, resumedIdx + 1);
-          await Promise.all(
-            stagesToFetch.map((stage) => {
-              const fetcher = {
-                stage_2: fetchStage2,
-                stage_3: fetchStage3,
-                stage_4: fetchStage4,
-                stage_5: fetchStage5,
-              }[stage];
-              if (!fetcher) return Promise.resolve();
-              return fetcher(sessionId)
-                .then((payload) => {
-                  if (cancelled) return;
-                  setData((prev) => ({ ...prev, [stage]: payload }));
-                })
-                .catch((err) => {
-                  // eslint-disable-next-line no-console
-                  console.warn("[journey.resume] prefetch failed", stage, err);
-                });
-            }),
-          );
+        const _hadHydrated = !!(
+          _hydrated && _hydrated.revealed && Object.keys(_hydrated.revealed).length
+        );
+
+        // Sprint 13.22 — when localStorage hydrated `revealed`, the
+        // panels for those stages will mount immediately but their
+        // data is in-memory only (not persisted). Prefetch payloads
+        // for every revealed gated stage so panels don't render with
+        // null data after a remount.
+        if (_hadHydrated) {
+          const hydratedStages = ["stage_2", "stage_3", "stage_4", "stage_5"]
+            .filter((s) => _hydrated.revealed[s]);
+          if (hydratedStages.length > 0) {
+            await Promise.all(
+              hydratedStages.map((stage) => {
+                const fetcher = {
+                  stage_2: fetchStage2,
+                  stage_3: fetchStage3,
+                  stage_4: fetchStage4,
+                  stage_5: fetchStage5,
+                }[stage];
+                if (!fetcher) return Promise.resolve();
+                return fetcher(sessionId)
+                  .then((payload) => {
+                    if (cancelled) return;
+                    setData((prev) => ({ ...prev, [stage]: payload }));
+                  })
+                  .catch((err) => {
+                    // eslint-disable-next-line no-console
+                    console.warn(
+                      "[journey.hydrate] prefetch failed", stage, err,
+                    );
+                  });
+              }),
+            );
+          }
           if (cancelled) return;
-          // Flip every revealed[stage] for stages 2..resumedIdx.
-          setRevealed((prev) => {
-            const next = { ...prev };
-            for (const s of stagesToFetch) {
-              next[s] = true;
+          if (_hydrated.revealed.stage_5) {
+            setResumedAtStage5(true);
+          }
+        }
+
+        // Sprint 13.23 — Resume-state's `current_stage` ALWAYS wins
+        // on top of localStorage. Reason: when the engineer
+        // escalates from the SOP/KB chat (JourneyMessageActions →
+        // postJourneyEvent stage_advanced stage_5 → RESUME_JOURNEY
+        // dispatch), the journey remounts and we need to land on
+        // Stage 5 even though localStorage's last save (taken before
+        // the chat unmount) had revealed.stage_5=false.
+        //
+        // localStorage still preserves PAST visits (Stage 2 stays
+        // hidden if never visited) — server-side stage_advanced is
+        // authoritative only for FORWARD progress. The merge logic
+        // is: hydrate from localStorage, then ALSO apply the server's
+        // current_stage on top. This prevents the bug where chat-side
+        // escalation came back without rendering Stage 5.
+        if (resumedIdx > 1) {
+          const alreadyRevealed = !!revealed[resumedStage];
+          if (!alreadyRevealed) {
+            // Prefetch payload for the resumed stage (the
+            // localStorage-driven prefetch loop above only handles
+            // hydrated stages; this case covers chat-side advance
+            // that localStorage didn't yet know about).
+            const fetcher = {
+              stage_2: fetchStage2,
+              stage_3: fetchStage3,
+              stage_4: fetchStage4,
+              stage_5: fetchStage5,
+            }[resumedStage];
+            if (fetcher && !data[resumedStage]) {
+              try {
+                const payload = await fetcher(sessionId);
+                if (!cancelled) {
+                  setData((prev) => ({ ...prev, [resumedStage]: payload }));
+                }
+              } catch (err) {
+                // eslint-disable-next-line no-console
+                console.warn(
+                  "[journey.resume] prefetch failed", resumedStage, err,
+                );
+              }
             }
-            return next;
-          });
+            if (cancelled) return;
+            setRevealed((prev) => ({ ...prev, [resumedStage]: true }));
+          }
           if (resumedStage === "stage_5") {
             setResumedAtStage5(true);
           }
@@ -228,6 +380,12 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
   );
 
   const startNewTicket = useCallback(() => {
+    // Sprint 13.22 — wipe the persisted journey state for this
+    // session so the next ticket starts with a clean reveal map +
+    // empty checkbox state. Stale entries for old sessions that
+    // never got cleared remain on disk; they're tiny (a few KB
+    // tops) and harmless until the session id is reused.
+    _clearJourneyState(sessionId);
     if (typeof onNewAlert === "function") {
       onNewAlert();
     }
@@ -277,11 +435,12 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
             Health). No data dependency, no API call. */}
         <PreliminaryTier1ChecksHeader />
 
-        {/* Sprint 12.4 — Environment Context & Tech Component Profile.
-            Lead-in panel: deduped domains, components, clusters,
-            products, and technical entities aggregated across the
-            top-5 cohort. Footer matches the journey's standard
-            pattern (Helpful + Escalate + advance-to-Stage-0). */}
+        {/* Sprint 13.5 — Environment Context & Tech Component Profile
+            panel suppressed at the request of the user. The backend
+            still computes `initial.environment_profile`; only the
+            frontend render is commented. Reinstate by un-commenting
+            the JSX block below; no other change required. */}
+        {/*
         <EnvironmentContextPanel
           data={initial.environment_profile}
           sessionId={sessionId}
@@ -290,6 +449,7 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
           onReveal={reveal}
           helpfulMarked={!!helpfulPerStage.environment_context}
         />
+        */}
 
         {/* Sprint 10.2 — Stage 0 best-ticket distillation (replaces
             ConfidenceLead). Sprint 11 — sessionId now passed so the
@@ -304,9 +464,21 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
           helpfulMarked={!!helpfulPerStage.stage_0}
         />
 
-        {/* Sprint 10.2 — merged Pivot Insights panel (Smoking Gun +
-            Do Not Chase combined). Single Helpful + single
-            "Historical Matches" next-stage button. */}
+        {/* Sprint 13.11 — entire PivotInsightsPanel mount suppressed
+            at the user's request. The panel's body (Smoking Gun +
+            What NOT to chase) was already commented inside the
+            component; with the engineer also waiving the panel's
+            footer (Helpful / Dislike / Escalate / Related-Incidents
+            next-stage button), there's nothing left to render — so
+            the whole mount is taken out. Backend `/initial` still
+            ships `pivot_insights` payload (smoking_gun + do_not_chase);
+            only the frontend mount is commented. Reinstate by
+            un-commenting the JSX block below if the panel is ever
+            wanted again. Forward navigation to Stage 2 is now
+            unreachable from this surface — Stage 0's footer
+            shortcut to Stage 3 ("Guided Troubleshooting Workflow")
+            and the Escalate-to-Tier-2 path remain. */}
+        {/*
         <PivotInsightsPanel
           data={initial.pivot_insights}
           sessionId={sessionId}
@@ -315,6 +487,7 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
           onReveal={reveal}
           helpfulMarked={!!helpfulPerStage.pivot_insights}
         />
+        */}
 
         {/* Stage 2 — revealed on click */}
         {revealed.stage_2 ? (
@@ -337,6 +510,8 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
             onStartNewTicket={startNewTicket}
             onReveal={reveal}
             helpfulMarked={!!helpfulPerStage.stage_3}
+            attemptedStepsByStep3={attemptedStage3Steps}
+            onToggleAttemptedStep={toggleAttemptedStep}
           />
         ) : null}
 
@@ -365,6 +540,7 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
             onStartNewTicket={startNewTicket}
             helpfulMarked={!!helpfulPerStage.stage_5}
             autoExpand={resumedAtStage5}
+            attemptedStage3Steps={attemptedStage3Steps}
           />
         ) : null}
 

@@ -61,6 +61,132 @@ def _format_duration(seconds: float) -> str:
     return f"{h}h {m2}m" if m2 > 0 else f"{h}h"
 
 
+def compute_journey_time_metrics(session_id: str) -> Dict[str, Any]:
+    """Sprint 13.26 — aggregate time-on-task signals for the Tier-2
+    handoff note's opener bullets.
+
+    Returns a dict with:
+      * `stage_durations` — {stage_id: int_seconds, ...} for any
+        stage with two or more events (rendered + advance).
+      * `discuss_chat_count`, `discuss_chat_seconds` — Stage 0
+        per-bullet "Discuss with Logic" chats (chat_sessions where
+        `scope_incident_id` is set + `metadata.journey_session_id`
+        matches this journey).
+      * `kb_chat_count`, `kb_chat_seconds` — Stage 4 Search-KB
+        chats (same parentage, scope_incident_id is NULL).
+      * `total_journey_seconds` — last-event-minus-first-event
+        across the whole tier1_journey_events row set.
+
+    Failure-open: any DB error returns the dict with whatever
+    metrics were computable; never raises.
+    """
+    metrics: Dict[str, Any] = {
+        "stage_durations": {},
+        "discuss_chat_count": 0,
+        "discuss_chat_seconds": 0,
+        "kb_chat_count": 0,
+        "kb_chat_seconds": 0,
+        "total_journey_seconds": 0,
+    }
+    if not session_id:
+        return metrics
+
+    try:
+        from backend.db.connection import engine as _engine
+    except Exception as exc:
+        logger.warning("[journey.metrics] engine import failed: %s", exc)
+        return metrics
+
+    # ── Per-stage durations from tier1_journey_events ──
+    try:
+        with _engine.connect() as conn:
+            rows = conn.execute(
+                text(
+                    """
+                    SELECT stage, created_at
+                    FROM tier1_journey_events
+                    WHERE session_id = :sid
+                    ORDER BY created_at ASC, id ASC
+                    """
+                ),
+                {"sid": session_id},
+            ).mappings().all()
+    except Exception as exc:
+        logger.warning("[journey.metrics] events query failed: %s", exc)
+        rows = []
+
+    if rows:
+        per_stage_first: Dict[str, Any] = {}
+        per_stage_last: Dict[str, Any] = {}
+        first_ts = rows[0].get("created_at")
+        last_ts = rows[-1].get("created_at")
+        for r in rows:
+            st = r.get("stage")
+            ts = r.get("created_at")
+            if not st or ts is None:
+                continue
+            if st not in per_stage_first:
+                per_stage_first[st] = ts
+            per_stage_last[st] = ts
+        for st, fts in per_stage_first.items():
+            lts = per_stage_last.get(st, fts)
+            try:
+                d = (lts - fts).total_seconds()
+                if d > 0:
+                    metrics["stage_durations"][st] = int(round(d))
+            except Exception:
+                pass
+        try:
+            metrics["total_journey_seconds"] = int(
+                round((last_ts - first_ts).total_seconds())
+            )
+        except Exception:
+            pass
+
+    # ── Chat-session aggregates: Discuss-with-Logic vs Search-KB ──
+    # `chat_sessions.metadata_json.journey_session_id` ties a chat
+    # back to this journey (set by create_chat_session_with_handoff).
+    # `scope_incident_id` distinguishes per-bullet Discuss chats
+    # (set) from generic Search-KB chats (NULL).
+    try:
+        with _engine.connect() as conn:
+            chat_rows = conn.execute(
+                text(
+                    """
+                    SELECT cs.id::text                              AS chat_id,
+                           cs.created_at                            AS started_at,
+                           cs.scope_incident_id                     AS scope_incident_id,
+                           (SELECT MAX(created_at)
+                              FROM chat_messages
+                             WHERE session_id = cs.id::text)        AS last_msg_at
+                    FROM chat_sessions cs
+                    WHERE cs.metadata_json->>'journey_session_id' = :sid
+                    """
+                ),
+                {"sid": session_id},
+            ).mappings().all()
+    except Exception as exc:
+        logger.warning("[journey.metrics] chat_sessions query failed: %s", exc)
+        chat_rows = []
+
+    for r in chat_rows:
+        started = r.get("started_at")
+        last = r.get("last_msg_at") or started
+        scope = r.get("scope_incident_id")
+        try:
+            secs = max(0, int(round((last - started).total_seconds())))
+        except Exception:
+            secs = 0
+        if scope:
+            metrics["discuss_chat_count"] += 1
+            metrics["discuss_chat_seconds"] += secs
+        else:
+            metrics["kb_chat_count"] += 1
+            metrics["kb_chat_seconds"] += secs
+
+    return metrics
+
+
 def fetch_traversal_log(session_id: str) -> List[Dict[str, Any]]:
     """Read tier1_journey_events for this session, return as a flat list
     of `{step, result, note}` dicts compatible with build_package's

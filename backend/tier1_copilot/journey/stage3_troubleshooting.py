@@ -48,6 +48,7 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger("acadia-log-iq")
 
 from .schemas import (
+    ConsolidatedStep,
     DiagnosticLogicEntry,
     Stage3TroubleshootingApproach,
     TicketTroubleshootingDetail,
@@ -57,6 +58,7 @@ from .schemas import (
 # Sprint 13 — new per-ticket pipeline. Imported lazily-safe (no
 # circular dep: stage3_guided_workflows depends only on schemas +
 # stage2_historical helpers).
+from .stage3_consolidated import build_consolidated_ledger
 from .stage3_guided_workflows import build_guided_workflows
 from .stage3_synthesis import synthesize_workflows
 # Sprint 10.8.1 §3 — share the array-aware path walker + flattener
@@ -617,6 +619,13 @@ def build_stage3(
     *,
     max_details_shown: int = 5,
     filter_empty_details: bool = True,
+    # Sprint 13.24 PERF — caller (the /stage-3 route) can pre-compute
+    # the consolidated ledger via the route-level cache and inject
+    # it here, so /stage-3 and /escalation-handoff-note share one
+    # warm LLM call. When None, falls back to running the ledger
+    # build inline (back-compat for direct callers / tests).
+    consolidated_steps: Optional[List[ConsolidatedStep]] = None,
+    consolidated_synthesis_skipped: Optional[bool] = None,
 ) -> Stage3TroubleshootingApproach:
     """Sprint 13 — replaced the merged-ledger pipeline with per-ticket
     Guided Workflows. The Sprint 10/12.6 consolidated ``steps`` list
@@ -641,6 +650,8 @@ def build_stage3(
     """
     if not cohort:
         return Stage3TroubleshootingApproach(
+            consolidated_steps=[],
+            consolidated_synthesis_skipped=False,
             guided_workflows=[],
             cohort_size=0,
             per_ticket_details=[],
@@ -654,17 +665,31 @@ def build_stage3(
     )
 
     # Sprint 13 — Guided Workflows: harvest + LLM synthesis.
+    # Sprint 13.24 PERF — `synthesize_workflows` made FIVE sequential
+    # Haiku calls (~25s wall time) but the frontend has not rendered
+    # `guided_workflows` since Sprint 13.12 (replaced by
+    # `consolidated_steps`). Skipping the synthesis step is the
+    # single largest perf win in this flow — Stage 3 loads drop from
+    # ~30s to ~5s. We still keep the structural harvest so any
+    # future caller that consumes the field gets the per-ticket
+    # action lists; only the LLM polish is dropped.
     workflows = build_guided_workflows(cohort)
-    ticket_lookup: Dict[str, Dict[str, Any]] = {}
-    for t in cohort:
-        if not isinstance(t, dict):
-            continue
-        inc = _safe_get(t, "Metadata", "Incident_Number")
-        if isinstance(inc, str) and inc.strip():
-            ticket_lookup[inc.strip()] = t
-    workflows = synthesize_workflows(workflows, ticket_lookup)
+
+    # Sprint 13.12 — primary Stage 3 surface: a single LLM-merged
+    # 5-step read-only ledger. Failure-open: empty list when the LLM
+    # round-trip fails.
+    # Sprint 13.24 PERF — when the route layer pre-supplies the
+    # ledger via the session-keyed cache, skip the inline LLM call
+    # entirely. /stage-3 and /escalation-handoff-note share one
+    # warm result this way.
+    if consolidated_steps is None:
+        consolidated_steps, consolidated_skipped = build_consolidated_ledger(cohort)
+    else:
+        consolidated_skipped = bool(consolidated_synthesis_skipped or False)
 
     return Stage3TroubleshootingApproach(
+        consolidated_steps=consolidated_steps,
+        consolidated_synthesis_skipped=consolidated_skipped,
         guided_workflows=workflows,
         cohort_size=len(cohort),
         per_ticket_details=per_ticket_details,

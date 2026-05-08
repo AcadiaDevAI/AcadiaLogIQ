@@ -3161,6 +3161,73 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     # empty-result class of bug while keeping Search-in-KB
     # byte-identical to its pre-scope behavior.
     if _scope_incident_ids:
+        # ── Sprint 13.15 — JSON-first scoped chat ──
+        # When a ticket is in scope, try to answer from its FULL
+        # structured JSON before falling back to chunk retrieval.
+        # Engineers ask in natural language ("affected assets", not
+        # "Affected_Assets"); the LLM maps phrasings → JSON fields
+        # semantically with the entire ticket as context. Cost is
+        # trivial (~3 K input tokens / question) because Sprint 11's
+        # full-fidelity ingest already stamps the entire source
+        # ticket on every chunk's metadata_json. Failure-open: any
+        # error or empty answer falls through to today's chunk
+        # path below. Search-KB / unscoped flows are untouched.
+        try:
+            from backend.retrieval.scoped_full_ticket import (
+                build_source_for_full_ticket,
+                fetch_full_ticket_json,
+                synthesize_scoped_answer,
+            )
+            _full_record = fetch_full_ticket_json(_scope_incident_ids[0])
+            if _full_record is not None:
+                _json_answer = synthesize_scoped_answer(req.q, _full_record)
+                if _json_answer:
+                    # Persistence shape (rich dicts) vs response shape
+                    # (flat string list) — AnswerResponse.sources is
+                    # typed as List[str], so we pass just the file
+                    # name. The saved chat_messages.sources keeps the
+                    # rich dict so the frontend's source-detail
+                    # expansion still has all metadata.
+                    _json_sources_rich = build_source_for_full_ticket(_full_record)
+                    _json_sources_for_response = [_full_record.document_name]
+                    save_message_to_session(
+                        session_id=session_id,
+                        role="assistant",
+                        content=_json_answer,
+                        owner_id=owner_id,
+                        sources={"docs": _json_sources_rich},
+                    )
+                    logger.info(
+                        "[scope_json] chat=%s scope=%s — JSON-first "
+                        "answer served (chars=%d, source=%s)",
+                        session_id,
+                        _scope_incident_ids[0],
+                        len(_json_answer),
+                        _full_record.document_name,
+                    )
+                    return AnswerResponse(
+                        answer=_json_answer,
+                        sources=_json_sources_for_response,
+                        confidence=1.0,
+                        processing_time_ms=int((time.perf_counter() - start) * 1000),
+                        session_id=session_id,
+                        context_stats={
+                            "scope_incident_id": _scope_incident_ids[0],
+                            "scoped_path": "json_first",
+                            "scoped_source_document": _full_record.document_name,
+                            "cache_hit": False,
+                        },
+                    )
+        except Exception as _scope_json_exc:
+            logger.warning(
+                "[scope_json] JSON-first synthesis failed for chat=%s "
+                "scope=%s err=%s — falling back to chunk path",
+                session_id, _scope_incident_ids[0], _scope_json_exc,
+            )
+
+        # Fallback (or default when JSON synthesis was empty/None):
+        # today's chunk-based scoped retrieval. Same behaviour as
+        # before Sprint 13.15 from this point onward.
         from backend.retrieval.scoped_retrieval import retrieve_within_incident
         retrieval = retrieve_within_incident(
             scope_incident_id=_scope_incident_ids[0],

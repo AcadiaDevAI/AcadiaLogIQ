@@ -17,6 +17,12 @@ import CorpusStatsTail from "./CorpusStatsTail";
 import DislikeButton from "./DislikeButton";
 import EscalateButton from "./EscalateButton";
 import HelpfulButton from "./HelpfulButton";
+// Sprint 13.10 — Stage 0 now offers a direct shortcut to Stage 3
+// (Guided Troubleshooting Workflow) alongside Escalate, so the
+// engineer can skip the intermediate Pivot Insights / Stage 2
+// panels when they want to go straight to the playbook.
+import NextStageButton from "./NextStageButton";
+import { STAGE_LABELS } from "../tier1Constants";
 import { stripLeadingNumber } from "./stepText";
 import useChatHandoff from "./useChatHandoff";
 
@@ -59,42 +65,17 @@ function extractTrailingIncidentId(stepText) {
 }
 
 
-// Sprint 10.4 §2.2 — plain-English headlines by evidence_strength.
-// "We found N similar past tickets" replaces the old "We've seen this
-// issue N times" preamble. Score-3 ticket gets honest framing without
-// the architect-speak phrase "adequate, not exemplary".
+// Sprint 13.7 — headline simplified. The previous evidence-strength
+// branching appended "The best fix came from INC-XXX (rated N/5)" /
+// "Closest match: INC-XXX" tails — those have been removed at the
+// request of the user. The headline now reads only the cohort-count
+// preamble; the per-ticket detail rendered below the headline carries
+// the source incident IDs directly. `formatMinutes` and the unused
+// branches are left in place via this single-line builder so the
+// imports / signatures don't need a follow-up cleanup.
 function buildHeadline(data) {
   const n = data.cohort_size || 0;
-  const inc = data.best_incident;
-  const score = data.best_quality_score;
-  const ttr = formatMinutes(data.best_time_minutes);
-  const ttrTail = ttr ? `, fixed in ${ttr}` : "";
-  const found = `We found ${n} similar past ticket${n === 1 ? "" : "s"}`;
-
-  switch (data.evidence_strength) {
-    case "strong":
-      if (!inc) return `${found}.`;
-      return `${found}. The best fix came from ${inc} (rated ${score}/5${ttrTail}).`;
-    case "adequate":
-      if (!inc) return `${found}.`;
-      return (
-        `${found}. The closest fix came from ${inc} ` +
-        `(rated ${score}/5 — this worked, though the write-ups weren't detailed${ttrTail}).`
-      );
-    case "weak":
-      if (!inc) return `${found}, but none scored well.`;
-      return (
-        `${found}, but the best one was only rated ${score}/5. ` +
-        `Use the suggested fix as a starting point — verify before acting.`
-      );
-    case "none":
-    default:
-      if (!inc) return (
-        `${found}, but none had a quality rating. ` +
-        `Review the matches below case-by-case.`
-      );
-      return `${found}. Closest match: ${inc}${ttrTail}.`;
-  }
+  return `We found ${n} similar instances for this issue${n === 1 ? "" : "s"}.`;
 }
 
 
@@ -120,14 +101,19 @@ export default function Stage0BestTicketDistillation({
     return (
       <Card style={{ marginBottom: 16, borderLeft: "4px solid #6B6B6B" }}>
         <Title level={5} style={{ marginTop: 0 }}>Best Historical Match & Recommended Resolution</Title>
+        {/* Sprint 13.8 — profile_match line suppressed in the sparse
+            case too, for parity with the main panel above. */}
+        {/*
         {data.profile_match ? (
           <Paragraph style={{ marginBottom: 8 }}>
             <Text type="secondary">{data.profile_match}</Text>
           </Paragraph>
         ) : null}
+        */}
         <Paragraph style={{ marginBottom: 0 }}>
-          {/* Sprint 10.4 §2.1 — plain-English sparse copy. */}
-          No similar past tickets found. Use the playbook below.
+          {/* Sprint 13.7 — softer no-data copy. */}
+          No relevant historical tickets were found for this issue.
+          Please review the recommended actions below.
         </Paragraph>
       </Card>
     );
@@ -137,43 +123,58 @@ export default function Stage0BestTicketDistillation({
 
   return (
     <Card style={{ marginBottom: 16, borderLeft: `4px solid ${color}` }}>
-      <Title level={5} style={{ marginTop: 0, marginBottom: 4 }}>
+      {/* Sprint 13.8 — marginBottom bumped 4 → 16 so there is one
+          line of breathing room between the title and the headline.
+          The original 4px was set when `profile_match` rendered as a
+          tag directly below the title (now commented out); without
+          that intermediate element the title and headline collide
+          visually. */}
+      <Title level={5} style={{ marginTop: 0, marginBottom: 16 }}>
         Best Historical Match & Recommended Resolution
       </Title>
 
+      {/* Sprint 13.8 — profile_match tag suppressed at the user's
+          request. The line read e.g.
+          "BGP Flap (BFD Down). · Network / Fast Convergence · ny4-core-rtr"
+          and surfaced ticket-internal taxonomy that the engineer
+          shouldn't see at the Stage 0 level. Backend still computes
+          `data.profile_match`; only the render is commented.
+          Reinstate by un-commenting the JSX block. */}
+      {/*
       {data.profile_match ? (
         <Tag style={{ marginBottom: 8 }}>{data.profile_match}</Tag>
       ) : null}
+      */}
 
       <Paragraph style={{ marginBottom: 12 }}>
         <Text strong>{buildHeadline(data)}</Text>
       </Paragraph>
 
-      {data.what_worked ? (
+      {/* {data.what_worked ? (
         <Paragraph style={{ marginBottom: 8 }}>
           <Text strong>What worked: </Text>
           {data.what_worked}
         </Paragraph>
-      ) : null}
+      ) : null} */}
 
-      {data.how_they_did_it && data.how_they_did_it.length > 0 ? (
+      {/* Sprint 13.7 — bullet source switched from `how_they_did_it`
+          (Resolution_Steps) to `top5_incident_summaries`
+          (Incident_Summary.INCIDENT). Heading renamed "How they did
+          it" → "Possible details are". Per-bullet button label
+          renamed "Ask in chat" → "Discuss with Logic". The
+          ` - INC-XXX` suffix shape is preserved on the new field so
+          `extractTrailingIncidentId` keeps scoping the per-bullet
+          chat handoff to the right source ticket. The legacy
+          `how_they_did_it` field stays on the schema for any other
+          consumer; only the render source changed. */}
+      {data.top5_incident_summaries && data.top5_incident_summaries.length > 0 ? (
         <div style={{ marginBottom: 8 }}>
-          <Text strong>How they did it:</Text>
+          <Text strong>Possible details are:</Text>
           <List
             size="small"
-            dataSource={data.how_they_did_it}
+            dataSource={data.top5_incident_summaries}
             renderItem={(s, i) => {
-              // Sprint 11 — Strip any pre-existing "1.", "1)", "1 -", etc.
-              // baked into the source string. Otherwise the React index
-              // prefix below produces "1. 1. Incident..." double-numbering.
               const cleaned = stripLeadingNumber(s);
-              // Sprint 12.1 — Pull the trailing " - INC-XXX" off the
-              // bullet so we can (a) scope this bullet's "Ask in chat"
-              // handoff to that source ticket, and (b) tell the user
-              // explicitly which past ticket the step came from.
-              // Falls back to data.best_incident when the suffix is
-              // missing, so legacy bullets (or fields without the
-              // " - INC-XXX" tail) still get a sensible scope.
               const bulletIncident =
                 extractTrailingIncidentId(cleaned) || data.best_incident || null;
               return (
@@ -189,20 +190,12 @@ export default function Stage0BestTicketDistillation({
                   <span style={{ flex: 1 }}>
                     {i + 1}. {cleaned}
                   </span>
-                  {/* Sprint 11 — per-step "Ask in chat" link.
-                      Sprint 12.1 — also passes the bullet's source
-                      Incident_Number so the chat session is scoped to
-                      that one ticket (chat answers only from that
-                      ticket's chunks). When the bullet has no parsable
-                      source, we fall back to data.best_incident so the
-                      user never lands in an unscoped chat from a
-                      Stage 0 bullet click. */}
                   {sessionId && cleaned ? (
                     <Tooltip
                       title={
                         bulletIncident
-                          ? `Ask this step in a new chat — answers will be scoped to ${bulletIncident}`
-                          : "Ask this step in a new chat"
+                          ? `Discuss this with Logic — the chat will be scoped to ${bulletIncident}`
+                          : "Discuss this with Logic"
                       }
                     >
                       <Button
@@ -213,7 +206,7 @@ export default function Stage0BestTicketDistillation({
                         onClick={() => askInChat(cleaned, bulletIncident)}
                         style={{ paddingLeft: 0, paddingRight: 0 }}
                       >
-                        Ask in chat
+                        Discuss with LogIQ
                       </Button>
                     </Tooltip>
                   ) : null}
@@ -268,11 +261,28 @@ export default function Stage0BestTicketDistillation({
               stage="stage_0"
             />
           </div>
-          <EscalateButton
-            sessionId={sessionId}
-            fromStage="stage_0"
-            onReveal={onReveal}
-          />
+          {/* Sprint 13.10 — Escalate to Tier 2 + Guided Troubleshooting
+              Workflow shortcut grouped on the right. The latter
+              advances directly to Stage 3, bypassing Pivot Insights
+              and Stage 2. NextStageButton itself fires the
+              `next_stage_clicked` telemetry event and calls
+              `onReveal("stage_3")` which mounts the panel and posts
+              `stage_advanced` so /resume-state lands the engineer
+              at Stage 3 on next remount. */}
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <EscalateButton
+              sessionId={sessionId}
+              fromStage="stage_0"
+              onReveal={onReveal}
+            />
+            <NextStageButton
+              sessionId={sessionId}
+              fromStage="stage_0"
+              toStage="stage_3"
+              label={STAGE_LABELS.stage_3}
+              onReveal={onReveal}
+            />
+          </div>
         </div>
       ) : null}
     </Card>
