@@ -478,7 +478,7 @@ export default function Sidebar() {
 
       {/* Footer */}
       <div className="px-3 py-3 border-t" style={{ borderColor: "var(--border-color)" }}>
-        {state.selectedMode && (
+        {/* {state.selectedMode && (
           <Button
             type="text"
             block
@@ -488,7 +488,7 @@ export default function Sidebar() {
           >
             Change Context
           </Button>
-        )}
+        )} */}
         <Popconfirm title="Clear all chat history?" onConfirm={handleClearAll} okText="Clear" cancelText="Cancel" okButtonProps={{ danger: true }}>
           <Button type="text" icon={<ClearOutlined />} block size="small" className="t-text-muted text-xs">
             Clear All History

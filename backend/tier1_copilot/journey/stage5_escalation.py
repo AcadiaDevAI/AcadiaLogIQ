@@ -84,6 +84,11 @@ def compute_journey_time_metrics(session_id: str) -> Dict[str, Any]:
         "stage_durations": {},
         "discuss_chat_count": 0,
         "discuss_chat_seconds": 0,
+        # Sprint 13.29 — per-chat breakdown for the Discuss-with-Logic
+        # bullet so the handoff note can name the engaged ticket(s)
+        # alongside total time. Each entry: {"incident_id": str,
+        # "seconds": int}. Order matches chat_sessions.created_at ASC.
+        "discuss_chats": [],
         "kb_chat_count": 0,
         "kb_chat_seconds": 0,
         "total_journey_seconds": 0,
@@ -144,9 +149,19 @@ def compute_journey_time_metrics(session_id: str) -> Dict[str, Any]:
             pass
 
     # ── Chat-session aggregates: Discuss-with-Logic vs Search-KB ──
-    # `chat_sessions.metadata_json.journey_session_id` ties a chat
-    # back to this journey (set by create_chat_session_with_handoff).
-    # `scope_incident_id` distinguishes per-bullet Discuss chats
+    # Sprint 13.28 — corrected JOIN. The journey_session_id is NOT on
+    # chat_sessions (that table has no metadata_json column); it's
+    # folded into the FIRST chat_messages row's sources_json under the
+    # namespaced `_session_metadata` key by save_message_to_session()
+    # (see backend/vector_store.py:1225-1231 and
+    # backend/tier1_copilot/journey/stage4_search_kb_handoff.py:92-93).
+    # The pre-13.28 query targeted a column that doesn't exist, so
+    # discuss_chat_count and kb_chat_count were always 0 in the
+    # Tier-2 handoff opener — even when the engineer had clearly
+    # opened a Discuss-with-Logic chat. Fix: EXISTS sub-select against
+    # chat_messages.sources_json.
+    # `scope_incident_id` (a real column on chat_sessions, set by the
+    # per-bullet handoff's UPDATE) still distinguishes Discuss chats
     # (set) from generic Search-KB chats (NULL).
     try:
         with _engine.connect() as conn:
@@ -160,7 +175,12 @@ def compute_journey_time_metrics(session_id: str) -> Dict[str, Any]:
                               FROM chat_messages
                              WHERE session_id = cs.id::text)        AS last_msg_at
                     FROM chat_sessions cs
-                    WHERE cs.metadata_json->>'journey_session_id' = :sid
+                    WHERE EXISTS (
+                        SELECT 1 FROM chat_messages cm
+                        WHERE cm.session_id = cs.id::text
+                          AND cm.sources_json->'_session_metadata'->>'journey_session_id'
+                              = :sid
+                    )
                     """
                 ),
                 {"sid": session_id},
@@ -169,7 +189,14 @@ def compute_journey_time_metrics(session_id: str) -> Dict[str, Any]:
         logger.warning("[journey.metrics] chat_sessions query failed: %s", exc)
         chat_rows = []
 
-    for r in chat_rows:
+    # Order chat aggregation by start time so the handoff note's
+    # per-ticket Discuss list reads in the order the engineer opened
+    # each chat (oldest → newest).
+    sorted_rows = sorted(
+        chat_rows,
+        key=lambda r: r.get("started_at") or 0,
+    )
+    for r in sorted_rows:
         started = r.get("started_at")
         last = r.get("last_msg_at") or started
         scope = r.get("scope_incident_id")
@@ -180,6 +207,9 @@ def compute_journey_time_metrics(session_id: str) -> Dict[str, Any]:
         if scope:
             metrics["discuss_chat_count"] += 1
             metrics["discuss_chat_seconds"] += secs
+            metrics["discuss_chats"].append(
+                {"incident_id": str(scope), "seconds": int(secs)}
+            )
         else:
             metrics["kb_chat_count"] += 1
             metrics["kb_chat_seconds"] += secs

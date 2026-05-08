@@ -128,14 +128,152 @@ def _opening_paragraph(
 
     discuss_count = int(metrics.get("discuss_chat_count", 0) or 0)
     discuss_secs = int(metrics.get("discuss_chat_seconds", 0) or 0)
+    # Sprint 13.29 — per-chat breakdown so the Discuss bullet can name
+    # the engaged ticket(s). Falls back to [] when missing for back-compat.
+    discuss_chats = metrics.get("discuss_chats") or []
     kb_count = int(metrics.get("kb_chat_count", 0) or 0)
     kb_secs = int(metrics.get("kb_chat_seconds", 0) or 0)
     total_secs = int(metrics.get("total_journey_seconds", 0) or 0)
 
+    # Set of incident IDs the engineer engaged via Discuss-with-Logic
+    # chat. Powers the historical bullet's engagement-aware phrasing —
+    # opening a per-ticket chat IS opening that ticket "in detail" even
+    # when Stage 2's panel was never visited.
+    engaged_via_chat = {
+        str(c.get("incident_id") or "").strip()
+        for c in discuss_chats
+        if c.get("incident_id")
+    }
+    engaged_via_chat.discard("")
+
     bullets: List[str] = []
     bullets.append("- Tier 1 has completed initial triage.")
 
-    # Search KB / SOP reference
+    # Sprint 13.28 — bullet order rearranged at user's request to mirror
+    # the engineer's natural triage flow:
+    #   1. triage complete (always)
+    #   2. historical tickets (Stage 0 / 2 / pivot — surfaced first)
+    #   3. discuss with logic (per-bullet chats off the historical list)
+    #   4. guided troubleshooting workflow (Stage 3)
+    #   5. search KB / SOP reference (Stage 4 — last-resort lookup)
+    #   6. total time
+    # The clauses themselves are unchanged; only the order is different.
+
+    # ── 2. Historical tickets ────────────────────────────────────
+    # Sprint 13.28 — append `(Xs across context panels)` time when
+    # available. The "context panels" cover any stage that surfaces
+    # the cohort to the engineer: stage_0 (Best Historical Match),
+    # pivot_insights (Pivot Insights), and stage_2 (Related
+    # Incidents). We sum durations for whichever of these the
+    # engineer actually visited so the bullet reflects how long they
+    # studied the historical evidence — even when stage_2 itself was
+    # never opened in detail.
+    history_secs = 0
+    for st in ("stage_0", "pivot_insights", "stage_2"):
+        v = stage_durations.get(st)
+        if isinstance(v, int) and v > 0:
+            history_secs += v
+    history_dur = (
+        _format_duration_secs(history_secs) if history_secs > 0 else None
+    )
+    inc_str = ", ".join(incidents) if incidents else ""
+
+    # Sprint 13.29 — engagement-aware phrasing. If the engineer
+    # opened a Discuss-with-Logic chat on at least one of the cohort
+    # tickets, that ticket WAS opened in detail — even if Stage 2's
+    # panel was never visited. Cohort-restricted set so a stray chat
+    # scoped to a non-cohort ticket doesn't change the framing.
+    chat_engaged_in_cohort = sorted(
+        engaged_via_chat.intersection({str(i) for i in incidents})
+    )
+
+    # Sprint 13.29 — multi-line layout to fix wrap-alignment in the
+    # <pre>-rendered note. With pre-wrap and word-break, a long
+    # single-line bullet wraps to column 0 (no hanging indent), so
+    # the time suffix appears unaligned with the bullet text. Splitting
+    # the bullet across a header line + 2-space-indented continuation
+    # lines makes alignment explicit regardless of viewport width.
+    if stage_2_visited:
+        header = "- Similar historical tickets reviewed in detail:"
+    elif chat_engaged_in_cohort:
+        engaged_str = ", ".join(chat_engaged_in_cohort)
+        header = (
+            "- Historical tickets surfaced for context "
+            f"(engaged via per-ticket chat for {engaged_str}):"
+        )
+    else:
+        header = (
+            "- Historical tickets surfaced for context "
+            "(not opened in detail):"
+        )
+    if inc_str:
+        block = [header, f"  {inc_str}"]
+        if history_dur:
+            block.append(f"  ({history_dur} across context panels)")
+        bullets.append("\n".join(block))
+    else:
+        if history_dur:
+            bullets.append(
+                f"{header[:-1]} ({history_dur} across context panels)."
+            )
+        else:
+            bullets.append(header[:-1] + ".")
+
+    # ── 3. Discuss with Logic — per-bullet ticket chats ──────────
+    # Sprint 13.29 — name the engaged ticket(s) alongside their
+    # individual durations. Single chat → "INC-X (1m 21s)";
+    # multi-chat → "INC-A (1m 21s), INC-B (45s); 2m 6s total".
+    if discuss_count > 0 and discuss_chats:
+        per_chat = ", ".join(
+            f"{str(c.get('incident_id') or '?')} "
+            f"({_format_duration_secs(int(c.get('seconds') or 0))})"
+            for c in discuss_chats
+        )
+        if discuss_count == 1:
+            bullets.append(
+                f"- Discuss with Logic: per-ticket chat for {per_chat}."
+            )
+        else:
+            total_str = (
+                f"; {_format_duration_secs(discuss_secs)} total"
+                if discuss_secs > 0 else ""
+            )
+            bullets.append(
+                f"- Discuss with Logic: {discuss_count} per-ticket chat "
+                f"sessions — {per_chat}{total_str}."
+            )
+    elif discuss_count > 0:
+        # Defensive fallback: per-chat list missing but counts present.
+        # Shouldn't happen with the 13.29 metrics, but keeps older
+        # callers / pre-migration data renderable.
+        dur_str = (
+            f", {_format_duration_secs(discuss_secs)} total"
+            if discuss_secs > 0 else ""
+        )
+        bullets.append(
+            f"- Discuss with Logic: {discuss_count} per-ticket chat session"
+            + ("s" if discuss_count != 1 else "")
+            + dur_str + "."
+        )
+    else:
+        bullets.append(
+            "- Discuss with Logic: no per-ticket chat sessions opened."
+        )
+
+    # ── 4. Guided Troubleshooting Workflow ───────────────────────
+    stage3_dur = _dur_for("stage_3")
+    if stage_3_visited:
+        bullets.append(
+            "- Guided Troubleshooting Workflow: opened"
+            + (f" ({stage3_dur} on the panel)" if stage3_dur else "")
+            + "."
+        )
+    else:
+        bullets.append(
+            "- Guided Troubleshooting Workflow: NOT opened during this triage."
+        )
+
+    # ── 5. Search KB / SOP reference ─────────────────────────────
     stage4_dur = _dur_for("stage_4")
     if stage_4_visited and kb_chat_engaged:
         bits = ["consulted"]
@@ -166,53 +304,7 @@ def _opening_paragraph(
             "- Search KB / SOP reference: NOT consulted during this triage."
         )
 
-    # Guided Troubleshooting Workflow
-    stage3_dur = _dur_for("stage_3")
-    if stage_3_visited:
-        bullets.append(
-            "- Guided Troubleshooting Workflow: opened"
-            + (f" ({stage3_dur} on the panel)" if stage3_dur else "")
-            + "."
-        )
-    else:
-        bullets.append(
-            "- Guided Troubleshooting Workflow: NOT opened during this triage."
-        )
-
-    # Discuss-with-Logic per-bullet ticket chats
-    if discuss_count > 0:
-        dur_str = (
-            f", {_format_duration_secs(discuss_secs)} total"
-            if discuss_secs > 0 else ""
-        )
-        bullets.append(
-            f"- Discuss with Logic: {discuss_count} per-ticket chat session"
-            + ("s" if discuss_count != 1 else "")
-            + dur_str + "."
-        )
-    else:
-        bullets.append(
-            "- Discuss with Logic: no per-ticket chat sessions opened."
-        )
-
-    # Historical tickets — list always present; phrasing depends on
-    # whether Stage 2 was opened in detail.
-    inc_str = ", ".join(incidents) if incidents else ""
-    if stage_2_visited:
-        if inc_str:
-            bullets.append(
-                f"- Similar historical tickets reviewed in detail: {inc_str}."
-            )
-        else:
-            bullets.append("- Similar historical tickets reviewed in detail.")
-    else:
-        if inc_str:
-            bullets.append(
-                f"- Historical tickets surfaced for context (not opened in "
-                f"detail): {inc_str}."
-            )
-
-    # Total journey time (when meaningfully > 0)
+    # ── 6. Total journey time (when meaningfully > 0) ────────────
     if total_secs > 0:
         bullets.append(
             f"- Total time on this triage: {_format_duration_secs(total_secs)}."
