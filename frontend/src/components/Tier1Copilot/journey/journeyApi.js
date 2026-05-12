@@ -117,6 +117,42 @@ export async function getResumeState(sessionId) {
   return data;
 }
 
+// ─────────────────────────────────────────────────────────────
+// Sprint 13.30 — Journey activity-version counter.
+//
+// A monotonically-increasing client-side counter that ticks any
+// time the engineer's journey state mutates (events posted via
+// `postJourneyEvent`, chat sessions opened via `searchKbHandoff`).
+// Stage 5's Operational Handoff snapshots the counter at note-fetch
+// time and re-reads it on every render to detect "the engineer
+// went back and did something after the note was generated" —
+// powering the stale-note UX (Acadia-themed Regenerate button +
+// pulsing dot + Copy guardrail) without any polling or extra
+// backend endpoint.
+//
+// Why client-side: every action that mutates journey state already
+// flows through one of the two functions below, so a single bump
+// in each is sufficient. Cheap, no network cost, no extra DB load.
+// ─────────────────────────────────────────────────────────────
+let _activityVersion = 0;
+const _activityListeners = new Set();
+
+export function getActivityVersion() {
+  return _activityVersion;
+}
+
+export function bumpActivityVersion() {
+  _activityVersion += 1;
+  _activityListeners.forEach((cb) => {
+    try { cb(_activityVersion); } catch { /* listener errors are non-fatal */ }
+  });
+}
+
+export function subscribeActivityVersion(cb) {
+  _activityListeners.add(cb);
+  return () => { _activityListeners.delete(cb); };
+}
+
 // Sprint 10.2 — POST /tier1/journey/{session_id}/search-kb-handoff
 // → {chat_session_id, redirect_url}
 //
@@ -156,6 +192,10 @@ export async function searchKbHandoff(
     `/tier1/journey/${encodeURIComponent(sessionId)}/search-kb-handoff`,
     body,
   );
+  // Sprint 13.30 — opening a chat (Search-KB or per-bullet Discuss
+  // with LogIQ) is journey-state mutation. Bump so Stage 5's stale
+  // detector picks it up.
+  bumpActivityVersion();
   return data;
 }
 
@@ -175,5 +215,11 @@ export async function postJourneyEvent(sessionId, stage, eventType, payload) {
       ...(payload ? { payload } : {}),
     },
   );
+  // Sprint 13.30 — every journey event (stage_rendered,
+  // next_stage_clicked, helpful_clicked, dislike_clicked,
+  // kb_chat_engaged, ...) is a state mutation. Bump so Stage 5's
+  // stale detector knows the engineer has done something since
+  // the last handoff-note generation.
+  bumpActivityVersion();
   return data;
 }

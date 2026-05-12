@@ -10,7 +10,7 @@
 // Layout:
 //   Card title: "Guided Troubleshooting Workflow"   ← single heading
 //     ┌─ Collapse panel: MATCH 1 — INC-XXX — <synthesised header>
-//     │    Step 1: <action>     <command>?
+//     │    INC-XXX: <action>     <command>?
 //     │      Why: <intent>
 //     │      Outcome: <pivot prose>
 //     │    ...
@@ -133,10 +133,11 @@ function ConsolidatedSteps({ steps, attemptedSteps, onToggleAttempt }) {
         type="secondary"
         style={{ fontSize: 12, marginTop: 4, marginBottom: 8 }}
       >
-        Tick any step you have already tried that did not resolve the
-        issue. Your selections flow into the Tier-2 handoff note when
-        the ticket is escalated, so the next engineer can pick up
-        where you left off.
+        Each activity below is consolidated from one matching historical
+        ticket — the source incident number is shown next to each label.
+        Tick any activity you have already tried that did not resolve
+        the issue; your selections flow into the Tier-2 handoff note
+        when the ticket is escalated.
       </Paragraph>
       <ol
         style={{
@@ -155,7 +156,7 @@ function ConsolidatedSteps({ steps, attemptedSteps, onToggleAttempt }) {
                   title={
                     checked
                       ? "Marked attempted — will be included in the Tier-2 escalation handoff."
-                      : "Mark this step as attempted"
+                      : "Mark this activity as attempted"
                   }
                 >
                   <Checkbox
@@ -163,12 +164,14 @@ function ConsolidatedSteps({ steps, attemptedSteps, onToggleAttempt }) {
                     onChange={() => handleToggle(s.step_number)}
                     className="acadia-attempted-checkbox"
                     style={{ marginTop: 4 }}
-                    aria-label={`Mark Step ${s.step_number} as attempted`}
+                    aria-label={`Mark activity from ${s.incident_number || `row ${s.step_number}`} as attempted`}
                   />
                 </Tooltip>
                 <div style={{ flex: 1 }}>
                   <div>
-                    <Text strong>Step {s.step_number}: </Text>
+                    {s.incident_number ? (
+                      <Text strong>{s.incident_number}: </Text>
+                    ) : null}
                     {/* Sprint 13.14.1 — strikethrough on checked rows
                         removed at the user's request; action text
                         stays full-strength regardless of state. */}
@@ -217,7 +220,7 @@ function GuidedWorkflowStepItem({ step }) {
       style={{ marginBottom: 12 }}
     >
       <div>
-        <Text strong>Step {step.step_number}: </Text>
+        <Text strong>Relevant Troubleshooting Activity {step.step_number}: </Text>
         <Text>{step.action}</Text>
       </div>
       {step.command ? (

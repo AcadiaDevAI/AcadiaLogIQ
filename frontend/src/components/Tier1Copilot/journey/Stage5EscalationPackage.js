@@ -15,8 +15,8 @@
 // blocks; reinstate by un-commenting all three together.
 
 import React, { useEffect, useState } from "react";
-import { Alert, Button, Card, Space, Spin, Tag, Typography, message } from "antd";
-import { CopyOutlined, LoadingOutlined } from "@ant-design/icons";
+import { Alert, Button, Card, Modal, Space, Spin, Tag, Tooltip, Typography, message } from "antd";
+import { CopyOutlined, LoadingOutlined, ReloadOutlined } from "@ant-design/icons";
 
 // Sprint 12.9 — Sprint 7's full EscalationPackageCard render is
 // suppressed. Clicking "Escalate to Tier 2" now lands the engineer
@@ -30,7 +30,37 @@ import HelpfulButton from "./HelpfulButton";
 import {
   fetchEscalationRouting,
   generateEscalationHandoffNote,
+  getActivityVersion,
+  subscribeActivityVersion,
 } from "./journeyApi";
+
+// Sprint 13.30 — stale-note pulse animation. Injected once on first
+// import via a module-level guard so the keyframes exist for the
+// entire app lifetime, not re-injected per render. The
+// `prefers-reduced-motion: reduce` media query disables the
+// animation for users who've opted out (WCAG 2.3.3 + browser
+// vestibular-trigger settings) — the dot still appears as a static
+// indicator, just without the visual pulse.
+let _acadiaPulseStylesInjected = false;
+function _ensurePulseStyles() {
+  if (typeof document === "undefined" || _acadiaPulseStylesInjected) return;
+  const style = document.createElement("style");
+  style.setAttribute("data-acadia-pulse", "1");
+  style.textContent = `
+    @keyframes acadia-pulse-dot {
+      0%, 100% { transform: scale(1);   opacity: 1;    box-shadow: 0 0 0 0 rgba(11, 49, 92, 0.55); }
+      50%      { transform: scale(1.15); opacity: 0.85; box-shadow: 0 0 0 6px rgba(11, 49, 92, 0); }
+    }
+    .acadia-stale-dot {
+      animation: acadia-pulse-dot 1.4s ease-in-out infinite;
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .acadia-stale-dot { animation: none !important; }
+    }
+  `;
+  document.head.appendChild(style);
+  _acadiaPulseStylesInjected = true;
+}
 
 const { Title, Paragraph, Text } = Typography;
 
@@ -155,10 +185,33 @@ function EscalationRoutingSection({ routing }) {
 // `used_fallback=true`, an Alert tells the engineer the diagnostic
 // sentence is heuristic and offers Regenerate.
 // ────────────────────────────────────────────────────────────
-function HandoffNoteAction({ sessionId, attemptedStage3Steps }) {
+function HandoffNoteAction({ sessionId, attemptedStage3Steps, onRefreshRouting }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState(null);
   const [usedFallback, setUsedFallback] = useState(false);
+
+  // Sprint 13.30 — stale-note detection. `noteVersion` snapshots the
+  // journey activity counter at fetch time; `currentActivityVersion`
+  // tracks the live counter via subscription. When they diverge,
+  // the note no longer reflects the engineer's latest journey state.
+  // Initial null on noteVersion → first fetch hasn't completed yet →
+  // never stale (don't false-flag a still-loading note).
+  const [noteVersion, setNoteVersion] = useState(null);
+  const [currentActivityVersion, setCurrentActivityVersion] = useState(
+    () => getActivityVersion(),
+  );
+  React.useEffect(() => {
+    _ensurePulseStyles();
+    const unsubscribe = subscribeActivityVersion((v) => {
+      setCurrentActivityVersion(v);
+    });
+    return unsubscribe;
+  }, []);
+  const isStale =
+    noteVersion !== null
+    && currentActivityVersion > noteVersion
+    && !!note
+    && !busy;
 
   // Sprint 13.19 — extract the ticked step numbers from the lifted
   // map. JSON.stringify on the dep array keeps useCallback stable
@@ -172,7 +225,7 @@ function HandoffNoteAction({ sessionId, attemptedStage3Steps }) {
   }, [attemptedStage3Steps]);
 
   const fetchNote = React.useCallback(async (opts = {}) => {
-    if (!sessionId) return;
+    if (!sessionId) return "";
     setBusy(true);
     try {
       // Sprint 13.24 PERF — auto-fetches use the cache (fast);
@@ -182,12 +235,23 @@ function HandoffNoteAction({ sessionId, attemptedStage3Steps }) {
         attemptedStepNumbers,
         { force: !!opts.force },
       );
-      setNote(data?.note || "");
+      const fresh = data?.note || "";
+      setNote(fresh);
       setUsedFallback(!!data?.used_fallback);
+      // Sprint 13.30 — stamp the version AT successful fetch
+      // completion. Any bump that lands after this stamps a higher
+      // version → next render flips isStale=true. Stamping at
+      // completion (vs. start) intentionally treats events that
+      // arrived *during* the fetch as "after" the note — those
+      // weren't reflected in this run, so they should still trigger
+      // the stale signal.
+      setNoteVersion(getActivityVersion());
+      return fresh;
     } catch (err) {
       // eslint-disable-next-line no-console
       console.error("[journey.handoff_note] generate failed", err);
       message.error("Could not generate the escalation note. Please try again.");
+      return "";
     } finally {
       setBusy(false);
     }
@@ -200,16 +264,66 @@ function HandoffNoteAction({ sessionId, attemptedStage3Steps }) {
     fetchNote();
   }, [fetchNote]);
 
-  const handleCopy = async () => {
-    if (!note) return;
+  // Sprint 13.30 — Regenerate is the hard-reload path: bust caches
+  // server-side, refetch routing, and refetch the note. Used both by
+  // the Regenerate button and by the Copy-while-stale modal's
+  // "Regenerate first" CTA. Returns the fresh note string so the
+  // caller (e.g. Copy-while-stale) can chain a clipboard write
+  // without racing setState.
+  const regenerate = React.useCallback(async () => {
+    if (typeof onRefreshRouting === "function") {
+      onRefreshRouting();
+    }
+    return fetchNote({ force: true });
+  }, [fetchNote, onRefreshRouting]);
+
+  const doCopy = async (text) => {
+    const target = (typeof text === "string" ? text : note) || "";
+    if (!target) return;
     try {
-      await navigator.clipboard.writeText(note);
+      await navigator.clipboard.writeText(target);
       message.success("Escalation note copied.");
     } catch (err) {
       // eslint-disable-next-line no-console
       console.warn("[journey.handoff_note] clipboard write failed", err);
       message.warning("Copy failed — select the text manually.");
     }
+  };
+
+  // Sprint 13.30 — Copy guardrail. When stale, show a confirm modal
+  // with two CTAs:
+  //   - "Regenerate & copy" (default, primary, Acadia color) →
+  //     regen + auto-copy the freshly returned note.
+  //   - "Copy current" (secondary) → copy the existing stale note
+  //     as-is. Engineer's choice; we don't block them outright.
+  // Catches the failure mode where the engineer's eyes miss the
+  // pulsing dot and they paste a stale note into the Tier-2 ticket.
+  const handleCopy = () => {
+    if (!note) return;
+    if (!isStale) {
+      doCopy();
+      return;
+    }
+    Modal.confirm({
+      title: "Updates available",
+      content:
+        "Activity has occurred in this journey since this note was generated. "
+        + "Regenerate to refresh, or copy the current note as-is.",
+      okText: "Regenerate & copy",
+      cancelText: "Copy current",
+      okButtonProps: {
+        type: "primary",
+        style: {
+          background: "var(--acadia-primary)",
+          borderColor: "var(--acadia-primary)",
+        },
+      },
+      onOk: async () => {
+        const fresh = await regenerate();
+        await doCopy(fresh);
+      },
+      onCancel: () => doCopy(),
+    });
   };
 
   return (
@@ -237,17 +351,64 @@ function HandoffNoteAction({ sessionId, attemptedStage3Steps }) {
           </Button>
           {/* Sprint 13.24 — Regenerate restored. Click bypasses the
               session-keyed consolidated-ledger cache (force=true)
-              and triggers a fresh LLM call. Useful when the engineer
-              wants the note re-synthesised after the Haiku model
-              produced an off-target diagnostic phrasing. */}
-          <Button
-            size="small"
-            onClick={() => fetchNote({ force: true })}
-            disabled={busy}
-            icon={busy ? <LoadingOutlined /> : null}
+              and triggers a fresh LLM call.
+              Sprint 13.30 — Regenerate is a hard reload of the
+              entire Stage 5 view (note + routing + cohort cache)
+              and gains a stale-state affordance: when journey
+              activity has occurred since the last successful note
+              fetch (`isStale === true`), the button switches from
+              the default outlined style to an Acadia-primary fill,
+              shows a pulsing dot indicator (CSS keyframes; honors
+              prefers-reduced-motion), and surfaces a tooltip
+              explaining what to do. The non-stale (steady) state
+              is the original Sprint 13.24 button — visually
+              identical to before, so engineers who never trigger
+              activity past Stage 5 see no behavioural change. */}
+          <Tooltip
+            title={
+              isStale
+                ? "Activity has occurred in this journey since this note was generated. Click to refresh."
+                : "Regenerate the handoff note (bypasses cache)."
+            }
           >
-            Regenerate
-          </Button>
+            <Button
+              size="small"
+              onClick={regenerate}
+              disabled={busy}
+              icon={busy ? <LoadingOutlined /> : <ReloadOutlined />}
+              type={isStale ? "primary" : "default"}
+              style={
+                isStale
+                  ? {
+                      background: "var(--acadia-primary)",
+                      borderColor: "var(--acadia-primary)",
+                      color: "#fff",
+                      position: "relative",
+                      paddingRight: 18,
+                    }
+                  : { position: "relative" }
+              }
+            >
+              {isStale ? "Refresh" : "Regenerate"}
+              {isStale ? (
+                <span
+                  className="acadia-stale-dot"
+                  aria-hidden="true"
+                  style={{
+                    position: "absolute",
+                    top: -3,
+                    right: -3,
+                    width: 9,
+                    height: 9,
+                    borderRadius: "50%",
+                    background: "var(--acadia-primary, #0b315c)",
+                    border: "2px solid var(--bg-secondary, #fff)",
+                    pointerEvents: "none",
+                  }}
+                />
+              ) : null}
+            </Button>
+          </Tooltip>
         </Space>
       </div>
 
@@ -325,21 +486,25 @@ export default function Stage5EscalationPackage({
   // Sprint 12.7 — Escalation Routing fetched on mount. Failure here
   // only hides the routing block; the Generate-Handoff button still
   // works. Fire-and-forget; no spinner blocking the panel.
+  // Sprint 13.30 — fetcher lifted to a useCallback so the child
+  // HandoffNoteAction's Regenerate button can invoke it (alongside
+  // the note refetch) for a hard-reload of the whole Stage 5 view.
+  // The auto-fetch on mount is preserved verbatim — only Regenerate
+  // gains an extra trigger path.
   const [routing, setRouting] = useState(null);
-  useEffect(() => {
+  const fetchRouting = React.useCallback(async () => {
     if (!sessionId) return;
-    let cancelled = false;
-    (async () => {
-      try {
-        const r = await fetchEscalationRouting(sessionId);
-        if (!cancelled) setRouting(r);
-      } catch (err) {
-        // eslint-disable-next-line no-console
-        console.warn("[journey.escalation_routing] fetch failed", err);
-      }
-    })();
-    return () => { cancelled = true; };
+    try {
+      const r = await fetchEscalationRouting(sessionId);
+      setRouting(r);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[journey.escalation_routing] fetch failed", err);
+    }
   }, [sessionId]);
+  useEffect(() => {
+    fetchRouting();
+  }, [fetchRouting]);
 
   // Sprint 12.9 — `if (!data)` early-out removed. The new view does
   // not depend on the Sprint 7 package payload, so a /stage-5 fetch
@@ -384,6 +549,7 @@ export default function Stage5EscalationPackage({
       <HandoffNoteAction
         sessionId={sessionId}
         attemptedStage3Steps={attemptedStage3Steps}
+        onRefreshRouting={fetchRouting}
       />
 
       <div

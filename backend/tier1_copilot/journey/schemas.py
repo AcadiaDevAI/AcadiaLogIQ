@@ -361,11 +361,16 @@ class GuidedWorkflow(BaseModel):
 # disruptive actions and synthesises Intent + Pivot for each step.
 # ─────────────────────────────────────────────────────────────
 class ConsolidatedStep(BaseModel):
-    step_number: int            # 1..5 (hard cap)
-    action: str                  # one safe, executable read-only action
-    intent: str                  # one-sentence hypothesis being tested
-    pivot: str                   # what the result means + what to do next
+    step_number: int            # 1..N — one Activity per cohort ticket
+    action: str                  # one consolidated action sentence (grounded in this ticket's fields)
+    intent: str                  # "Why" — one-sentence hypothesis being tested
+    pivot: str                   # "Outcome" — what the result means + what to do next
     command: Optional[str] = None    # show / read-only command when applicable
+    # Per-ticket consolidation: every Activity is anchored to ONE
+    # historical ticket. UI renders this as "— from INC-XXX" for
+    # traceability. Optional so the legacy cross-ticket fallback path
+    # (commented out in stage3_consolidated.py) still type-checks.
+    incident_number: Optional[str] = None
 
 
 class Stage3TroubleshootingApproach(BaseModel):

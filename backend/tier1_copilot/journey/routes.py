@@ -444,6 +444,26 @@ async def post_escalation_handoff_note(
     req: Optional[EscalationHandoffNoteRequest] = None,
 ) -> EscalationHandoffNoteResponse:
     _require_flag()
+
+    # Sprint 13.30 — Regenerate is a hard reload. Read `force` BEFORE
+    # the cohort fetch so we can pop the cohort cache and let
+    # _load_or_cache rebuild from DB. _load_or_cache already
+    # invalidates the consolidated cache on a cohort cache miss
+    # (see `_consolidated_invalidate(session_id)` inside
+    # _load_or_cache), so this single pop cascades to bust both
+    # caches with one line.
+    #
+    # Why hoist this above _load_or_cache: in steady state the cohort
+    # is fixed for the life of a journey, but if a re-ingest or a
+    # deferred chunk-write happens mid-journey, the engineer's
+    # Regenerate click should pick that up — not be served stale
+    # cached cohort data. Auto-fetches (force=False) keep the cohort
+    # cache for the perf win; only the explicit Regenerate click hits
+    # this code path.
+    force_regen = bool(req and getattr(req, "force", False))
+    if force_regen:
+        _cohort_cache.pop(session_id, None)
+
     cohort = _load_or_cache(session_id)
 
     # ── Sprint 13.19 — full journey-driven dynamic gating ──
@@ -503,15 +523,14 @@ async def post_escalation_handoff_note(
     # filters the consolidated ledger down to what the engineer
     # ACTUALLY ticked. When stage 3 wasn't visited at all, we skip
     # build_consolidated_ledger entirely (saves an LLM call).
+    # Sprint 13.30 — `force_regen` already captured above; only read
+    # `attempted_step_numbers` here.
     attempted_step_numbers: List[int] = []
-    force_regen = False
-    if req is not None:
-        if isinstance(req.attempted_step_numbers, list):
-            attempted_step_numbers = [
-                int(n) for n in req.attempted_step_numbers
-                if isinstance(n, (int, float)) and int(n) > 0
-            ]
-        force_regen = bool(getattr(req, "force", False))
+    if req is not None and isinstance(req.attempted_step_numbers, list):
+        attempted_step_numbers = [
+            int(n) for n in req.attempted_step_numbers
+            if isinstance(n, (int, float)) and int(n) > 0
+        ]
 
     attempted_steps = []
     if stage3_visited and attempted_step_numbers:
