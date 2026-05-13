@@ -601,6 +601,74 @@ def _contacts_block(contacts_payload: Optional[Dict[str, Any]]) -> str:
 
 
 # ─────────────────────────────────────────────────────────────
+# Sprint 13.31 — Reason-for-Escalation block.
+# Renders the engineer's modal selection (one or more of the spec
+# triggers) as a bullet list of meaningful sentences, closed with the
+# standing handoff-line. Unknown labels (typos, future options) fall
+# back to a verbatim echo so the section is never silently dropped.
+# ─────────────────────────────────────────────────────────────
+_ESCALATION_REASON_SENTENCES: Dict[str, str] = {
+    "No matching historical confidence": (
+        "Tier 1 found no strongly matching historical pattern for this "
+        "incident, so confidence in the cohort-based diagnostic path was "
+        "insufficient to resolve at Tier 1."
+    ),
+    # Sprint 13.31 — "Steps attempted but failed" sentence removed at
+    # the user's request. The corresponding option has also been
+    # removed from EscalationReasonModal so it can no longer be picked.
+    # If any legacy / cached client still POSTs it, the unknown-label
+    # fallback in `_reason_block` will echo it as
+    # "Reason recorded: Steps attempted but failed."
+    "Time threshold exceeded": (
+        "Triage time exceeded the Tier-1 SLA threshold for this incident; "
+        "further investigation is required at Tier 2."
+    ),
+    "User skipped troubleshooting": (
+        "Tier 1 elected to bypass the Guided Troubleshooting Workflow and "
+        "forward this incident directly for Tier-2 review."
+    ),
+    "Policy-driven escalation (P1 auto-escalate)": (
+        "This incident was automatically escalated under the standing P1 "
+        "escalation policy."
+    ),
+}
+
+_HANDOFF_CLOSING_LINE = "The ticket is being handed off for further investigation."
+
+
+def _reason_block(reasons: Optional[List[str]]) -> str:
+    """Render the modal-driven Reason-for-Escalation block.
+
+    The EscalationReasonModal enforces ≥1 selection on submit, so in
+    normal flow `reasons` is non-empty. If it arrives empty (e.g. a
+    direct API caller bypassing the modal), we render a generic
+    placeholder so the section is still well-formed.
+    """
+    lines: List[str] = ["*Reason for Escalation:*"]
+
+    cleaned: List[str] = [
+        r.strip() for r in (reasons or []) if isinstance(r, str) and r.strip()
+    ]
+
+    if not cleaned:
+        lines.append("- No escalation reason was recorded.")
+        lines.append(_HANDOFF_CLOSING_LINE)
+        return "\n".join(lines)
+
+    for r in cleaned:
+        sentence = _ESCALATION_REASON_SENTENCES.get(r)
+        if sentence is None:
+            # Unknown label — preserve it verbatim so Tier-2 still sees
+            # what Tier-1 selected, even when the modal options change
+            # without this map being updated.
+            sentence = f"Reason recorded: {r}."
+        lines.append(f"- {sentence}")
+
+    lines.append(_HANDOFF_CLOSING_LINE)
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────────────────────
 # Public entry point
 # ─────────────────────────────────────────────────────────────
 def generate_handoff_note(
@@ -617,6 +685,11 @@ def generate_handoff_note(
     # Optional; when missing, the opener bullets render without
     # duration suffixes (back-compat with older callers).
     time_metrics: Optional[Dict[str, Any]] = None,
+    # Sprint 13.31 — escalation reasons from EscalationReasonModal.
+    # Drives the Reason-for-Escalation block. Empty list → fall-back
+    # sentence so older callers without the modal still produce a
+    # readable note.
+    escalation_reasons: Optional[List[str]] = None,
     # Sprint 13.19 — `consolidated_steps`, `traversal_log`, and
     # `generate_fn` accepted for back-compat with any caller that
     # still passes them; ignored under the deterministic build.
@@ -648,6 +721,9 @@ def generate_handoff_note(
     )
     routing_block = _routing_block(routing)
     contacts_block = _contacts_block(contacts_payload)
+    # Sprint 13.31 — dynamic Reason-for-Escalation block driven by the
+    # modal selection. Replaces the prior hardcoded sentence.
+    reason_block = _reason_block(escalation_reasons)
 
     # Sprint 13.21 — render structure trimmed at user's request:
     #   * 2nd & 3rd Reason-for-Escalation bullets commented out
@@ -662,17 +738,10 @@ def generate_handoff_note(
         f"{opener}\n\n"
         "*Diagnostic Summary:*\n"
         f"{diagnostic}\n\n"
-        "*Reason for Escalation:*\n"
-        "- Tier 1 has successfully identified the issue pattern and "
-        "completed the standard diagnostics. The ticket is being "
-        "handed off for further investigation.\n"
-        # "- Historical documentation lacks the granular, issue-specific "
-        # "details required for Tier 1 to safely execute a final fix in "
-        # "the current environment.\n"
-        # "- Strict knowledge and access boundaries for this specific "
-        # "scenario have been reached; referring to Tier 2 for advanced "
-        # "investigation and resolution.\n"
-        "\n"
+        f"{reason_block}\n"
+        # Routing & Contacts blocks intentionally commented out at
+        # user's request — `_routing_block` / `_contacts_block` helpers
+        # remain wired up so re-enabling is one edit each.
         # f"{routing_block}\n\n"
         # f"{contacts_block}"
         # Sprint 13.23 — bolded "No vendor/OEM engagement records ..."

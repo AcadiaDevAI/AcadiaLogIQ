@@ -88,8 +88,26 @@ export async function fetchEscalationRouting(sessionId) {
 export async function generateEscalationHandoffNote(
   sessionId,
   attemptedStepNumbers,
-  { force = false } = {},
+  { force = false, escalationReasons = null } = {},
 ) {
+  // Sprint 13.31 — read the modal's selection from localStorage as a
+  // fallback so callers that don't explicitly pass `escalationReasons`
+  // still get the dynamic Reason block. Direct override via the
+  // option arg still wins (e.g. Regenerate after the modal re-opens).
+  let reasons = Array.isArray(escalationReasons) ? escalationReasons : null;
+  if (reasons === null && sessionId) {
+    try {
+      const raw = localStorage.getItem(
+        `tier1_escalation_reasons_${sessionId}`,
+      );
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) reasons = parsed;
+      }
+    } catch {
+      /* malformed JSON or storage disabled — fall through to [] */
+    }
+  }
   const { data } = await api.post(
     `/tier1/journey/${encodeURIComponent(sessionId)}/escalation-handoff-note`,
     {
@@ -97,6 +115,7 @@ export async function generateEscalationHandoffNote(
         ? attemptedStepNumbers
         : [],
       force: !!force,
+      escalation_reasons: Array.isArray(reasons) ? reasons : [],
     },
   );
   return data;

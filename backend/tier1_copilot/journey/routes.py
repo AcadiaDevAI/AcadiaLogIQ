@@ -532,6 +532,17 @@ async def post_escalation_handoff_note(
             if isinstance(n, (int, float)) and int(n) > 0
         ]
 
+    # Sprint 13.31 — escalation-reason selection from the modal. Drives
+    # the "Reason for Escalation" block in the note. Modal enforces
+    # ≥1 selection on the client; keep server-side coercion permissive
+    # so any odd whitespace / empty entry is filtered cleanly.
+    escalation_reasons: List[str] = []
+    if req is not None and isinstance(req.escalation_reasons, list):
+        escalation_reasons = [
+            r.strip() for r in req.escalation_reasons
+            if isinstance(r, str) and r.strip()
+        ]
+
     attempted_steps = []
     if stage3_visited and attempted_step_numbers:
         # Sprint 13.24 PERF — same session-keyed cache as /stage-3.
@@ -615,6 +626,7 @@ async def post_escalation_handoff_note(
         routing=routing,
         contacts_payload=contacts_payload,
         time_metrics=time_metrics,
+        escalation_reasons=escalation_reasons,
     )
     return EscalationHandoffNoteResponse(note=note, used_fallback=used_fallback)
 

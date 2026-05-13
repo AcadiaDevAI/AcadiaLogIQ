@@ -145,6 +145,12 @@ class EscalationHandoffNoteRequest(BaseModel):
     # the Regenerate button in the Stage 5 panel; default False so
     # auto-fetch on mount uses the cache.
     force: bool = False
+    # Escalation trigger reasons selected by the engineer in the
+    # EscalationReasonModal before Stage 5 was revealed. Drives the
+    # "Reason for Escalation" block in the deterministic note. The
+    # modal enforces ≥1 selection, but we keep the field optional so
+    # any older caller still works without a body.
+    escalation_reasons: List[str] = Field(default_factory=list)
 
 
 class EscalationHandoffNoteResponse(BaseModel):

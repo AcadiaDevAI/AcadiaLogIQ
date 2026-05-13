@@ -25,13 +25,35 @@ const { Paragraph } = Typography;
 
 // Spec-verbatim reasons. Order preserved from the user's spec so
 // the engineer reads them in the intended priority sequence.
+// Sprint 13.31 — "Steps attempted but failed" removed at the user's
+// request; the corresponding sentence in the backend map has also
+// been removed so the note can never surface that wording.
 const ESCALATION_REASONS = [
   "No matching historical confidence",
-  "Steps attempted but failed",
   "Time threshold exceeded",
   "User skipped troubleshooting",
   "Policy-driven escalation (P1 auto-escalate)",
 ];
+
+
+// Sprint 13.31 — persist the selected reasons by session_id so the
+// Stage 5 handoff-note POST can include them. Both modal entry points
+// (in-journey EscalateButton + chat-side JourneyMessageActions) write
+// here; ResolutionJourney + Stage5EscalationPackage hydrate from here.
+// Failure-open on any storage error — the email still went out and
+// the escalation still proceeds; only the note's Reason block degrades.
+const _escalationReasonsStorageKey = (sessionId) =>
+  sessionId ? `tier1_escalation_reasons_${sessionId}` : null;
+
+function _saveEscalationReasons(sessionId, reasons) {
+  const key = _escalationReasonsStorageKey(sessionId);
+  if (!key) return;
+  try {
+    localStorage.setItem(key, JSON.stringify(reasons || []));
+  } catch {
+    /* quota / privacy-mode — ignore */
+  }
+}
 
 
 export default function EscalationReasonModal({
@@ -49,6 +71,10 @@ export default function EscalationReasonModal({
   const handleSubmit = async () => {
     if (!canSubmit) return;
     setSubmitting(true);
+
+    // Sprint 13.31 — stash the selection FIRST so the Stage 5
+    // handoff-note POST can read it even if the email step throws.
+    _saveEscalationReasons(sessionId, selected);
 
     // 1. Fire-and-forget email via the existing /feedback/submit
     //    endpoint. We `await` it so the engineer briefly sees the
