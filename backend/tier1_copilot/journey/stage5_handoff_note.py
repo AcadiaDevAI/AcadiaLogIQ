@@ -317,6 +317,81 @@ def _opening_paragraph(
     )
 
 
+# ─────────────────────────────────────────────────────────────
+# Deterministic present-tense → past-tense projection for the
+# Diagnostic Summary bullets. Stage 3's Activity intents are written
+# as Tier-1 hypotheses ("Verify if X", "Determine if X", …); Tier-2
+# needs to read what was ALREADY performed, not what Tier-1 is about
+# to do. The verb map covers the bounded vocabulary the Stage 3
+# prompt produces; anything outside the map falls back to a safe
+# "Performed: <verbatim intent>" framing rather than mangling
+# grammar with a regex.
+#
+# "if X" immediately after the verb is rewritten to "whether X" —
+# preserves the hypothesis framing honestly (we tested it, we didn't
+# necessarily confirm it).
+# ─────────────────────────────────────────────────────────────
+_PAST_TENSE_VERBS: Dict[str, str] = {
+    "verify": "Verified",
+    "determine": "Determined",
+    "check": "Checked",
+    "test": "Tested",
+    "identify": "Identified",
+    "confirm": "Confirmed",
+    "inspect": "Inspected",
+    "audit": "Audited",
+    "capture": "Captured",
+    "compare": "Compared",
+    "review": "Reviewed",
+    "run": "Ran",
+    "validate": "Validated",
+    "assess": "Assessed",
+    "evaluate": "Evaluated",
+    "observe": "Observed",
+    "monitor": "Monitored",
+    "trace": "Traced",
+    "investigate": "Investigated",
+    "examine": "Examined",
+    "find": "Found",
+    "locate": "Located",
+    "isolate": "Isolated",
+    "diagnose": "Diagnosed",
+    "look": "Looked",
+}
+
+
+def _intent_to_past_tense(intent: Optional[str]) -> Optional[str]:
+    """Convert a present-tense Stage 3 intent to a past-tense statement
+    suitable for the Tier-2 Diagnostic Summary. Returns None when the
+    intent is empty so the caller can fall back to the action text."""
+    if not intent:
+        return None
+    s = intent.strip().rstrip(".")
+    if not s:
+        return None
+
+    parts = s.split(None, 1)
+    verb = parts[0].lower()
+    rest = parts[1] if len(parts) > 1 else ""
+
+    past = _PAST_TENSE_VERBS.get(verb)
+    if past is None:
+        # Unknown verb — preserve the original sentence verbatim under
+        # a "Performed:" prefix rather than guessing a conjugation and
+        # producing bad grammar.
+        return f"Performed: {s}."
+
+    # Rewrite leading "if " → "whether " (case-preserving on the
+    # original "if" only, which is always lowercase mid-sentence).
+    if rest[:3].lower() == "if ":
+        rest = "whether " + rest[3:]
+    elif rest[:8].lower() == "whether ":
+        # Already framed correctly — leave it.
+        pass
+
+    return f"{past} {rest}.".strip() if rest else f"{past}."
+
+
 def _diagnostic_block(
     attempted_steps: List[ConsolidatedStep],
     stage_3_visited: bool,
@@ -325,9 +400,10 @@ def _diagnostic_block(
 ) -> str:
     """Diagnostic Summary — strictly mirrors the engineer's journey.
 
-    Bullets ONLY render for steps the engineer explicitly ticked;
-    coverage gaps for Stage 3 / Stage 4 / KB chat are appended as
-    short status sentences so Tier-2 sees what was and wasn't done.
+    Each ticked Activity renders as a past-tense statement derived
+    from its `intent` ("Why") with the associated command appended in
+    backticks when present. Activities without an intent fall back to
+    the verbatim action text so the bullet is never blank.
     """
     lines: List[str] = []
 
@@ -339,16 +415,30 @@ def _diagnostic_block(
         )
     elif not attempted_steps:
         lines.append(
-            "Tier 1 reviewed the Guided Troubleshooting Workflow but "
-            "did not mark any individual steps as attempted."
+            "No diagnostic activities were marked as attempted."
         )
     else:
         lines.append(
-            "Tier 1 has already reviewed/attempted the following "
-            "diagnostic checks:"
+            "Tier 1 performed the following diagnostic activities "
+            "before escalation:"
         )
         for s in attempted_steps:
-            lines.append(f"- {s.action}")
+            past = _intent_to_past_tense(s.intent)
+            if past:
+                # Inject the command in parens BEFORE the trailing
+                # period so the bullet reads as one clean sentence.
+                if s.command:
+                    if past.endswith("."):
+                        bullet = f"{past[:-1]} (`{s.command}`)."
+                    else:
+                        bullet = f"{past} (`{s.command}`)."
+                else:
+                    bullet = past
+            else:
+                # No intent on this Activity — degrade to the action
+                # text rather than dropping the bullet entirely.
+                bullet = s.action
+            lines.append(f"- {bullet}")
 
     # Coverage gap — Stage 4 (Search KB / SOP)
     if not stage_4_visited:
