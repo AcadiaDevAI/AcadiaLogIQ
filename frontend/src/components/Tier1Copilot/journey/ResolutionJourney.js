@@ -73,6 +73,32 @@ const STAGE_ORDER = [
 const _journeyStorageKey = (sessionId) =>
   sessionId ? `tier1_journey_state_${sessionId}` : null;
 
+// Sprint 13.32.2 — single-key breadcrumb so AppLayout's "Return to
+// Stages" handler (RCAFlow exit) can resume the engineer's most-
+// recently-active journey. Written every time ResolutionJourney
+// mounts with a valid sessionId. Failure-open.
+const _LAST_ACTIVE_JOURNEY_KEY = "tier1_last_active_journey_session";
+
+// Sprint 13.32.5 — RCA button in the Sidebar must only be visible
+// while ResolutionJourney is actually rendered (i.e. the engineer
+// is on Preliminary Tier 1 Checks / Stages 0-5). Earlier revisions
+// gated the button on a localStorage breadcrumb, but that flag
+// persisted across navigations and surfaced the button on the
+// landing page too. The fix is a RUNTIME signal: we fire one event
+// on mount, another on unmount, and the Sidebar listens. No
+// persistence — the button reflects the live tree, not history.
+const _JOURNEY_MOUNTED_EVENT = "acadia:journey-mounted";
+const _JOURNEY_UNMOUNTED_EVENT = "acadia:journey-unmounted";
+
+function _writeLastActiveJourneySid(sessionId) {
+  if (!sessionId) return;
+  try {
+    localStorage.setItem(_LAST_ACTIVE_JOURNEY_KEY, sessionId);
+  } catch {
+    /* quota / privacy-mode — ignore */
+  }
+}
+
 function _readJourneyState(sessionId) {
   const key = _journeyStorageKey(sessionId);
   if (!key) return null;
@@ -182,6 +208,36 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
       attemptedStage3Steps,
     });
   }, [sessionId, revealed, attemptedStage3Steps]);
+
+  // Sprint 13.32.2 — breadcrumb the active sessionId so AppLayout's
+  // "Return to Stages" handler can RESUME_JOURNEY into this exact
+  // journey on RCA exit. Runs once per mount per session.
+  useEffect(() => {
+    _writeLastActiveJourneySid(sessionId);
+  }, [sessionId]);
+
+  // Sprint 13.32.5 — fire mount/unmount events so the Sidebar's
+  // RCA button can toggle live (hidden on the landing page,
+  // visible while the journey is mounted). Gated on a valid
+  // sessionId so we don't false-positive during the initial render
+  // before the journey has anything to work with. Cleanup fires
+  // the unmount event on every dismount path (Stage 4 chat handoff,
+  // RCA flow takeover, New Ticket reset, route change).
+  useEffect(() => {
+    if (!sessionId) return undefined;
+    try {
+      if (typeof window !== "undefined") {
+        window.dispatchEvent(new Event(_JOURNEY_MOUNTED_EVENT));
+      }
+    } catch { /* unsupported env */ }
+    return () => {
+      try {
+        if (typeof window !== "undefined") {
+          window.dispatchEvent(new Event(_JOURNEY_UNMOUNTED_EVENT));
+        }
+      } catch { /* unsupported env */ }
+    };
+  }, [sessionId]);
 
   // ── Initial fetch + Sprint 10.7 resume state ──
   // We run BOTH calls in parallel: /initial paints Stage 0 +

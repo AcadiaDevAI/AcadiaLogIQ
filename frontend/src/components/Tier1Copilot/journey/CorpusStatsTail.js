@@ -26,9 +26,24 @@ export default function CorpusStatsTail({ data }) {
   const items = useMemo(() => {
     if (!data) return [];
 
-    const cohortSize = data.cohort_size || 0;
-    const cleanCount = data.clean_resolution_count || 0;
-    const cleanPct = data.clean_resolution_percent || 0;
+    // Sprint 13.32.3 — align every cohort-size reference with what
+    // the engineer actually sees in the bullet list above. The
+    // backend's `cohort_size` counts every dict in the cohort even
+    // when one of them lacks an Incident_Summary to render; the
+    // visible list (`top5_incident_summaries`) is the curated set.
+    // Clamping cleanCount to the visible count avoids the nonsensical
+    // "5 of 4" denominator that emerged once the visible count
+    // dropped below cohort_size.
+    const rawCohortSize = data.cohort_size || 0;
+    const visibleSize = Array.isArray(data.top5_incident_summaries)
+      ? data.top5_incident_summaries.length
+      : 0;
+    const cohortSize = visibleSize || rawCohortSize;
+    const rawCleanCount = data.clean_resolution_count || 0;
+    const cleanCount = Math.min(rawCleanCount, cohortSize);
+    const cleanPct = cohortSize
+      ? Math.round((cleanCount / cohortSize) * 100)
+      : 0;
     const avgMinCohort = data.avg_minutes_to_resolve_cohort;
     const platformMedian = data.platform_median_minutes;
     const corpusSize = data.corpus_size || 0;

@@ -470,6 +470,21 @@ if (
             _intake_exc,
         )
 
+# Sprint 13.32 — RCA-from-incident-number flow. Standalone surface
+# triggered by the sidebar's "RCA" button. No flag gate by design —
+# the route is self-contained and adds no risk to other flows. Mount
+# is wrapped in try/except so an import error in the new module can
+# never block app startup.
+try:
+    from backend.tier1_copilot.rca.routes import router as _rca_router
+    app.include_router(_rca_router)
+    logger.info("[rca] router mounted at /rca")
+except Exception as _rca_exc:
+    logger.warning(
+        "[rca] failed to mount router (module disabled): %s",
+        _rca_exc,
+    )
+
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)

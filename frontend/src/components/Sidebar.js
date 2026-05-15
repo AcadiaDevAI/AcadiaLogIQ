@@ -13,6 +13,7 @@ import {
   BulbOutlined,
   SettingOutlined,
   UserOutlined,
+  FileSearchOutlined,
 } from "@ant-design/icons";
 import { useChat } from "../hooks/ChatContext";
 import { useTheme } from "../hooks/ThemeContext";
@@ -90,7 +91,20 @@ function groupByVersionFamily(files) {
   return result;
 }
 
-export default function Sidebar() {
+export default function Sidebar({ onOpenRca }) {
+  // Sprint 13.32 — `onOpenRca` is passed in from AppLayout. When the
+  // RCA button below History is clicked, we call it to flip the
+  // right pane over to the RCAFlow surface. Sidebar itself stays
+  // mounted and visible throughout, so the user can also click
+  // History items / New Chat to leave RCA at any point.
+  //
+  // Sprint 13.32.6 — visibility gate dropped. RCA is now a peer
+  // primary action below New Chat, always visible while signed in.
+  // The earlier `journeyActive` runtime gate + the localStorage
+  // breadcrumb gate are no longer consulted here. The localStorage
+  // breadcrumb is still WRITTEN by ResolutionJourney for the
+  // separate "Return to Stages" handler — only the visibility
+  // listener is gone.
   const { state, dispatch } = useChat();
   const { isDark, toggleTheme } = useTheme();
   const [loading, setLoading] = useState(false);
@@ -236,6 +250,11 @@ export default function Sidebar() {
       label: <span className="flex items-center gap-1.5 text-xs"><HistoryOutlined /> History</span>,
       children: (
         <div className="flex flex-col gap-1 overflow-y-auto max-h-[calc(100vh-380px)]">
+          {/* Sprint 13.32.6 — RCA button moved out of this tab.
+              It now lives below New Chat in the permanent action
+              area (see the New Chat row higher up in this file).
+              Block intentionally left empty so the History tab
+              shape stays identical to its pre-RCA layout. */}
           {state.sessions.length === 0 ? (
             <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description={<span className="t-text-muted text-xs">No chats yet</span>} />
           ) : (
@@ -442,6 +461,33 @@ export default function Sidebar() {
           />
         </Tooltip>
       </div>
+
+      {/* Sprint 13.32.6 — RCA primary action. Sits directly below
+          New Chat as a permanent sidebar action. Same Acadia-primary
+          colour so it reads as a peer call-to-action. Click opens the
+          RCAEntryModal (ticket-number + Internal/External + file
+          upload); the modal hands the captured payload to the
+          right-pane RCAFlow on submit. Hidden when AppLayout didn't
+          wire onOpenRca so the file stays backwards-compatible. */}
+      {typeof onOpenRca === "function" ? (
+        <div className="px-3 pt-2">
+          <Tooltip title="Generate Internal / External RCA from a ticket number or upload">
+            <Button
+              icon={<FileSearchOutlined />}
+              onClick={onOpenRca}
+              block
+              className="rounded-lg h-9 font-medium text-sm"
+              style={{
+                backgroundColor: "var(--acadia-primary)",
+                borderColor: "var(--acadia-primary)",
+                color: "#fff"
+              }}
+            >
+              RCA
+            </Button>
+          </Tooltip>
+        </div>
+      ) : null}
 
       {/* Tabs */}
       <div className="flex-1 overflow-hidden px-3 pt-2">

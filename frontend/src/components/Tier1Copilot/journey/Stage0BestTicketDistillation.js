@@ -73,9 +73,24 @@ function extractTrailingIncidentId(stepText) {
 // the source incident IDs directly. `formatMinutes` and the unused
 // branches are left in place via this single-line builder so the
 // imports / signatures don't need a follow-up cleanup.
+//
+// Sprint 13.32.3 — count made dynamic against the RENDERED list, not
+// `data.cohort_size`. Backend's cohort_size counts every cohort dict
+// regardless of whether it has a usable Incident_Summary; the list
+// below ("Possible details are:") only renders entries that *do*
+// have one. When one of the cohort tickets has no summary, the user
+// saw e.g. "We found 5 similar instances" but only 4 bullets. Now
+// we count what the engineer can actually see. cohort_size remains
+// the fallback only when the summaries field is absent entirely.
+// Pluralisation also fixed (was appending "s" to "issue" instead of
+// "instance"; the new copy switches the word that varies).
 function buildHeadline(data) {
-  const n = data.cohort_size || 0;
-  return `We found ${n} similar instances for this issue${n === 1 ? "" : "s"}.`;
+  const visible = Array.isArray(data.top5_incident_summaries)
+    ? data.top5_incident_summaries.length
+    : 0;
+  const n = visible || data.cohort_size || 0;
+  const noun = n === 1 ? "instance" : "instances";
+  return `We found ${n} similar ${noun} for this issue.`;
 }
 
 
