@@ -437,13 +437,16 @@ export default function Sidebar({ onOpenRca }) {
         />
       </div>
 
-      {/* New Chat + Theme Toggle */}
-      <div className="px-3 pt-3 flex items-center gap-2">
+      {/* New Chat */}
+      {/* Sprint 13.32.11 — theme toggle moved out of this row into
+          the footer. New Chat now spans the full sidebar width so
+          it can match the Root Cause Analysis button below it. */}
+      <div className="px-3 pt-3">
         <Button
           icon={<PlusOutlined />}
           onClick={() => dispatch({ type: "NEW_CHAT" })}
           block
-          className="rounded-lg h-9 font-medium text-sm flex-1"
+          className="rounded-lg h-9 font-medium text-sm"
           style={{
             backgroundColor: "var(--acadia-primary)",
             borderColor: "var(--acadia-primary)",
@@ -452,23 +455,18 @@ export default function Sidebar({ onOpenRca }) {
         >
           New Chat
         </Button>
-        <Tooltip title={isDark ? "Switch to Light" : "Switch to Dark"}>
-          <Button
-            type="text"
-            icon={<BulbOutlined style={{ color: isDark ? "#fbbf24" : "#08324F" }} />}
-            onClick={toggleTheme}
-            className="flex-shrink-0"
-          />
-        </Tooltip>
       </div>
 
-      {/* Sprint 13.32.6 — RCA primary action. Sits directly below
-          New Chat as a permanent sidebar action. Same Acadia-primary
-          colour so it reads as a peer call-to-action. Click opens the
+      {/* Sprint 13.32.6 — Root Cause Analysis primary action. Sits
+          directly below New Chat as a permanent sidebar action. Same
+          Acadia-primary colour + same block layout, so the two
+          buttons line up at identical width. Click opens the
           RCAEntryModal (ticket-number + Internal/External + file
           upload); the modal hands the captured payload to the
           right-pane RCAFlow on submit. Hidden when AppLayout didn't
-          wire onOpenRca so the file stays backwards-compatible. */}
+          wire onOpenRca so the file stays backwards-compatible.
+          Sprint 13.32.11 — label expanded from "RCA" to
+          "Root Cause Analysis" at the user's request. */}
       {typeof onOpenRca === "function" ? (
         <div className="px-3 pt-2">
           <Tooltip title="Generate Internal / External RCA from a ticket number or upload">
@@ -483,7 +481,7 @@ export default function Sidebar({ onOpenRca }) {
                 color: "#fff"
               }}
             >
-              RCA
+              Root Cause Analysis
             </Button>
           </Tooltip>
         </div>
@@ -523,23 +521,26 @@ export default function Sidebar({ onOpenRca }) {
       <UserProfile />
 
       {/* Footer */}
-      <div className="px-3 py-3 border-t" style={{ borderColor: "var(--border-color)" }}>
-        {/* {state.selectedMode && (
-          <Button
-            type="text"
-            block
-            size="small"
-            onClick={handleChangeContext}
-            className="t-text-muted text-xs mb-1"
-          >
-            Change Context
-          </Button>
-        )} */}
+      {/* Sprint 13.32.11 — theme toggle relocated here from the
+          New Chat row. Sits beside Clear All History so the top of
+          the sidebar is reserved for primary actions (New Chat,
+          Root Cause Analysis) and utilities live in the footer. */}
+      <div className="px-3 py-3 border-t flex items-center gap-2" style={{ borderColor: "var(--border-color)" }}>
         <Popconfirm title="Clear all chat history?" onConfirm={handleClearAll} okText="Clear" cancelText="Cancel" okButtonProps={{ danger: true }}>
-          <Button type="text" icon={<ClearOutlined />} block size="small" className="t-text-muted text-xs">
+          <Button type="text" icon={<ClearOutlined />} block size="small" className="t-text-muted text-xs flex-1">
             Clear All History
           </Button>
         </Popconfirm>
+        <Tooltip title={isDark ? "Switch to Light" : "Switch to Dark"}>
+          <Button
+            type="text"
+            size="small"
+            icon={<BulbOutlined style={{ color: isDark ? "#fbbf24" : "#08324F" }} />}
+            onClick={toggleTheme}
+            className="flex-shrink-0"
+            aria-label={isDark ? "Switch to light theme" : "Switch to dark theme"}
+          />
+        </Tooltip>
       </div>
     </div>
   );

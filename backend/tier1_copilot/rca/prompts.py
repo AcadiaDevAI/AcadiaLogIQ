@@ -127,7 +127,7 @@ OUTPUT FORMAT RULES:
 - Prevention section as a numbered list.
 - Total document length: 400-600 words. Concise is more trustworthy than comprehensive.
 - Document footer: "Issued by: IT Operations | Date: [resolved_date formatted as D Month YYYY] | Reference: [Incident_Number]"
-- Classification line: "Approved for external distribution."
+- Do NOT include a classification or "approved for distribution" line at the end of the document.
 - Do not output any internal field names, JSON paths, schema references, or technical metadata in the document.
 - Do not add a section explaining what was stripped or what is missing.
 

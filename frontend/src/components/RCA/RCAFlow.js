@@ -487,9 +487,6 @@ export default function RCAFlow({ onReturnToStages, initialPayload = null }) {
               <Text strong style={{ fontSize: 15 }}>
                 Customer-Facing External RCA
               </Text>
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                — Approved for external distribution
-              </Text>
             </Space>
           ),
           extra: (
