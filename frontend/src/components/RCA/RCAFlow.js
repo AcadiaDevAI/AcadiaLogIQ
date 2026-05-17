@@ -201,32 +201,54 @@ function _ensureRcaStyles() {
       color: inherit;
       font-size: inherit;
     }
-    /* Dark-mode adjustments */
-    [data-theme="dark"] .rca-paper,
-    .dark .rca-paper {
+    /* Dark-mode adjustments.
+       Sprint 13.32.12 — selectors corrected from [data-theme="dark"]
+       and .dark to .theme-dark (the actual class the ThemeProvider
+       puts on its wrapper, see src/hooks/ThemeContext.js). Without
+       this fix the paper stayed white in dark mode while text turned
+       light, rendering both panels effectively invisible against
+       white. Light theme is untouched — every rule below is scoped
+       under .theme-dark. */
+    .theme-dark .rca-paper {
       background: #1e1e28;
       color: #e2e8f0;
       box-shadow: 0 1px 2px rgba(0,0,0,0.3), 0 4px 16px rgba(0,0,0,0.2);
     }
-    [data-theme="dark"] .rca-markdown h2,
-    .dark .rca-markdown h2 { border-bottom-color: #2a2a3d; }
-    [data-theme="dark"] .rca-markdown table,
-    .dark .rca-markdown table,
-    [data-theme="dark"] .rca-markdown th,
-    .dark .rca-markdown th,
-    [data-theme="dark"] .rca-markdown td,
-    .dark .rca-markdown td { border-color: #2a2a3d; }
-    [data-theme="dark"] .rca-markdown thead,
-    .dark .rca-markdown thead { background: #2a2a3d; }
-    [data-theme="dark"] .rca-markdown tbody tr:nth-child(even) td,
-    .dark .rca-markdown tbody tr:nth-child(even) td { background: #16161d; }
-    [data-theme="dark"] .rca-markdown blockquote,
-    .dark .rca-markdown blockquote {
-      background: rgba(99, 102, 241, 0.08);
-      border-left-color: #6366f1;
+    .theme-dark .rca-markdown h1 { color: #e2e8f0; }
+    .theme-dark .rca-markdown h2 {
+      color: #e2e8f0;
+      border-bottom-color: #2a2a3d;
     }
-    [data-theme="dark"] .rca-markdown code,
-    .dark .rca-markdown code { background: #16161d; color: #e2e8f0; }
+    .theme-dark .rca-markdown h3 { color: #e2e8f0; }
+    .theme-dark .rca-markdown p,
+    .theme-dark .rca-markdown li,
+    .theme-dark .rca-markdown strong,
+    .theme-dark .rca-markdown em { color: #e2e8f0; }
+    .theme-dark .rca-markdown hr { border-top-color: #2a2a3d; }
+    .theme-dark .rca-markdown table,
+    .theme-dark .rca-markdown th,
+    .theme-dark .rca-markdown td { border-color: #2a2a3d; color: #e2e8f0; }
+    .theme-dark .rca-markdown thead {
+      background: #2a2a3d;
+    }
+    .theme-dark .rca-markdown thead th { color: #f1f5f9; }
+    .theme-dark .rca-markdown tbody tr:nth-child(even) td {
+      background: #16161d;
+    }
+    .theme-dark .rca-markdown blockquote {
+      background: rgba(99, 102, 241, 0.12);
+      border-left-color: #6366f1;
+      color: #e2e8f0;
+    }
+    .theme-dark .rca-markdown code {
+      background: #16161d;
+      color: #e2e8f0;
+    }
+    .theme-dark .rca-markdown pre {
+      /* pre/code blocks already use a dark palette in the base
+         rules above (#0f172a bg, #e2e8f0 text), so they read fine
+         in both themes — no override needed here. */
+    }
   `;
   document.head.appendChild(style);
   _rcaStylesInjected = true;

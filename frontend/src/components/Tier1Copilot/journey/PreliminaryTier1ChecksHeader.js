@@ -15,6 +15,8 @@ import React, { useState } from "react";
 import { Card, Typography } from "antd";
 import { DownOutlined, RightOutlined, SafetyCertificateOutlined } from "@ant-design/icons";
 
+import { useTheme } from "../../../hooks/ThemeContext";
+
 const { Title, Paragraph, Text } = Typography;
 
 
@@ -60,12 +62,24 @@ export default function PreliminaryTier1ChecksHeader() {
   // target with the spec's exact title + intro copy.
   const [expanded, setExpanded] = useState(false);
 
+  // Sprint 13.32.13 — dark-theme fix. The card's inline background
+  // was pinned to `var(--surface-2, #f7faff)`; `--surface-2` is not
+  // defined in this app's theme system, so the fallback (#f7faff —
+  // a blue-tinted near-white) applied in EVERY theme, leaving the
+  // panel white on dark mode with text that swaps light → invisible.
+  // We now branch on isDark: light mode keeps the original #f7faff
+  // exactly (zero visual change), dark mode picks --bg-tertiary
+  // (#1e1e28) so the panel sits as an elevated dark surface above
+  // the page bg. Nothing else about this component changed.
+  const { isDark } = useTheme();
+  const cardBackground = isDark ? "#1e1e28" : "#f7faff";
+
   return (
     <Card
       style={{
         marginBottom: 16,
         borderLeft: "4px solid #1F6FEB",
-        background: "var(--surface-2, #f7faff)",
+        background: cardBackground,
       }}
       bodyStyle={{ paddingTop: 12, paddingBottom: 12 }}
     >

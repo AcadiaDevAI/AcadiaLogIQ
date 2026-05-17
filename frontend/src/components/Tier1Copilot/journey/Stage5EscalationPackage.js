@@ -18,6 +18,8 @@ import React, { useEffect, useState } from "react";
 import { Alert, Button, Card, Modal, Space, Spin, Tag, Tooltip, Typography, message } from "antd";
 import { CopyOutlined, LoadingOutlined, ReloadOutlined } from "@ant-design/icons";
 
+import { useTheme } from "../../../hooks/ThemeContext";
+
 // Sprint 12.9 — Sprint 7's full EscalationPackageCard render is
 // suppressed. Clicking "Escalate to Tier 2" now lands the engineer
 // on the Escalation Routing & Vendor/OEM Engagement view + the
@@ -186,6 +188,18 @@ function EscalationRoutingSection({ routing }) {
 // sentence is heuristic and offers Regenerate.
 // ────────────────────────────────────────────────────────────
 function HandoffNoteAction({ sessionId, attemptedStage3Steps, onRefreshRouting }) {
+  // Sprint 13.32.13 — dark-theme fix. The handoff-note <pre> below
+  // had `background: var(--surface-2, #fafafa)`; `--surface-2` is
+  // undefined in this app's theme system so the fallback (#fafafa)
+  // applied in every theme, leaving the Operational Handoff content
+  // block solid white in dark mode while text colour swapped to
+  // light. We now derive bg + text from the live theme; light theme
+  // keeps the original #fafafa exactly.
+  const { isDark } = useTheme();
+  const notePreBg = isDark ? "#16161d" : "#fafafa";
+  const notePreText = isDark ? "#e2e8f0" : "inherit";
+  const notePreBorder = isDark ? "#2a2a3d" : "#f0f0f0";
+
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState(null);
   const [usedFallback, setUsedFallback] = useState(false);
@@ -439,8 +453,9 @@ function HandoffNoteAction({ sessionId, attemptedStage3Steps, onRefreshRouting }
       {note ? (
         <pre
           style={{
-            background: "var(--surface-2, #fafafa)",
-            border: "1px solid var(--border-color, #f0f0f0)",
+            background: notePreBg,
+            color: notePreText,
+            border: `1px solid ${notePreBorder}`,
             borderRadius: 4,
             padding: 12,
             whiteSpace: "pre-wrap",
