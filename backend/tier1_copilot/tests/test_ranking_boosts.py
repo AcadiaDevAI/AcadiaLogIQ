@@ -96,10 +96,9 @@ class SameCustomerBoostTests(unittest.TestCase):
         cand_same = self._candidate(customer="Aetheris Corp", chunk_id="c_same")
         cand_diff = self._candidate(customer="Blueshift Ltd", chunk_id="c_diff")
 
-        with mock.patch.object(settings, "LOGIQ_TIER1_PROGRESSIVE_BACKEND", True):
-            ranked = _weighted_rank(
-                [cand_diff, cand_same], alert_input, {},
-            )
+        ranked = _weighted_rank(
+            [cand_diff, cand_same], alert_input, {},
+        )
 
         self.assertEqual(ranked[0]["chunk_id"], "c_same")
         self.assertGreater(
@@ -107,31 +106,6 @@ class SameCustomerBoostTests(unittest.TestCase):
             ranked[1]["_score_components"]["same_customer_boost"],
         )
 
-    def test_flag_off_keeps_sprint6_weights(self):
-        """When Sprint 7 flag is OFF, the customer-equal vs customer-diff
-        candidates must score IDENTICALLY — Sprint 6 weights have no
-        customer-boost component."""
-        from backend.config import settings
-        from backend.tier1_copilot.retrieval import _weighted_rank
-
-        alert_input = {
-            "asset_name": "V-Desktop Environment",
-            "alert_type": "Desktop Slowness",
-            "technology": "Citrix",
-            "error_code": "CTX-SLOW-01",
-            "customer": "Aetheris Corp",
-        }
-        cand_same = self._candidate(customer="Aetheris Corp", chunk_id="c_same")
-        cand_diff = self._candidate(customer="Blueshift Ltd", chunk_id="c_diff")
-
-        with mock.patch.object(settings, "LOGIQ_TIER1_PROGRESSIVE_BACKEND", False):
-            ranked = _weighted_rank(
-                [cand_diff, cand_same], alert_input, {},
-            )
-        # Same feature tokens → same score.
-        self.assertEqual(
-            ranked[0]["final_score"], ranked[1]["final_score"],
-        )
 
 
 class SameAssetFamilyBoostTests(unittest.TestCase):
@@ -176,10 +150,9 @@ class SameAssetFamilyBoostTests(unittest.TestCase):
             "_vector_sim": 0.4,
         }
 
-        with mock.patch.object(settings, "LOGIQ_TIER1_PROGRESSIVE_BACKEND", True):
-            ranked = _weighted_rank(
-                [cand_nomatch, cand_match], alert_input, {},
-            )
+        ranked = _weighted_rank(
+            [cand_nomatch, cand_match], alert_input, {},
+        )
         self.assertEqual(ranked[0]["chunk_id"], "cm")
         self.assertEqual(
             ranked[0]["_score_components"]["same_asset_family"], 1.0,

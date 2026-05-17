@@ -53,19 +53,12 @@ class FingerprintRegexTests(unittest.TestCase):
 
 
 class RetrieveByFingerprintTests(unittest.TestCase):
-    """retrieve_by_fingerprint respects the flag and returns the
-    metadata_json from the mocked best-match row."""
+    """retrieve_by_fingerprint returns the metadata_json from the
+    mocked best-match row."""
 
-    def test_flag_off_returns_none(self):
+    def test_invalid_shape_returns_none(self):
         from backend.retrieval import orchestrator as orch
-        with mock.patch.object(orch.settings, "LOGIQ_SPRINT4_BACKEND", False):
-            self.assertIsNone(orch.retrieve_by_fingerprint("BGP-5-ADJCHANGE"))
-
-    def test_invalid_shape_returns_none_even_with_flag_on(self):
-        from backend.retrieval import orchestrator as orch
-        with mock.patch.object(orch.settings, "LOGIQ_SPRINT4_BACKEND", True):
-            self.assertIsNone(orch.retrieve_by_fingerprint("bgp-5-adjchange"))
-            self.assertIsNone(orch.retrieve_by_fingerprint(""))
+        self.assertIsNone(orch.retrieve_by_fingerprint(""))
 
     def test_hit_returns_metadata_dict(self):
         """Mocked chunks row — retrieve_by_fingerprint should return
@@ -105,8 +98,7 @@ class RetrieveByFingerprintTests(unittest.TestCase):
         fake_engine = mock.MagicMock()
         fake_engine.connect.return_value = fake_conn
 
-        with mock.patch.object(orch.settings, "LOGIQ_SPRINT4_BACKEND", True), \
-             mock.patch("backend.db.connection.engine", fake_engine):
+        with mock.patch("backend.db.connection.engine", fake_engine):
             out = orch.retrieve_by_fingerprint("BGP-5-ADJCHANGE")
 
         self.assertIsNotNone(out)
@@ -129,47 +121,33 @@ class RetrieveByFingerprintTests(unittest.TestCase):
         fake_engine = mock.MagicMock()
         fake_engine.connect.return_value = fake_conn
 
-        with mock.patch.object(orch.settings, "LOGIQ_SPRINT4_BACKEND", True), \
-             mock.patch("backend.db.connection.engine", fake_engine):
+        with mock.patch("backend.db.connection.engine", fake_engine):
             self.assertIsNone(orch.retrieve_by_fingerprint("BGP-5-ADJCHANGE"))
 
 
 class ComposerExpertCopilotVoiceTests(unittest.TestCase):
     """_select_composer_voice routes voice_override="expert_copilot"
-    to _VOICE_EXPERT_COPILOT when LOGIQ_SPRINT4_BACKEND is on, and falls
-    through to the default when the flag is off."""
+    to _VOICE_EXPERT_COPILOT."""
 
-    def test_expert_copilot_returned_under_flag(self):
+    def test_expert_copilot_returned(self):
         from backend.agents import composer
-        with mock.patch.object(composer.settings, "LOGIQ_SPRINT4_BACKEND", True), \
-             mock.patch.object(composer.settings, "LOGIQ_SPRINT3B_BACKEND", False), \
-             mock.patch.object(composer.settings, "LOGIQ_SPRINT3A_BACKEND", True):
-            voice = composer._select_composer_voice(
-                None, voice_override="expert_copilot",
-            )
-            self.assertIs(voice, composer._VOICE_EXPERT_COPILOT)
+        voice = composer._select_composer_voice(
+            None, voice_override="expert_copilot",
+        )
+        self.assertIs(voice, composer._VOICE_EXPERT_COPILOT)
 
-    def test_flag_off_falls_through_to_default(self):
+    def test_kb_pivot_returned(self):
+        """Sprint 3B KB pivot voice fires via voice_override="kb_pivot"."""
         from backend.agents import composer
-        with mock.patch.object(composer.settings, "LOGIQ_SPRINT4_BACKEND", False), \
-             mock.patch.object(composer.settings, "LOGIQ_SPRINT3B_BACKEND", False), \
-             mock.patch.object(composer.settings, "LOGIQ_SPRINT3A_BACKEND", True):
-            voice = composer._select_composer_voice(
-                None, voice_override="expert_copilot",
-            )
-            self.assertIs(voice, composer._composer_rules)
+        voice = composer._select_composer_voice(
+            None, voice_override="kb_pivot",
+        )
+        self.assertIs(voice, composer._VOICE_KB_PIVOT)
 
-    def test_kb_pivot_still_works_under_3b_only(self):
-        """Regression: Sprint 3B KB pivot voice must keep firing when
-        only LOGIQ_SPRINT3B_BACKEND is on (Sprint 4 must not break it)."""
+    def test_no_override_falls_through_to_default(self):
         from backend.agents import composer
-        with mock.patch.object(composer.settings, "LOGIQ_SPRINT4_BACKEND", False), \
-             mock.patch.object(composer.settings, "LOGIQ_SPRINT3B_BACKEND", True), \
-             mock.patch.object(composer.settings, "LOGIQ_SPRINT3A_BACKEND", True):
-            voice = composer._select_composer_voice(
-                None, voice_override="kb_pivot",
-            )
-            self.assertIs(voice, composer._VOICE_KB_PIVOT)
+        voice = composer._select_composer_voice(None)
+        self.assertIs(voice, composer._composer_rules)
 
 
 if __name__ == "__main__":

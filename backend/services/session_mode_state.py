@@ -84,8 +84,7 @@ class SessionMode:
     form_data: Optional[Dict[str, Any]] = None
     mode_set_at: Optional[datetime] = None
     # Sprint 4 — audit trail of how the session was entered. Both remain
-    # None for pre-Sprint-4 rows AND when LOGIQ_SPRINT4_BACKEND is off at
-    # session start. entered_via ∈ {'fingerprint', 'skip', None}.
+    # None for pre-Sprint-4 rows. entered_via ∈ {'fingerprint', 'skip', None}.
     entered_via: Optional[str] = None
     original_fingerprint: Optional[str] = None
     is_valid: bool = True

@@ -17,83 +17,43 @@ except Exception:
     pass
 
 
-def _make_client(flag_on: bool):
+def _make_client():
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from backend.tier1_copilot.routes import router
-    from backend.config import settings
 
     app = FastAPI()
     app.include_router(router)
-
-    patched = mock.patch.object(settings, "LOGIQ_TIER1_COPILOT_BACKEND", flag_on)
-    patched.start()
     client = TestClient(app)
-    return client, patched
-
-
-class FlagOffTests(unittest.TestCase):
-    def test_analyze_returns_404_when_flag_off(self):
-        client, patch_ctx = _make_client(flag_on=False)
-        try:
-            r = client.post("/tier1/analyze", json={
-                "severity": "P2",
-                "asset_name": "a",
-                "alert_type": "b",
-                "session_id": "s",
-            })
-            self.assertEqual(r.status_code, 404)
-        finally:
-            patch_ctx.stop()
-
-    def test_feedback_returns_404_when_flag_off(self):
-        client, patch_ctx = _make_client(flag_on=False)
-        try:
-            r = client.post("/tier1/feedback", json={
-                "response_id": "x",
-                "helpful": True,
-                "session_id": "s",
-            })
-            self.assertEqual(r.status_code, 404)
-        finally:
-            patch_ctx.stop()
+    return client
 
 
 class ValidationTests(unittest.TestCase):
     def test_malformed_payload_returns_422(self):
-        client, patch_ctx = _make_client(flag_on=True)
-        try:
-            r = client.post("/tier1/analyze", json={
-                "asset_name": "a", "alert_type": "b", "session_id": "s",
-            })  # missing severity
-            self.assertEqual(r.status_code, 422)
-        finally:
-            patch_ctx.stop()
+        client = _make_client()
+        r = client.post("/tier1/analyze", json={
+            "asset_name": "a", "alert_type": "b", "session_id": "s",
+        })  # missing severity
+        self.assertEqual(r.status_code, 422)
 
     def test_severity_enum_rejected_when_bad(self):
-        client, patch_ctx = _make_client(flag_on=True)
-        try:
-            r = client.post("/tier1/analyze", json={
-                "severity": "P9", "asset_name": "a",
-                "alert_type": "b", "session_id": "s",
-            })
-            self.assertEqual(r.status_code, 422)
-        finally:
-            patch_ctx.stop()
+        client = _make_client()
+        r = client.post("/tier1/analyze", json={
+            "severity": "P9", "asset_name": "a",
+            "alert_type": "b", "session_id": "s",
+        })
+        self.assertEqual(r.status_code, 422)
 
 
 class HealthEndpointTests(unittest.TestCase):
-    def test_health_reports_flag_state_on(self):
-        client, patch_ctx = _make_client(flag_on=True)
-        try:
-            r = client.get("/tier1/health")
-            self.assertEqual(r.status_code, 200)
-            body = r.json()
-            self.assertTrue(body["flag_on"])
-            self.assertIn("alias_term_count", body)
-            self.assertIn("cache_size", body)
-        finally:
-            patch_ctx.stop()
+    def test_health_reports_ok(self):
+        client = _make_client()
+        r = client.get("/tier1/health")
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertTrue(body["flag_on"])
+        self.assertIn("alias_term_count", body)
+        self.assertIn("cache_size", body)
 
 
 class AnalyzeNoEvidencePathTests(unittest.TestCase):
@@ -102,26 +62,23 @@ class AnalyzeNoEvidencePathTests(unittest.TestCase):
 
     def test_no_evidence_returns_200_and_none_confidence(self):
         from backend.tier1_copilot import routes
-        client, patch_ctx = _make_client(flag_on=True)
-        try:
-            with mock.patch.object(routes, "retrieve_top_matches", return_value=[]), \
-                 mock.patch.object(routes, "get_cached_answer", return_value=None), \
-                 mock.patch.object(routes, "set_cached_answer", return_value=True), \
-                 mock.patch.object(routes, "_invoke_haiku", return_value=""):
-                r = client.post("/tier1/analyze", json={
-                    "severity": "P3",
-                    "asset_name": "Unknown Asset",
-                    "alert_type": "Mystery",
-                    "session_id": "s1",
-                })
-            self.assertEqual(r.status_code, 200)
-            body = r.json()
-            self.assertEqual(body["confidence"], "None")
-            self.assertEqual(body["similar_count"], 0)
-            self.assertFalse(body["cache_hit"])
-            self.assertIsNone(body["matched_incident"])
-        finally:
-            patch_ctx.stop()
+        client = _make_client()
+        with mock.patch.object(routes, "retrieve_top_matches", return_value=[]), \
+             mock.patch.object(routes, "get_cached_answer", return_value=None), \
+             mock.patch.object(routes, "set_cached_answer", return_value=True), \
+             mock.patch.object(routes, "_invoke_haiku", return_value=""):
+            r = client.post("/tier1/analyze", json={
+                "severity": "P3",
+                "asset_name": "Unknown Asset",
+                "alert_type": "Mystery",
+                "session_id": "s1",
+            })
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
+        self.assertEqual(body["confidence"], "None")
+        self.assertEqual(body["similar_count"], 0)
+        self.assertFalse(body["cache_hit"])
+        self.assertIsNone(body["matched_incident"])
 
 
 class CacheHitCohortPopulationTests(unittest.TestCase):
@@ -132,7 +89,6 @@ class CacheHitCohortPopulationTests(unittest.TestCase):
 
     def test_cache_hit_populates_session_cohort(self):
         from backend.tier1_copilot import routes
-        from backend.config import settings
 
         cached_payload = {
             "answer_json": {
@@ -164,48 +120,43 @@ class CacheHitCohortPopulationTests(unittest.TestCase):
             captured["top_5_match_ids"] = list(top_5_match_ids or [])
             return FakeSession()
 
-        client, patch_ctx = _make_client(flag_on=True)
-        try:
-            with mock.patch.object(
-                routes, "get_cached_answer", return_value=cached_payload,
-            ), mock.patch.object(
-                routes, "create_session", side_effect=fake_create_session,
-            ), mock.patch.object(
-                routes, "retrieve_top_matches",
-                side_effect=AssertionError(
-                    "retrieval must NOT run on cache hit",
-                ),
-            ), mock.patch.object(
-                settings, "LOGIQ_TIER1_PROGRESSIVE_BACKEND", True,
-            ):
-                r = client.post("/tier1/analyze", json={
-                    "severity": "P2",
-                    "asset_name": "V-Desktop Environment",
-                    "alert_type": "Desktop Slowness",
-                    "session_id": "s",
-                })
-            self.assertEqual(r.status_code, 200)
-            body = r.json()
+        client = _make_client()
+        with mock.patch.object(
+            routes, "get_cached_answer", return_value=cached_payload,
+        ), mock.patch.object(
+            routes, "create_session", side_effect=fake_create_session,
+        ), mock.patch.object(
+            routes, "retrieve_top_matches",
+            side_effect=AssertionError(
+                "retrieval must NOT run on cache hit",
+            ),
+        ):
+            r = client.post("/tier1/analyze", json={
+                "severity": "P2",
+                "asset_name": "V-Desktop Environment",
+                "alert_type": "Desktop Slowness",
+                "session_id": "s",
+            })
+        self.assertEqual(r.status_code, 200)
+        body = r.json()
 
-            # Cache hit was honoured; retrieval did not run (else the
-            # AssertionError side_effect would have raised).
-            self.assertTrue(body["cache_hit"])
+        # Cache hit was honoured; retrieval did not run (else the
+        # AssertionError side_effect would have raised).
+        self.assertTrue(body["cache_hit"])
 
-            # The cached cohort flowed onto the new session row.
-            self.assertEqual(
-                captured["top_5_match_ids"],
-                ["chunk-1", "chunk-2", "chunk-3", "chunk-4", "chunk-5"],
-            )
+        # The cached cohort flowed onto the new session row.
+        self.assertEqual(
+            captured["top_5_match_ids"],
+            ["chunk-1", "chunk-2", "chunk-3", "chunk-4", "chunk-5"],
+        )
 
-            # The response also exposes the cohort so callers (frontend)
-            # know which tickets the journey will paint.
-            self.assertEqual(
-                body["top_5_match_ids"],
-                ["chunk-1", "chunk-2", "chunk-3", "chunk-4", "chunk-5"],
-            )
-            self.assertEqual(body["session_id"], "sess_cached_xyz")
-        finally:
-            patch_ctx.stop()
+        # The response also exposes the cohort so callers (frontend)
+        # know which tickets the journey will paint.
+        self.assertEqual(
+            body["top_5_match_ids"],
+            ["chunk-1", "chunk-2", "chunk-3", "chunk-4", "chunk-5"],
+        )
+        self.assertEqual(body["session_id"], "sess_cached_xyz")
 
 
 if __name__ == "__main__":

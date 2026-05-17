@@ -82,8 +82,7 @@ Rules:
 # Sprint 3D — 4 sub-mode voices for Ticket Handling. Each assumes the
 # findings were retrieved with doc_kinds=["sop"] (wired in the retrieval
 # layer via resolve_mode_doc_kinds). These override the generic
-# _VOICE_TICKET_HANDLING above when LOGIQ_SPRINT3D_BACKEND=True and the
-# session carries a matching sub_mode.
+# _VOICE_TICKET_HANDLING above when the session carries a matching sub_mode.
 _VOICE_TH_CREATE = """You are helping a NOC engineer create a new ticket. The findings below are SOP/runbook excerpts describing how tickets should be documented (doc_kind=sop).
 
 Structure the answer as:
@@ -166,9 +165,8 @@ Rules:
 
 
 # Sprint 3D — (mode, sub_mode) keyed dispatch for Ticket Handling.
-# Consulted first inside _select_composer_voice when LOGIQ_SPRINT3D_BACKEND
-# is on; falls back to the copy-and-extend _VOICE_BY_MODE path when the
-# pair is not registered.
+# Consulted first inside _select_composer_voice; falls back to the
+# copy-and-extend _VOICE_BY_MODE path when the pair is not registered.
 _VOICE_BY_MODE_SUB = {
     ("ticket_handling", "ticket_create"):   _VOICE_TH_CREATE,
     ("ticket_handling", "ticket_update"):   _VOICE_TH_UPDATE,
@@ -345,97 +343,24 @@ def _select_composer_voice(
     """
     Return the composer voice prompt for the given session mode.
 
-    Sprint 3A flag-off guarantee: when LOGIQ_SPRINT3A_BACKEND is False,
-    when session_mode is None, or when the mode is not in _VOICE_BY_MODE,
-    this function returns `_composer_rules` BY IDENTITY (`is`). Callers
-    can therefore assert `_select_composer_voice(m) is _composer_rules`
-    to prove the flag-off / deferred-mode path emits a byte-identical
-    prompt to the pre-3A baseline.
+    `voice_override` takes priority and is used today by the KB pivot
+    pipeline (voice_override="kb_pivot") and the Expert Copilot
+    fingerprint flow (voice_override="expert_copilot").
 
-    Sprint 3B — `voice_override` takes priority over session_mode when
-    set AND LOGIQ_SPRINT3B_BACKEND is True. Used today only by the KB
-    pivot pipeline (voice_override="kb_pivot"). When Sprint 3B is off,
-    the override is ignored and the Sprint 3A path runs unchanged.
+    Sprint 3A (mode-aware voice selection) is disabled at the project
+    level — this function returns `_composer_rules` BY IDENTITY (`is`)
+    whenever no voice_override matches. Callers can therefore assert
+    `_select_composer_voice(m) is _composer_rules` to prove the path
+    emits a byte-identical prompt to the pre-3A baseline.
 
-    Sprint 3D — when LOGIQ_SPRINT3D_BACKEND is True, a (mode, sub_mode)
-    pair registered in `_VOICE_BY_MODE_SUB` wins over _VOICE_BY_MODE.
-    Today that only activates Ticket Handling sub-modes
-    (ticket_create/update/close/validate). The 3D flag is checked
-    AFTER the Sprint 3A gate, so ticket-handling voices never fire
-    when 3A is off — preserving the flag-off identity guarantee.
-
-    `session_mode` accepts either:
-      - None (no mode selected / flag off / read failed)
-      - a SessionMode dataclass (reads `.selected_mode` and `.sub_mode`)
-      - a raw string mode name (already normalized)
-
-    `sub_mode` is an explicit override — when given, it beats the
-    dataclass's `.sub_mode` attribute. Callers typically leave it None
-    and let the dataclass supply it.
+    `session_mode` and `sub_mode` are accepted for backward-compat
+    with the agent pipeline but are not consulted.
     """
-    # Sprint 3B / Sprint 4 — voice_override wins when any owning sprint
-    # flag is on AND an override voice exists for the key. Each override
-    # key is "owned" by whichever sprint introduced it; keeping the gate
-    # as an OR across owners lets Sprint 4 (expert_copilot) work when the
-    # operator turns on LOGIQ_SPRINT4_BACKEND without also needing 3B on.
-    # The caller is the only place that decides WHICH key to pass, so a
-    # caller running under Sprint 4 only will never pass "kb_pivot" and
-    # vice versa — the OR is safe.
-    if voice_override and (
-        getattr(settings, "LOGIQ_SPRINT3B_BACKEND", False)
-        or getattr(settings, "LOGIQ_SPRINT4_BACKEND", False)
-    ):
+    if voice_override:
         override_voice = _VOICE_BY_OVERRIDE.get(voice_override)
         if override_voice is not None:
             return override_voice
-
-    if not getattr(settings, "LOGIQ_SPRINT3A_BACKEND", False):
-        return _composer_rules
-
-    if session_mode is None:
-        return _composer_rules
-
-    mode_name: Optional[str] = None
-    resolved_sub: Optional[str] = sub_mode
-    if isinstance(session_mode, str):
-        mode_name = session_mode
-    else:
-        mode_name = getattr(session_mode, "selected_mode", None)
-        if resolved_sub is None:
-            resolved_sub = getattr(session_mode, "sub_mode", None)
-
-    if not mode_name:
-        return _composer_rules
-
-    # Sprint 3D — (mode, sub_mode) dispatch wins over the mode-only table
-    # when the 3D flag is on AND a pair is registered. This is consulted
-    # BEFORE the Sprint 3C copy-and-extend so a future pair like
-    # ("escalation", <sub>) could slot in without changing this block.
-    if (
-        resolved_sub
-        and getattr(settings, "LOGIQ_SPRINT3D_BACKEND", False)
-    ):
-        pair_voice = _VOICE_BY_MODE_SUB.get((mode_name, resolved_sub))
-        if pair_voice is not None:
-            return pair_voice
-
-    # Sprint 3C / 3E — copy-and-extend pattern. The module-level
-    # _VOICE_BY_MODE stays frozen (only Troubleshooting active by
-    # default); each per-call dict adds sprint-specific voices when
-    # their flag is on. Mutating the module dict would be order-sensitive
-    # across sprints and leak across test cases. Copy keeps each call
-    # pure and the flag-off path identity-equal to _composer_rules.
-    active_table = dict(_VOICE_BY_MODE)
-    if getattr(settings, "LOGIQ_SPRINT3C_BACKEND", False):
-        active_table["escalation"] = _VOICE_ESCALATION
-    if getattr(settings, "LOGIQ_SPRINT3E_BACKEND", False):
-        active_table["vendor_oem"] = _VOICE_VENDOR_OEM
-
-    voice = active_table.get(mode_name)
-    if voice is None:
-        return _composer_rules
-
-    return voice
+    return _composer_rules
 
 
 # ─────────────────────────────────────────────────────────────

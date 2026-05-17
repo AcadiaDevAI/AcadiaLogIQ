@@ -419,56 +419,38 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Sprint 6 — Tier-1 Alert Copilot. Mounted ONLY when the flag is on,
-# so /tier1/* returns a native FastAPI 404 the rest of the time and
-# Sprint 1-5 behavior stays byte-identical.
-if getattr(settings, "LOGIQ_TIER1_COPILOT_BACKEND", False):
-    try:
-        from backend.tier1_copilot.routes import router as _tier1_router
-        app.include_router(_tier1_router)
-        logger.info("[tier1_copilot] router mounted at /tier1")
-    except Exception as _tier1_exc:
-        logger.warning(
-            "[tier1_copilot] failed to mount router (module disabled): %s",
-            _tier1_exc,
-        )
+# Sprint 6 — Tier-1 Alert Copilot router mount.
+try:
+    from backend.tier1_copilot.routes import router as _tier1_router
+    app.include_router(_tier1_router)
+    logger.info("[tier1_copilot] router mounted at /tier1")
+except Exception as _tier1_exc:
+    logger.warning(
+        "[tier1_copilot] failed to mount router (module disabled): %s",
+        _tier1_exc,
+    )
 
-# Sprint 10 — Tier-1 Resolution Journey. Mount only when both Sprint 6
-# (parent — needed because the journey reads tier1_sessions populated
-# by /tier1/analyze) AND the journey flag are true. Flag-off = the
-# /tier1/journey/* router is not registered and FastAPI returns native
-# 404 for any request to those paths, so the prior Sprint 6/7/8/9
-# behaviour is byte-identical.
-if (
-    getattr(settings, "LOGIQ_TIER1_COPILOT_BACKEND", False)
-    and getattr(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", False)
-):
-    try:
-        from backend.tier1_copilot.journey.routes import router as _journey_router
-        app.include_router(_journey_router)
-        logger.info("[tier1_journey] router mounted at /tier1/journey")
-    except Exception as _journey_exc:
-        logger.warning(
-            "[tier1_journey] failed to mount router (module disabled): %s",
-            _journey_exc,
-        )
+# Sprint 10 — Tier-1 Resolution Journey router mount.
+try:
+    from backend.tier1_copilot.journey.routes import router as _journey_router
+    app.include_router(_journey_router)
+    logger.info("[tier1_journey] router mounted at /tier1/journey")
+except Exception as _journey_exc:
+    logger.warning(
+        "[tier1_journey] failed to mount router (module disabled): %s",
+        _journey_exc,
+    )
 
-# Sprint 9 — Universal Intake. Same gating pattern: mount only when
-# both Sprint 6 (parent flag) and Sprint 9 flags are true. Flag-off =
-# /intake/* returns native 404 and Sprint 6/7/8 stay byte-identical.
-if (
-    getattr(settings, "LOGIQ_TIER1_COPILOT_BACKEND", False)
-    and getattr(settings, "LOGIQ_UNIVERSAL_INTAKE_BACKEND", False)
-):
-    try:
-        from backend.tier1_copilot.intake.routes import router as _intake_router
-        app.include_router(_intake_router)
-        logger.info("[intake] router mounted at /intake")
-    except Exception as _intake_exc:
-        logger.warning(
-            "[intake] failed to mount router (module disabled): %s",
-            _intake_exc,
-        )
+# Sprint 9 — Universal Intake router mount.
+try:
+    from backend.tier1_copilot.intake.routes import router as _intake_router
+    app.include_router(_intake_router)
+    logger.info("[intake] router mounted at /intake")
+except Exception as _intake_exc:
+    logger.warning(
+        "[intake] failed to mount router (module disabled): %s",
+        _intake_exc,
+    )
 
 # Sprint 13.32 — RCA-from-incident-number flow. Standalone surface
 # triggered by the sidebar's "RCA" button. No flag gate by design —
@@ -1355,7 +1337,7 @@ async def index_file_job(
 
         # Sprint 2.9 — malformed-JSON rejection. process_document returns
         # a {"status": "rejected", ...} dict BEFORE any Haiku / embedding /
-        # DB-chunk work when LOGIQ_JSON_VALIDATOR_BACKEND rejects the file.
+        # DB-chunk work when the JSON validator rejects the file.
         # Persist a rejected documents row so the admin UI can show a
         # red-dot badge, mark the ingestion job failed with a human-friendly
         # error detail, and return — no chunks, no embeddings.
@@ -1947,13 +1929,10 @@ async def upload(
     if not ext or ext not in settings.ALLOWED_FILE_TYPES:
         raise HTTPException(400, f"Type '{ext}' not allowed. Allowed: {settings.ALLOWED_FILE_TYPES}")
 
-    # Sprint 3-PREP-B — validate doc_kind against the whitelist. When
-    # LOGIQ_BULK_INGEST_BACKEND is off we still accept the field but
-    # silently coerce unknowns to 'ticket', which matches post-PREP-A
-    # default behavior. When the flag is on, the caller is expected to
-    # supply a valid kind; an invalid kind still coerces (no 400), so
-    # the /upload contract stays backward-compatible for any client
-    # that hasn't yet shipped the dropdown.
+    # Sprint 3-PREP-B — validate doc_kind against the whitelist.
+    # Invalid kinds silently coerce to 'ticket' (no 400) so the
+    # /upload contract stays backward-compatible for clients that
+    # haven't shipped the dropdown.
     _raw_kind = (doc_kind or "").strip().lower()
     if _raw_kind in settings.VALID_DOC_KINDS:
         resolved_doc_kind = _raw_kind
@@ -2086,9 +2065,6 @@ async def delete_all_sessions(user_id: Optional[str] = Depends(auth_dependency))
 # Guided Workflow — session mode state endpoints (Sprint 1).
 # All three require an authenticated user and verify the session
 # belongs to that user via the existing get_chat_session pattern.
-# When GUIDED_WORKFLOW_ENABLED is False the endpoints still work
-# (so operators can test in staging), but the frontend won't call
-# them because its own flag is also off.
 # ─────────────────────────────────────────────────────────────
 class SetSessionModeRequest(BaseModel):
     selected_mode: str
@@ -2163,9 +2139,7 @@ async def api_reset_session_context(
 
 # ─────────────────────────────────────────────────────────────
 # Sprint 2 — Partial mode/form patch (customer form, tech form, etc.)
-# Gated behind LOGIQ_SPRINT2_BACKEND AND GUIDED_WORKFLOW_ENABLED.
-# Returns 403 when either flag is off so the frontend can fall back
-# cleanly. Whitelists the same fields as patch_session_mode.
+# Whitelists the same fields as patch_session_mode.
 # ─────────────────────────────────────────────────────────────
 class PatchSessionFormRequest(BaseModel):
     customer_name: Optional[str] = None
@@ -2185,12 +2159,6 @@ async def api_patch_session_form(
     user_id: Optional[str] = Depends(auth_dependency),
 ):
     """Apply a partial patch to mode-state fields (Sprint 2 forms)."""
-    if not (
-        getattr(settings, "LOGIQ_SPRINT2_BACKEND", False)
-        and getattr(settings, "GUIDED_WORKFLOW_ENABLED", False)
-    ):
-        raise HTTPException(status_code=403, detail="sprint2_flag_off")
-
     owner_id = _normalize_owner_id(user_id)
     session = get_chat_session(session_id, owner_id)
     if not session:
@@ -2218,11 +2186,6 @@ async def api_patch_session_form(
 
 # ─────────────────────────────────────────────────────────────
 # Sprint 4 — Fingerprint-First Expert Copilot
-#
-# Two endpoints gated behind LOGIQ_SPRINT4_BACKEND. When the flag is off
-# BOTH return 404 so the frontend (when someone rebuilds with 4 on while
-# backend has it off) can detect the mismatch and fall through to the
-# normal landing page.
 #
 #   POST /fingerprint/lookup
 #     Body: { session_id, fingerprint }
@@ -2311,9 +2274,6 @@ async def api_fingerprint_lookup(
 ):
     """Sprint 4 landing-screen handler: resolve a fingerprint code to the
     Expert Copilot answer for its highest-quality gold ticket."""
-    if not getattr(settings, "LOGIQ_SPRINT4_BACKEND", False):
-        raise HTTPException(status_code=404, detail="sprint4_flag_off")
-
     # Pass-through: the regex gate has been intentionally removed so the
     # raw trimmed input reaches retrieve_by_fingerprint and the JSONB `?`
     # exact-match lookup. Non-existent shapes just return a miss, same as
@@ -2408,12 +2368,11 @@ async def api_fingerprint_lookup(
     # ── Sprint 5 — Template-First Expert Copilot + Answer Cache ──
     # Applies ONLY to gold-schema JSON tickets. Non-gold retrievals
     # (PDFs, Word, KBs, contacts, partial tickets) ALWAYS fall through
-    # to the Sprint 4 run_composer path below regardless of flag state.
-    sprint5_on = getattr(settings, "LOGIQ_SPRINT5_BACKEND", False)
-    gold_schema = is_gold_schema_ticket(metadata_json) if sprint5_on else False
+    # to the Sprint 4 run_composer path below.
+    gold_schema = is_gold_schema_ticket(metadata_json)
     answer: Optional[str] = None
 
-    if sprint5_on and gold_schema:
+    if gold_schema:
         try:
             # Cache check — fast path. chunk_id may be None if the
             # retriever couldn't identify the row; in that case skip
@@ -2505,9 +2464,6 @@ async def api_fingerprint_skip(
     endpoint returns ok=True with an empty mode payload — the audit
     write will happen when the eventual mode-selector write creates the
     session. This keeps Skip cheap and idempotent."""
-    if not getattr(settings, "LOGIQ_SPRINT4_BACKEND", False):
-        raise HTTPException(status_code=404, detail="sprint4_flag_off")
-
     incoming_sid = (payload.session_id or "").strip() or None
     if not incoming_sid:
         return SessionModeResponse(ok=True, mode={}, reason="no_session_yet")
@@ -2785,66 +2741,60 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
 
     # ── Sprint 2: Context-break detection (non-blocking signal) ──
     # Piggybacks on the regex phrase detector + the existing triage
-    # verdict (zero new LLM calls). When both Sprint 1 and Sprint 2
-    # flags are on AND the session has an active locked mode, we emit
-    # a soft hint in context_stats so the UI can offer the Continue /
-    # Start-new modal. The user's turn still runs end-to-end — we never
-    # short-circuit the answer pipeline here.
+    # verdict (zero new LLM calls). When the session has an active
+    # locked mode, we emit a soft hint in context_stats so the UI can
+    # offer the Continue / Start-new modal. The user's turn still
+    # runs end-to-end — we never short-circuit the answer pipeline.
     _context_break_hit: Optional[Dict[str, Any]] = None
+    try:
+        _cb_snap = get_session_mode(session_id)
+    except Exception:
+        _cb_snap = None
     if (
-        getattr(settings, "LOGIQ_SPRINT2_BACKEND", False)
-        and getattr(settings, "GUIDED_WORKFLOW_ENABLED", False)
+        _cb_snap is not None
+        and getattr(_cb_snap, "is_valid", False)
+        and getattr(_cb_snap, "conversation_context_active", False)
     ):
         try:
-            _cb_snap = get_session_mode(session_id)
-        except Exception:
-            _cb_snap = None
+            from backend.services.context_break_phrases import (
+                detect_context_break as _detect_cb,
+            )
+            _cb_match = _detect_cb(req.q or "")
+        except Exception as _cb_exc:
+            logger.warning("[context_break] regex detect failed: %s", _cb_exc)
+            _cb_match = None
+        _cb_llm = False
+        _cb_llm_reason = ""
         if (
-            _cb_snap is not None
-            and getattr(_cb_snap, "is_valid", False)
-            and getattr(_cb_snap, "conversation_context_active", False)
+            _triage_result is not None
+            and getattr(_triage_result, "is_valid", False)
         ):
-            try:
-                from backend.services.context_break_phrases import (
-                    detect_context_break as _detect_cb,
-                )
-                _cb_match = _detect_cb(req.q or "")
-            except Exception as _cb_exc:
-                logger.warning("[context_break] regex detect failed: %s", _cb_exc)
-                _cb_match = None
-            _cb_llm = False
-            _cb_llm_reason = ""
-            if (
-                _triage_result is not None
-                and getattr(_triage_result, "is_valid", False)
-                and getattr(settings, "CONTEXT_BREAK_LLM_HINT_ENABLED", False)
-            ):
-                _cb_llm = bool(getattr(_triage_result, "context_break", False))
-                _cb_llm_reason = str(getattr(_triage_result, "context_break_reason", "") or "")
-            if _cb_match is not None or _cb_llm:
-                _context_break_hit = {
-                    "detected": True,
-                    "source": (
-                        "phrase+llm" if (_cb_match is not None and _cb_llm)
-                        else ("phrase" if _cb_match is not None else "llm")
-                    ),
-                    "category": (
-                        getattr(_cb_match, "category", "")
-                        if _cb_match is not None else ""
-                    ),
-                    "matched_phrase": (
-                        getattr(_cb_match, "matched_phrase", "")
-                        if _cb_match is not None else ""
-                    ),
-                    "llm_reason": _cb_llm_reason,
-                    "active_mode": _cb_snap.selected_mode,
-                    "active_sub_mode": _cb_snap.sub_mode,
-                }
-                logger.info(
-                    "[context_break] hit source=%s mode=%s phrase=%r llm=%s",
-                    _context_break_hit["source"], _cb_snap.selected_mode,
-                    _context_break_hit["matched_phrase"], _cb_llm,
-                )
+            _cb_llm = bool(getattr(_triage_result, "context_break", False))
+            _cb_llm_reason = str(getattr(_triage_result, "context_break_reason", "") or "")
+        if _cb_match is not None or _cb_llm:
+            _context_break_hit = {
+                "detected": True,
+                "source": (
+                    "phrase+llm" if (_cb_match is not None and _cb_llm)
+                    else ("phrase" if _cb_match is not None else "llm")
+                ),
+                "category": (
+                    getattr(_cb_match, "category", "")
+                    if _cb_match is not None else ""
+                ),
+                "matched_phrase": (
+                    getattr(_cb_match, "matched_phrase", "")
+                    if _cb_match is not None else ""
+                ),
+                "llm_reason": _cb_llm_reason,
+                "active_mode": _cb_snap.selected_mode,
+                "active_sub_mode": _cb_snap.sub_mode,
+            }
+            logger.info(
+                "[context_break] hit source=%s mode=%s phrase=%r llm=%s",
+                _context_break_hit["source"], _cb_snap.selected_mode,
+                _context_break_hit["matched_phrase"], _cb_llm,
+            )
 
     active_file_ids = _get_active_indexed_file_ids(user_id)
 
@@ -3750,20 +3700,14 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     pattern_context: Optional[Dict[str, Any]] = None
     # Sprint 2 — wire the active session mode into pattern analytics so
     # PATTERN_ANALYTICS_FORCE_ENABLE_IN_TROUBLESHOOTING_MODE can trigger.
-    # Gated: only read when both the workflow and Sprint 2 flags are on
-    # (soft dependency on Sprint 1).
     _pattern_session_mode: Optional[str] = None
-    if (
-        getattr(settings, "LOGIQ_SPRINT2_BACKEND", False)
-        and getattr(settings, "GUIDED_WORKFLOW_ENABLED", False)
-    ):
-        try:
-            _mode_snap = get_session_mode(session_id)
-            if getattr(_mode_snap, "is_valid", False):
-                _pattern_session_mode = _mode_snap.selected_mode
-        except Exception as _mode_exc:
-            logger.warning("[session_mode] read failed in pattern path: %s", _mode_exc)
-            _pattern_session_mode = None
+    try:
+        _mode_snap = get_session_mode(session_id)
+        if getattr(_mode_snap, "is_valid", False):
+            _pattern_session_mode = _mode_snap.selected_mode
+    except Exception as _mode_exc:
+        logger.warning("[session_mode] read failed in pattern path: %s", _mode_exc)
+        _pattern_session_mode = None
     try:
         from backend.services.pattern_analytics import enrich_if_needed as _pattern_enrich
         from backend.db.queries import load_similar_tickets_for_topic as _load_similar
@@ -3902,30 +3846,20 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         # so the Analyst's per-step retriever can anchor multi-step plans on
         # the same entities across steps instead of drifting.
         _session_scope: Optional[List[str]] = None
-        if getattr(settings, "LOGIQ_HOTFIX_BACKEND", False):
-            try:
-                from backend.retrieval.orchestrator import (
-                    _extract_identifiers as _hf_extract,
-                )
-                _session_scope = [
-                    cid for cid, _t in (_hf_extract(effective_query) or [])
-                ]
-            except Exception:
-                _session_scope = None
+        try:
+            from backend.retrieval.orchestrator import (
+                _extract_identifiers as _hf_extract,
+            )
+            _session_scope = [
+                cid for cid, _t in (_hf_extract(effective_query) or [])
+            ]
+        except Exception:
+            _session_scope = None
 
-        # Sprint 3A — read the session mode (independent of Sprint 1/2 gates,
-        # which restrict their own reads to the guided-workflow feature) and
-        # thread it into the agent pipeline so the Composer can select a
-        # mode-tuned voice. Flag-off inside the composer: the pipeline still
-        # accepts the kwarg, but the selector returns _composer_rules by
-        # identity → byte-identical prompt.
+        # Sprint 3A is disabled — session mode is no longer threaded into
+        # the composer voice selector. The pipeline still accepts the
+        # kwarg for backward compatibility; we pass None.
         _sprint3a_session_mode = None
-        if getattr(settings, "LOGIQ_SPRINT3A_BACKEND", False):
-            try:
-                _sprint3a_session_mode = get_session_mode(session_id)
-            except Exception as _sm_exc:
-                logger.warning("[sprint3a] session_mode read failed: %s", _sm_exc)
-                _sprint3a_session_mode = None
 
         agent_result = run_agent_pipeline(
             query=effective_query,
@@ -4121,44 +4055,41 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     }
 
     # ── Sprint 2: surface pattern + context-break signals in context_stats ──
-    # Strictly additive. Keys absent when Sprint 2 flag is off so the
-    # existing frontend continues to see pre-Sprint-2 payload shape.
-    if getattr(settings, "LOGIQ_SPRINT2_BACKEND", False):
-        try:
-            if pattern_context:
-                context_stats["pattern_active"] = bool(
-                    pattern_context.get("pattern_active", False)
-                )
-                context_stats["pattern_topic"] = pattern_context.get("pattern_topic") or ""
-                context_stats["pattern_data"] = pattern_context.get("pattern_data") or {}
-            else:
-                context_stats["pattern_active"] = False
-                context_stats["pattern_topic"] = ""
-                context_stats["pattern_data"] = {}
-        except Exception as _ps_exc:
-            logger.warning("[pattern_analytics] stats surface failed: %s", _ps_exc)
+    try:
+        if pattern_context:
+            context_stats["pattern_active"] = bool(
+                pattern_context.get("pattern_active", False)
+            )
+            context_stats["pattern_topic"] = pattern_context.get("pattern_topic") or ""
+            context_stats["pattern_data"] = pattern_context.get("pattern_data") or {}
+        else:
             context_stats["pattern_active"] = False
             context_stats["pattern_topic"] = ""
             context_stats["pattern_data"] = {}
+    except Exception as _ps_exc:
+        logger.warning("[pattern_analytics] stats surface failed: %s", _ps_exc)
+        context_stats["pattern_active"] = False
+        context_stats["pattern_topic"] = ""
+        context_stats["pattern_data"] = {}
 
-        if _context_break_hit is not None:
-            context_stats["context_break"] = True
-            context_stats["context_break_source"] = _context_break_hit.get("source", "")
-            context_stats["context_break_category"] = _context_break_hit.get("category", "")
-            context_stats["context_break_matched_phrase"] = (
-                _context_break_hit.get("matched_phrase", "")
-            )
-            context_stats["context_break_active_mode"] = (
-                _context_break_hit.get("active_mode") or ""
-            )
-            context_stats["context_break_active_sub_mode"] = (
-                _context_break_hit.get("active_sub_mode") or ""
-            )
-        else:
-            context_stats["context_break"] = False
+    if _context_break_hit is not None:
+        context_stats["context_break"] = True
+        context_stats["context_break_source"] = _context_break_hit.get("source", "")
+        context_stats["context_break_category"] = _context_break_hit.get("category", "")
+        context_stats["context_break_matched_phrase"] = (
+            _context_break_hit.get("matched_phrase", "")
+        )
+        context_stats["context_break_active_mode"] = (
+            _context_break_hit.get("active_mode") or ""
+        )
+        context_stats["context_break_active_sub_mode"] = (
+            _context_break_hit.get("active_sub_mode") or ""
+        )
+    else:
+        context_stats["context_break"] = False
 
-        if _pattern_session_mode:
-            context_stats["session_mode"] = _pattern_session_mode
+    if _pattern_session_mode:
+        context_stats["session_mode"] = _pattern_session_mode
 
     # ── Store in answer cache (fail-safe; never blocks response) ──
     try:
@@ -4236,26 +4167,24 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             logger.warning("Semantic cache put wrapper failed: %s", _sem_exc)
 
     # Sprint 3B — low-similarity banner. Populate confidence_band only
-    # when the flag is on AND we actually ran ticket-history retrieval
-    # (doc_ranked is the ranked list of (id, text, meta, score) tuples).
-    # Flag-off path and cached/trivial paths leave this None so the
-    # frontend omits the banner — byte-identical pre-3B shape.
+    # when we actually ran ticket-history retrieval (doc_ranked is the
+    # ranked list of (id, text, meta, score) tuples). Cached/trivial
+    # paths leave this None so the frontend omits the banner.
     _confidence_band: Optional[str] = None
-    if getattr(settings, "LOGIQ_SPRINT3B_BACKEND", False):
-        try:
-            _top_score = float(doc_ranked[0][3]) if doc_ranked else 0.0
-            _confidence_band = (
-                "low" if _top_score < settings.LOW_SIMILARITY_THRESHOLD else "normal"
-            )
-            context_stats["confidence_band"] = _confidence_band
-            context_stats["top_chunk_score"] = round(_top_score, 4)
-            logger.info(
-                "[confidence_band] top_score=%.4f threshold=%.2f band=%s",
-                _top_score, settings.LOW_SIMILARITY_THRESHOLD, _confidence_band,
-            )
-        except Exception as _cb_exc:
-            logger.warning("[confidence_band] compute failed: %s", _cb_exc)
-            _confidence_band = None
+    try:
+        _top_score = float(doc_ranked[0][3]) if doc_ranked else 0.0
+        _confidence_band = (
+            "low" if _top_score < settings.LOW_SIMILARITY_THRESHOLD else "normal"
+        )
+        context_stats["confidence_band"] = _confidence_band
+        context_stats["top_chunk_score"] = round(_top_score, 4)
+        logger.info(
+            "[confidence_band] top_score=%.4f threshold=%.2f band=%s",
+            _top_score, settings.LOW_SIMILARITY_THRESHOLD, _confidence_band,
+        )
+    except Exception as _cb_exc:
+        logger.warning("[confidence_band] compute failed: %s", _cb_exc)
+        _confidence_band = None
 
     return AnswerResponse(
         answer=answer,
@@ -4285,9 +4214,8 @@ class FeedbackStateRequest(BaseModel):
     semantic_cache_id: Optional[str] = None
     # Sprint 3B — optional context carried by the frontend on 👎 so the
     # backend can run the KB pivot pipeline. Both fields are ignored
-    # unless LOGIQ_SPRINT3B_BACKEND is on AND feedback_type == "dislike"
-    # AND session_mode == "troubleshooting". Missing fields short-circuit
-    # to the pre-3B behavior path.
+    # unless feedback_type == "dislike" AND session_mode == "troubleshooting".
+    # Missing fields short-circuit the pivot.
     session_mode: Optional[str] = None
     original_query: Optional[str] = None
     model_config = ConfigDict(extra="ignore")
@@ -4341,13 +4269,12 @@ async def save_feedback_state(
         except Exception as _inv_exc:
             logger.warning("[semantic_cache] invalidate wrapper failed: %s", _inv_exc)
 
-    # Sprint 3B — 👎 KB/Runbook pivot. Only fires in troubleshooting mode,
-    # with the flag on, and only when the frontend sent `original_query`.
-    # Dedupes repeated 👎s on the same message within a 60s window.
+    # Sprint 3B — 👎 KB/Runbook pivot. Only fires in troubleshooting mode
+    # when the frontend sent `original_query`. Dedupes repeated 👎s on
+    # the same message within a 60s window.
     pivot_payload: Optional[Dict[str, Any]] = None
     _should_pivot = (
         req.feedback_type == "dislike"
-        and getattr(settings, "LOGIQ_SPRINT3B_BACKEND", False)
         and (req.session_mode or "").lower() == "troubleshooting"
         and bool((req.original_query or "").strip())
     )

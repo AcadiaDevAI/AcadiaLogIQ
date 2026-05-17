@@ -222,17 +222,6 @@ class RetrieveByFingerprintReturnChunkIdTests(unittest.TestCase):
     """Additive kwarg: return_chunk_id=True yields a (dict, id) tuple;
     default False preserves the Sprint 4 Optional[Dict] contract."""
 
-    def test_flag_off_returns_tuple_none(self):
-        from backend.retrieval import orchestrator as orch
-        with mock.patch.object(orch.settings, "LOGIQ_SPRINT4_BACKEND", False):
-            out = orch.retrieve_by_fingerprint("BGP-5-ADJCHANGE", return_chunk_id=True)
-            self.assertEqual(out, (None, None))
-
-    def test_flag_off_default_kwarg_still_returns_none(self):
-        from backend.retrieval import orchestrator as orch
-        with mock.patch.object(orch.settings, "LOGIQ_SPRINT4_BACKEND", False):
-            self.assertIsNone(orch.retrieve_by_fingerprint("BGP-5-ADJCHANGE"))
-
     def test_hit_returns_tuple_when_requested(self):
         from backend.retrieval import orchestrator as orch
 
@@ -252,8 +241,7 @@ class RetrieveByFingerprintReturnChunkIdTests(unittest.TestCase):
         fake_engine = mock.MagicMock()
         fake_engine.connect.return_value = fake_conn
 
-        with mock.patch.object(orch.settings, "LOGIQ_SPRINT4_BACKEND", True), \
-             mock.patch("backend.db.connection.engine", fake_engine):
+        with mock.patch("backend.db.connection.engine", fake_engine):
             out = orch.retrieve_by_fingerprint("BGP-5-ADJCHANGE", return_chunk_id=True)
 
         self.assertIsInstance(out, tuple)

@@ -3,12 +3,7 @@
 Three endpoints:
   POST /tier1/analyze   — main intake → answer flow
   POST /tier1/feedback  — 👍/👎 + 5 follow-up actions
-  GET  /tier1/health    — probe (flag state, alias size, cache size)
-
-The router is ONLY mounted when LOGIQ_TIER1_COPILOT_BACKEND is True
-(see backend/api.py app creation block). When the flag is off the
-module's URL space is not registered, so FastAPI returns 404 for
-every /tier1/* path naturally — no per-endpoint guard needed.
+  GET  /tier1/health    — probe (alias size, cache size)
 """
 from __future__ import annotations
 
@@ -84,17 +79,11 @@ router = APIRouter(prefix="/tier1", tags=["tier1-copilot"])
 # ─────────────────────────────────────────────────────────────
 @router.post("/analyze", response_model=Tier1AnalyzeResponse)
 async def analyze(req: Tier1AnalyzeRequest) -> Tier1AnalyzeResponse:
-    # Defense-in-depth: the router is only mounted when the flag is on,
-    # but this check lets tests exercise the flag-off path without
-    # rebuilding the app.
-    if not getattr(settings, "LOGIQ_TIER1_COPILOT_BACKEND", False):
-        raise HTTPException(status_code=404, detail="tier1_flag_off")
-
     alias_dict = get_alias_dictionary()
     normalized = normalize_alert(req, alias_dict)
     signature_hash = normalized["signature_hash"]
     alert_input = req.model_dump()
-    sprint7_on = bool(getattr(settings, "LOGIQ_TIER1_PROGRESSIVE_BACKEND", False))
+    sprint7_on = True
 
     # ── Cache check ─────────────────────────────────────────
     cached = get_cached_answer(signature_hash)
@@ -277,9 +266,6 @@ async def analyze(req: Tier1AnalyzeRequest) -> Tier1AnalyzeResponse:
 # ─────────────────────────────────────────────────────────────
 @router.post("/feedback", response_model=Tier1FeedbackResponse)
 async def feedback(req: Tier1FeedbackRequest) -> Tier1FeedbackResponse:
-    if not getattr(settings, "LOGIQ_TIER1_COPILOT_BACKEND", False):
-        raise HTTPException(status_code=404, detail="tier1_flag_off")
-
     ok = record_feedback(
         response_id=req.response_id,
         session_id=req.session_id,
@@ -296,8 +282,7 @@ async def feedback(req: Tier1FeedbackRequest) -> Tier1FeedbackResponse:
     # doesn't exist (Sprint 6 flows pass a chat session_id that isn't
     # in tier1_sessions).
     if (
-        getattr(settings, "LOGIQ_TIER1_PROGRESSIVE_BACKEND", False)
-        and req.helpful is False
+        req.helpful is False
         and (req.session_id or "").startswith("sess_")
     ):
         increment_thumbs_down(req.session_id)
@@ -314,25 +299,18 @@ async def feedback(req: Tier1FeedbackRequest) -> Tier1FeedbackResponse:
 # ─────────────────────────────────────────────────────────────
 @router.get("/health", response_model=Tier1HealthResponse)
 async def health() -> Tier1HealthResponse:
-    flag_on = bool(getattr(settings, "LOGIQ_TIER1_COPILOT_BACKEND", False))
     ad = get_alias_dictionary()
     return Tier1HealthResponse(
-        ok=flag_on,
+        ok=True,
         alias_term_count=ad.term_count(),
         cache_size=cache_size(),
-        flag_on=flag_on,
+        flag_on=True,
     )
 
 
 # ═════════════════════════════════════════════════════════════
-# Sprint 7 — progressive workflow endpoints (all gated behind
-# LOGIQ_TIER1_PROGRESSIVE_BACKEND; flag-off → 404)
+# Sprint 7 — progressive workflow endpoints
 # ═════════════════════════════════════════════════════════════
-def _require_sprint7() -> None:
-    if not getattr(settings, "LOGIQ_TIER1_PROGRESSIVE_BACKEND", False):
-        raise HTTPException(status_code=404, detail="tier1_progressive_flag_off")
-
-
 @router.post("/session", response_model=Tier1SessionStatus)
 async def create_session_endpoint(
     req: Tier1SessionCreateRequest,
@@ -340,7 +318,6 @@ async def create_session_endpoint(
     """Explicit session creation — /analyze also creates implicitly.
     Exposed so a client that pre-loads a saved alert can spin up a
     session without running retrieval again."""
-    _require_sprint7()
     sess = create_session(
         alert_signature=req.alert_signature,
         alert_payload=req.alert_payload,
@@ -362,7 +339,6 @@ async def create_session_endpoint(
 
 @router.get("/session/{session_id}/status", response_model=Tier1SessionStatus)
 async def session_status(session_id: str) -> Tier1SessionStatus:
-    _require_sprint7()
     sess = get_session(session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail="session_not_found")
@@ -392,7 +368,6 @@ async def session_status(session_id: str) -> Tier1SessionStatus:
 async def swap_match_index(
     session_id: str, req: Tier1MatchIndexRequest,
 ) -> Tier1SessionStatus:
-    _require_sprint7()
     sess = get_session(session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail="session_not_found")
@@ -425,7 +400,6 @@ async def swap_match_index(
 async def log_action(
     session_id: str, req: Tier1ActionLogRequest,
 ) -> Tier1ActionLogResponse:
-    _require_sprint7()
     entry: dict = {"step": req.step, "result": req.result}
     if req.note:
         entry["note"] = req.note
@@ -447,7 +421,6 @@ async def log_action(
 async def deeper_diagnostics(
     req: Tier1DeeperDiagnosticsRequest,
 ) -> Tier1DeeperDiagnosticsResponse:
-    _require_sprint7()
     sess = get_session(req.session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail="session_not_found")
@@ -471,7 +444,6 @@ async def deeper_diagnostics(
 async def escalation_package(
     req: Tier1EscalationPackageRequest,
 ) -> Tier1EscalationPackageResponse:
-    _require_sprint7()
     sess = get_session(req.session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail="session_not_found")
@@ -500,7 +472,6 @@ async def escalation_package(
 
 @router.post("/explain", response_model=Tier1ExplainResponse)
 async def explain(req: Tier1ExplainRequest) -> Tier1ExplainResponse:
-    _require_sprint7()
     sess = get_session(req.session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail="session_not_found")
@@ -759,16 +730,11 @@ async def get_session_match(
 ) -> Tier1AnalyzeResponse:
     """Return the rank-N match in Tier1AnalyzeResponse shape.
 
-    Gated behind BOTH Sprint 6 (router mount) and Sprint 7 (the session
-    must exist) AND Sprint 8 (LOGIQ_TIER1_UX_FIXES_BACKEND). Sprint 7
-    only stored `top_5_match_ids` — we recompute scores on the fly via
-    the existing `_rerun_retrieval_for_session` helper so no schema
-    migration is needed and Sprint 7's /analyze state machine stays
-    intact.
+    Sprint 7 only stored `top_5_match_ids` — we recompute scores on
+    the fly via the existing `_rerun_retrieval_for_session` helper so
+    no schema migration is needed and Sprint 7's /analyze state
+    machine stays intact.
     """
-    if not getattr(settings, "LOGIQ_TIER1_UX_FIXES_BACKEND", False):
-        raise HTTPException(status_code=404, detail="tier1_ux_fixes_flag_off")
-
     sess = get_session(session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail="session_not_found")

@@ -143,10 +143,6 @@ def main() -> int:
     parser.add_argument("--resume-log", type=Path, default=None)
     args = parser.parse_args()
 
-    if not getattr(settings, "LOGIQ_BULK_INGEST_BACKEND", False):
-        logger.error("LOGIQ_BULK_INGEST_BACKEND=False — feature disabled.")
-        return 2
-
     done = load_resume(args.resume_log)
     total = 0
     ok = 0

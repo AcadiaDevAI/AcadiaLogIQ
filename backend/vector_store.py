@@ -1708,10 +1708,9 @@ def list_active_files_all() -> list:
 # _ingest_gold_ticket_json DELETEs + re-INSERTs the chunk row on re-upload,
 # so a fresh chunk starts with NULL in these columns.
 #
-# These helpers are callable regardless of LOGIQ_SPRINT5_BACKEND — the flag
-# gate lives in the /fingerprint/lookup branch in api.py. When the migration
-# has not been applied yet, the UPDATE/SELECT will raise; callers in the
-# handler wrap both in try/except and fall through to the LLM path.
+# When the migration has not been applied yet, the UPDATE/SELECT will
+# raise; callers in the handler wrap both in try/except and fall
+# through to the LLM path.
 
 
 def get_cached_expert_answer(chunk_id: str) -> Optional[str]:

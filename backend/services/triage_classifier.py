@@ -45,9 +45,8 @@ Rules:
 Output ONLY the JSON object."""
 
 
-# Sprint 2 — optional addendum. Appended to _SYSTEM_PROMPT only when
-# CONTEXT_BREAK_LLM_HINT_ENABLED is True. When the flag is off the prompt
-# is byte-for-byte unchanged (backward-compat guarantee).
+# Sprint 2 — appended to _SYSTEM_PROMPT so the triage call also returns
+# a context-break signal (no extra LLM call).
 _CONTEXT_BREAK_ADDENDUM = """
 
 4. context_break: true if the query clearly signals a switch to a new topic
@@ -60,10 +59,8 @@ Extended JSON: {"complexity":"...","intent":"...","mode_hint":"...","confidence"
 
 
 def _build_system_prompt() -> str:
-    """Return the base triage prompt, optionally augmented for context break."""
-    if getattr(settings, "CONTEXT_BREAK_LLM_HINT_ENABLED", False):
-        return _SYSTEM_PROMPT + _CONTEXT_BREAK_ADDENDUM
-    return _SYSTEM_PROMPT
+    """Return the triage prompt augmented with the context-break addendum."""
+    return _SYSTEM_PROMPT + _CONTEXT_BREAK_ADDENDUM
 
 
 _ALLOWED_COMPLEXITY = {"simple", "moderate", "complex"}
@@ -173,20 +170,18 @@ def classify_triage(query: str) -> TriageResult:
         )
         return _sentinel(raw)
 
-    # Sprint 2 — optional context-break hint. Only read when the addendum
-    # is active; missing/malformed values fall through to False/"" which
-    # preserves pre-Sprint-2 behavior.
+    # Sprint 2 — context-break hint. Missing/malformed values fall
+    # through to False/"".
     _context_break = False
     _context_break_reason = ""
-    if getattr(settings, "CONTEXT_BREAK_LLM_HINT_ENABLED", False):
-        cb_raw = data.get("context_break", False)
-        if isinstance(cb_raw, bool):
-            _context_break = cb_raw
-        elif isinstance(cb_raw, str):
-            _context_break = cb_raw.strip().lower() in {"true", "1", "yes"}
-        cb_reason = data.get("context_break_reason", "")
-        if isinstance(cb_reason, str):
-            _context_break_reason = cb_reason.strip()[:200]
+    cb_raw = data.get("context_break", False)
+    if isinstance(cb_raw, bool):
+        _context_break = cb_raw
+    elif isinstance(cb_raw, str):
+        _context_break = cb_raw.strip().lower() in {"true", "1", "yes"}
+    cb_reason = data.get("context_break_reason", "")
+    if isinstance(cb_reason, str):
+        _context_break_reason = cb_reason.strip()[:200]
 
     logger.info(
         "[triage] complexity=%s intent=%s mode_hint=%s confidence=%.2f context_break=%s",

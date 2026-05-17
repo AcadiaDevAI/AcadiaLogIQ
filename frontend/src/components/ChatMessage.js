@@ -75,20 +75,13 @@ const CHIP_SETS = {
 // sprint. Chip strings above (CHIP_SETS.ticket_handling, .escalation,
 // .vendor_oem) remain defined so each future sprint only has to add
 // the mode name here.
-// Sprint 3C — escalation chips unfreeze when the frontend flag is on.
-// Sprint 3D — ticket_handling chips unfreeze when its own frontend flag is on.
-// Sprint 3E — vendor_oem chips unfreeze when its own frontend flag is on.
-const sprint3cEnabled =
-  process.env.REACT_APP_LOGIQ_SPRINT3C_FRONTEND === "true";
-const sprint3dEnabled =
-  process.env.REACT_APP_LOGIQ_SPRINT3D_FRONTEND === "true";
-const sprint3eEnabled =
-  process.env.REACT_APP_LOGIQ_SPRINT3E_FRONTEND === "true";
+// Sprint 3C/3D/3E — escalation, ticket_handling, vendor_oem chips are
+// all active alongside troubleshooting.
 const CHIP_ACTIVE_MODES = new Set([
   "troubleshooting",
-  ...(sprint3cEnabled ? ["escalation"] : []),
-  ...(sprint3dEnabled ? ["ticket_handling"] : []),
-  ...(sprint3eEnabled ? ["vendor_oem"] : []),
+  "escalation",
+  "ticket_handling",
+  "vendor_oem",
 ]);
 
 const EXTRACT_ID_RE = /\bINC-[A-Z]+-\d+\b|\bINC-\d+\b|\bALPHA-\d+\b|\bTITAN-\d+\b|\bNEBULA-\d+\b/;
@@ -127,13 +120,10 @@ export default function ChatMessage({ msg, index, sessionId, onClarificationSele
   // Feedback state: read from msg.feedback (persisted from backend) or local override
   const feedbackState = msg.feedback || null; // "like" | "dislike" | null
 
-  // Sprint 3A — post-👍 action chip signal. Gated by the frontend flag
-  // AND an existing "like" feedback AND a session mode being set AND an
-  // assistant message. Any missing condition → no chips → pre-3A visuals.
-  const sprint3aEnabled = process.env.REACT_APP_LOGIQ_SPRINT3A_FRONTEND === "true";
+  // Sprint 3A — post-👍 action chips. Shows when "like" feedback exists
+  // on an assistant message AND the session mode supports chips.
   const showActionChips = (
-    sprint3aEnabled
-    && feedbackState === "like"
+    feedbackState === "like"
     && !!state.selectedMode
     && CHIP_ACTIVE_MODES.has(state.selectedMode)   // Sprint 3A-REVISED
     && msg.role === "assistant"

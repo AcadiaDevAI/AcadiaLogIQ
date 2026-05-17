@@ -82,10 +82,7 @@ _HOTFIX_STOPWORDS = frozenset({
 def _is_vocab_eligible(token: str) -> bool:
     """Sprint 2.7 Bug B/E — guard the canonical-form expansion path against
     English stopwords and generic NOC nouns that pollute embedding queries
-    with duplicated uppercase aliases. Flag-off = byte-identical (returns
-    True for every input, so the vocab lookup is unaffected)."""
-    if not getattr(settings, "LOGIQ_ACCURACY_HOTFIX_BACKEND", False):
-        return True
+    with duplicated uppercase aliases."""
     t = (token or "").strip().lower()
     if not t:
         return False
@@ -419,60 +416,49 @@ def expand_query(query: str, store: Optional[GlossaryStore] = None) -> ExpandedQ
     # Split concatenated words: "toDC" → "to DC", "fromDC" → "from DC"
     # Split camelCase: "DataCenter" → "Data Center"
     # Split underscore terms: "Consistent_High_Interface_Errors" → "Consistent High Interface Errors"
-    if getattr(settings, "LOGIQ_HOTFIX_BACKEND", False):
-        # Sprint 2.5 #1/#2 — vocabulary-preserving normalization. Tokens
-        # already seen in ingested content (ticket IDs, snake_case field
-        # names, custom enums) pass through verbatim; everything else
-        # runs through the same legacy transforms.
-        #
-        # v2 canonical-form matching: when a user token (e.g.
-        # rag_potency_metadata) shares a canonical form with learned
-        # aliases (RAGPotencyMetadata, RAG_Potency_Metadata), OR-inject
-        # the aliases after the verbatim token so FTS/ILIKE matches
-        # whichever casing appears in the source data.
-        try:
-            from backend.services.vocabulary_learner import (
-                is_known as _vocab_is_known,
-                get_aliases as _vocab_get_aliases,
-            )
-        except Exception:
-            def _vocab_is_known(_t: str) -> bool:
-                return False
+    # Sprint 2.5 #1/#2 — vocabulary-preserving normalization. Tokens
+    # already seen in ingested content (ticket IDs, snake_case field
+    # names, custom enums) pass through verbatim; everything else
+    # runs through the same legacy transforms.
+    #
+    # v2 canonical-form matching: when a user token (e.g.
+    # rag_potency_metadata) shares a canonical form with learned
+    # aliases (RAGPotencyMetadata, RAG_Potency_Metadata), OR-inject
+    # the aliases after the verbatim token so FTS/ILIKE matches
+    # whichever casing appears in the source data.
+    try:
+        from backend.services.vocabulary_learner import (
+            is_known as _vocab_is_known,
+            get_aliases as _vocab_get_aliases,
+        )
+    except Exception:
+        def _vocab_is_known(_t: str) -> bool:
+            return False
 
-            def _vocab_get_aliases(_t: str) -> List[str]:
-                return []
+        def _vocab_get_aliases(_t: str) -> List[str]:
+            return []
 
-        parts: List[str] = []
-        for raw_tok in query.split():
-            m = _HOTFIX_TOKEN_STRIP_RE.match(raw_tok)
-            prefix = m.group(1) if m else ""
-            core = m.group(2) if m else raw_tok
-            suffix = m.group(3) if m else ""
-            if core and _is_vocab_eligible(core) and _vocab_is_known(core):
-                parts.append(raw_tok)  # verbatim
-                # Alias OR-injection — add any learned variants that share
-                # the same canonical form so casing mismatches don't hide
-                # hits. Skip aliases equal to the user's token.
-                try:
-                    aliases = [a for a in _vocab_get_aliases(core) if a != core]
-                except Exception:
-                    aliases = []
-                for alias in aliases:
-                    parts.append(alias)
-            else:
-                parts.append(prefix + _hotfix_normalize_token(core) + suffix)
-        normalized = " ".join(parts)
-        normalized = re.sub(r"\s+", " ", normalized).strip()
-    else:
-        normalized = query
-        # Split underscore-separated terms
-        normalized = normalized.replace("_", " ")
-        # Split camelCase: insert space before uppercase letters preceded by lowercase
-        normalized = re.sub(r"([a-z])([A-Z])", r"\1 \2", normalized)
-        # Split lowercase-to-uppercase transitions like "toDC" → "to DC"
-        normalized = re.sub(r"([a-z])([A-Z]{2,})", r"\1 \2", normalized)
-        # Clean up multiple spaces
-        normalized = re.sub(r"\s+", " ", normalized).strip()
+    parts: List[str] = []
+    for raw_tok in query.split():
+        m = _HOTFIX_TOKEN_STRIP_RE.match(raw_tok)
+        prefix = m.group(1) if m else ""
+        core = m.group(2) if m else raw_tok
+        suffix = m.group(3) if m else ""
+        if core and _is_vocab_eligible(core) and _vocab_is_known(core):
+            parts.append(raw_tok)  # verbatim
+            # Alias OR-injection — add any learned variants that share
+            # the same canonical form so casing mismatches don't hide
+            # hits. Skip aliases equal to the user's token.
+            try:
+                aliases = [a for a in _vocab_get_aliases(core) if a != core]
+            except Exception:
+                aliases = []
+            for alias in aliases:
+                parts.append(alias)
+        else:
+            parts.append(prefix + _hotfix_normalize_token(core) + suffix)
+    normalized = " ".join(parts)
+    normalized = re.sub(r"\s+", " ", normalized).strip()
 
     if normalized.lower() != query.lower():
         logger.info("Query normalized: '%s' → '%s'", query, normalized)

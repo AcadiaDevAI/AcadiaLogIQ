@@ -6,11 +6,9 @@ import Sidebar from "./components/Sidebar";
 import ChatArea from "./components/ChatArea";
 import MobileHeader from "./components/MobileHeader";
 import AuthGate from "./components/AuthGate";
-import LandingPage from "./components/LandingPage";
 import LandingRouter from "./components/LandingRouter";
 import RCAFlow from "./components/RCA/RCAFlow";
 import RCAEntryModal from "./components/RCA/RCAEntryModal";
-import { settings as clientSettings } from "./config/clientSettings";
 
 function BuildStamp() {
   return (
@@ -91,11 +89,9 @@ function AppLayout() {
     setRcaOpen(false);
   }, [dispatch]);
 
-  // When guided workflow is enabled and the user hasn't picked a mode yet,
-  // show the LandingPage instead of the ChatArea. Sidebar stays visible so
-  // past sessions remain reachable.
-  const showLanding =
-    clientSettings.GUIDED_WORKFLOW_ENABLED && !state.selectedMode;
+  // When the user hasn't picked a mode yet, show the LandingPage instead
+  // of the ChatArea. Sidebar stays visible so past sessions remain reachable.
+  const showLanding = !state.selectedMode;
 
   return (
     <div className="flex h-screen overflow-hidden t-bg-primary">
@@ -135,11 +131,7 @@ function AppLayout() {
             onReturnToStages={handleReturnFromRca}
           />
         ) : showLanding ? (
-          clientSettings.LOGIQ_SPRINT4_FRONTEND ? (
-            <LandingRouter />
-          ) : (
-            <LandingPage />
-          )
+          <LandingRouter />
         ) : (
           <ChatArea />
         )}

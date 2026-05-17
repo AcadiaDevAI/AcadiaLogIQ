@@ -666,10 +666,6 @@ class Settings(BaseSettings):
     # Sprint 1 — session state foundation + landing page shell.
     # ─────────────────────────────────────────────────────────────
 
-    # Master kill-switch. When False, the backend ignores mode endpoints
-    # and the frontend skips the landing page. Flip to True to roll out.
-    GUIDED_WORKFLOW_ENABLED: bool = False
-
     # When True, a session with a locked mode rejects /ask queries that
     # look clearly cross-mode. Sprint 1 keeps this OFF (soft mode); the
     # real enforcement arrives in Sprint 2 once context-break detection
@@ -680,36 +676,17 @@ class Settings(BaseSettings):
     # Declared now so Sprint 1 deploys don't need a config reload later.
     CONTEXT_BREAK_DETECTION_ENABLED: bool = False
 
-    # Sprint 2 placeholder — lets triage_classifier's existing Haiku call
-    # emit a context_break hint on ambiguous messages (no new LLM call).
-    CONTEXT_BREAK_LLM_HINT_ENABLED: bool = False
-
     # ─────────────────────────────────────────────────────────────
-    # Sprint 2 — Context awareness + pattern response + structured forms.
-    # Single master flag for the whole sprint. Soft dependency on
-    # Sprint 1 (GUIDED_WORKFLOW_ENABLED) — Sprint 2 code no-ops with
-    # a log line when Sprint 1 is off.
+    # Sprint 2.5 — Retrieval & Pattern Hotfix tunables. The three
+    # HOTFIX_* values below are defaults; operators may override
+    # them in .env if needed.
     # ─────────────────────────────────────────────────────────────
-    LOGIQ_SPRINT2_BACKEND: bool = False
-
-    # ─────────────────────────────────────────────────────────────
-    # Sprint 2.5 — Retrieval & Pattern Hotfix.
-    # Single master switch for all 9 bug fixes. When False every
-    # touched site falls back byte-for-byte to pre-hotfix behavior.
-    # The three HOTFIX_* tunables are *defaults*, not independent
-    # feature flags — operators may override them in .env if needed.
-    # ─────────────────────────────────────────────────────────────
-    LOGIQ_HOTFIX_BACKEND: bool = False
-
     HOTFIX_VOCAB_MIN_OCCURRENCE: int = 1
     HOTFIX_SEMANTIC_CACHE_THRESHOLD: float = 0.985
     HOTFIX_COMPOSER_RESERVE_TOKENS: int = 5000
 
     # ─────────────────────────────────────────────────────────────
-    # Production Retrieval Fix v2 — 5 deeper architectural bugs.
-    # All flags default True so the v2 behavior ships on by default
-    # once LOGIQ_HOTFIX_BACKEND is True; each flag is also an
-    # independent kill-switch for fast rollback.
+    # Production Retrieval Fix v2 — 5 deeper architectural bug fixes.
     # ─────────────────────────────────────────────────────────────
 
     # Bug #2: JSON-tree-aware vocabulary learning — keys become
@@ -737,34 +714,15 @@ class Settings(BaseSettings):
     INGESTION_VERIFICATION_ENABLED: bool = True
 
     # ─────────────────────────────────────────────────────────────
-    # Sprint 2.6 — Numeric Equality Filter
-    # Single master flag gating every new code path added by
-    # Sprint 2.6 (score = N / quality_score = N equality filter).
-    # Default False so production pre-flip behavior is byte-identical.
+    # Sprint 2.7 — Accuracy tunables. HOTFIX_EXPLANATION_TOKENS_CAP
+    # lets operators retune the explanation length cap.
     # ─────────────────────────────────────────────────────────────
-    LOGIQ_NUMERIC_FILTER_BACKEND: bool = False
-
-    # ─────────────────────────────────────────────────────────────
-    # Sprint 2.7 — Accuracy Hotfix (5 bugs)
-    # Single master flag gating every new code path added by
-    # Sprint 2.7. Flag-off = byte-identical pre-2.7 behavior.
-    # HOTFIX_EXPLANATION_TOKENS_CAP is a tunable int (not a second
-    # on/off flag) so operators can retune without a code change.
-    # ─────────────────────────────────────────────────────────────
-    LOGIQ_ACCURACY_HOTFIX_BACKEND: bool = False
     HOTFIX_EXPLANATION_TOKENS_CAP: int = 600
 
     # ─────────────────────────────────────────────────────────────
-    # Sprint 2.8 — Dynamic Content Term Extraction
-    # Single master flag gating every new code path added by
-    # Sprint 2.8 (dynamic stopword+metadata subtraction for compound
-    # content+metadata filters, Bug F customer-name variant match,
-    # aggregation-intent-aware reranker cap). Flag-off = byte-identical
-    # pre-2.8 behavior. RERANK_TOP_K_AGGREGATION is a tunable int (not
-    # a second on/off flag) so operators can retune the aggregation
-    # reranker ceiling without a code change.
+    # Sprint 2.8 — Compound filter tunable. RERANK_TOP_K_AGGREGATION
+    # controls the aggregation-intent reranker ceiling.
     # ─────────────────────────────────────────────────────────────
-    LOGIQ_COMPOUND_FILTER_BACKEND: bool = False
     RERANK_TOP_K_AGGREGATION: int = 40
 
     # ─────────────────────────────────────────────────────────────
@@ -780,75 +738,18 @@ class Settings(BaseSettings):
     REWRITER_ELLIPSIS_MIN_CONF: float = 0.92
 
     # ─────────────────────────────────────────────────────────────
-    # Sprint 3A — Mode-Aware Prompts + Post-👍 Action Buttons
-    # Single master flag gating (1) mode-tuned composer voice selection
-    # and (2) post-thumbs-up action chip rendering signal. Flag-off =
-    # byte-identical pre-3A behavior — _composer_rules is returned by
-    # identity (the default string object), and the frontend chip
-    # registry never renders.
+    # Sprint 3B — Low-similarity confidence band tunable.
+    # Top-chunk score below which the answer is tagged
+    # confidence_band="low" so the frontend can render the
+    # "⚠️ Low similarity match" banner.
     # ─────────────────────────────────────────────────────────────
-    LOGIQ_SPRINT3A_BACKEND: bool = False
-
-    # ─────────────────────────────────────────────────────────────
-    # Sprint 3B — 👎 KB/Runbook pivot + low-similarity confidence band
-    #
-    # Flag-off path: /feedback/state skips the pivot branch and /ask
-    # omits the confidence_band field — byte-identical post-3A-REVISED.
-    # LOW_SIMILARITY_THRESHOLD controls the top-chunk score below which
-    # the answer is tagged `confidence_band="low"` so the frontend can
-    # render the "⚠️ Low similarity match" banner.
-    # ─────────────────────────────────────────────────────────────
-    LOGIQ_SPRINT3B_BACKEND: bool = False
     LOW_SIMILARITY_THRESHOLD: float = 0.35
 
     # ─────────────────────────────────────────────────────────────
-    # Sprint 3C — Escalation mode → contact_customer corpus
-    # Flag-off path: escalation mode uses default voice + ticket-history
-    # retrieval (post-3A-REVISED behavior byte-identical). Flag-on:
-    # retrieval filters to doc_kinds=["contact_customer"] and the
-    # composer picks _VOICE_ESCALATION via copy-and-extend (the module
-    # _VOICE_BY_MODE dict is NEVER mutated).
+    # Sprint 4 — Fingerprint-First Expert Copilot tunables.
+    # FINGERPRINT_REGEX accepts any non-empty string — the JSONB `?`
+    # operator in retrieve_by_fingerprint returns no rows on misses.
     # ─────────────────────────────────────────────────────────────
-    LOGIQ_SPRINT3C_BACKEND: bool = False
-
-    # ─────────────────────────────────────────────────────────────
-    # Sprint 3D — Ticket Handling mode → sop corpus
-    # Flag-off path: ticket_handling mode uses default voice +
-    # ticket-history retrieval (post-3A-REVISED behavior byte-identical).
-    # Flag-on: retrieval filters to doc_kinds=["sop"] and the composer
-    # dispatches via (mode, sub_mode) into 4 sub-mode voices:
-    # ticket_create / ticket_update / ticket_close / ticket_validate.
-    # ─────────────────────────────────────────────────────────────
-    LOGIQ_SPRINT3D_BACKEND: bool = False
-
-    # ─────────────────────────────────────────────────────────────
-    # Sprint 3E — Vendor/OEM mode → contact_vendor + vendor_case corpora
-    # Flag-off path: vendor_oem mode uses default voice + ticket-history
-    # retrieval (post-3A-REVISED behavior byte-identical). Flag-on:
-    # retrieval filters to doc_kinds=["contact_vendor", "vendor_case"]
-    # and the composer picks _VOICE_VENDOR_OEM via copy-and-extend.
-    # ─────────────────────────────────────────────────────────────
-    LOGIQ_SPRINT3E_BACKEND: bool = False
-
-    # ─────────────────────────────────────────────────────────────
-    # Sprint 4 — Fingerprint-First Expert Copilot
-    # Flag-off path: fingerprint endpoints 404, LandingRouter falls
-    # through to the Sprint 1 LandingPage, GIN indexes sit unused, new
-    # chat_sessions columns stay NULL. Flag-on: FingerprintInputScreen
-    # is the first screen; /fingerprint/lookup runs GIN-indexed exact-
-    # match retrieval on chunks.metadata_json -> Metadata -> Fingerprints
-    # and composes via voice_override="expert_copilot".
-    #
-    # FINGERPRINT_REGEX — relaxed to accept any non-empty string. The
-    # original anchored UPPERCASE-with-hyphen pattern was rejecting
-    # inputs we now want to pass straight through to the SQL exact-
-    # match (e.g., "%BGP-5-ADJCHANGE"), so the gate has been loosened
-    # to "any non-empty". The JSONB `?` operator in retrieve_by_fingerprint
-    # will simply return no rows on shapes that don't exist in
-    # chunks.metadata_json -> Metadata -> Fingerprints, which is the
-    # correct behavior for a miss — no need to fail fast on shape.
-    # ─────────────────────────────────────────────────────────────
-    LOGIQ_SPRINT4_BACKEND: bool = False
     FINGERPRINT_REGEX: ClassVar[str] = r".+"
     FINGERPRINT_MIN_QUALITY_SCORE: int = 3
 
@@ -866,68 +767,29 @@ class Settings(BaseSettings):
     LOGIQ_JOURNEY_CHAT_RETRIEVAL_CONTEXT: bool = True
 
     # ─────────────────────────────────────────────────────────────
-    # Sprint 5 — Template-First Expert Copilot + Answer Cache
-    # Flag-off path: /fingerprint/lookup runs the full Sprint 4 LLM
-    # pipeline end-to-end (byte-identical). Flag-on + gold-schema JSON
-    # ticket: template-render Phase 2, Phase 3, header, KB citations
-    # deterministically; LLM is asked only for Phase 1 narrative +
-    # Expert Pivot; final rendered answer is cached on the chunk row
-    # so repeat lookups skip the LLM entirely. Non-gold-schema
-    # retrievals (PDFs, Word, KBs, contacts, partial tickets) ALWAYS
-    # use the full LLM path regardless of this flag. Cache is
-    # invalidated automatically because Sprint 2.9 ingestion
+    # Sprint 5 — Template-First Expert Copilot + Answer Cache.
+    # Cache is invalidated automatically because Sprint 2.9 ingestion
     # DELETEs + re-INSERTs the chunk row on re-upload.
     # ─────────────────────────────────────────────────────────────
-    LOGIQ_SPRINT5_BACKEND: bool = False
     EXPERT_COPILOT_CACHE_TTL_DAYS: int = 30
 
     # ─────────────────────────────────────────────────────────────
-    # Sprint 6 — Tier-1 Alert Copilot (form-driven triage module)
-    # Flag-off path: /tier1/* routes are NOT mounted (the include
-    # block in api.py is skipped), so any call returns FastAPI's own
-    # 404. The landing page hides its Tier-1 entry button via the
-    # frontend build arg REACT_APP_LOGIQ_TIER1_COPILOT_FRONTEND.
-    # Sprint 1–5 behavior is byte-identical when this flag is off.
+    # Sprint 6 — Tier-1 Alert Copilot tunables.
     # ─────────────────────────────────────────────────────────────
-    LOGIQ_TIER1_COPILOT_BACKEND: bool = False
     TIER1_CACHE_TTL_DAYS: int = 7
     TIER1_TOP_K: int = 5
     TIER1_HIGH_CONFIDENCE_THRESHOLD: float = 0.85
     TIER1_MIN_CONFIDENCE_THRESHOLD: float = 0.60
 
     # ─────────────────────────────────────────────────────────────
-    # Sprint 7 — Tier-1 Progressive Workflow
-    # Flag-off path: new routes (/tier1/session, /tier1/deeper-diagnostics,
-    # /tier1/escalation-package, /tier1/explain, /tier1/session/{id}/...)
-    # return 404, the Sprint 6 ranking weights are used verbatim, and the
-    # new response fields (top_5_match_ids / session_id / started_at) are
-    # present on Tier1AnalyzeResponse but remain empty/None so Sprint 6
-    # clients stay byte-identical.
+    # Sprint 7 — Tier-1 Progressive Workflow tunables.
     # ─────────────────────────────────────────────────────────────
-    LOGIQ_TIER1_PROGRESSIVE_BACKEND: bool = False
     TIER1_STUCK_THRESHOLD_SECONDS: int = 480   # 8 minutes
     TIER1_TOP_N_MATCHES: int = 5
 
     # ─────────────────────────────────────────────────────────────
-    # Sprint 8 — Tier-1 UX polish
-    # Gates the single new endpoint that powers arrow pagination:
-    #   GET /tier1/session/{session_id}/match/{match_index}
-    # Flag-off path: the endpoint returns 404 (defensively, in addition
-    # to the router mount requiring Sprint 6's flag). Sprint 6/7
-    # response shapes and ranking weights are untouched.
+    # Sprint 10 — Tier-1 Resolution Journey tunables.
     # ─────────────────────────────────────────────────────────────
-    LOGIQ_TIER1_UX_FIXES_BACKEND: bool = False
-
-    # ─────────────────────────────────────────────────────────────
-    # Sprint 10 — Tier-1 Resolution Journey
-    # Flag-off path: /tier1/journey/* router not mounted (returns 404),
-    # Tier1Workspace renders the existing Sprint 6/7/8 answer-card path
-    # unchanged. Flag-on path: GET /initial returns Stage 0 + 1A + 1B
-    # always-visible; Stages 2-5 lazy-fetched per labeled next-stage
-    # button. Helpful clicks log telemetry to tier1_journey_events
-    # (migration 040) but never advance the flow.
-    # ─────────────────────────────────────────────────────────────
-    LOGIQ_TIER1_JOURNEY_BACKEND: bool = False
     TIER1_JOURNEY_TOP_N: int = 5
     TIER1_JOURNEY_LOOKBACK_MONTHS: int = 18
     TIER1_JOURNEY_LLM_POLISH: bool = False
@@ -936,13 +798,10 @@ class Settings(BaseSettings):
 
     # ─────────────────────────────────────────────────────────────
     # Sprint 9 — Universal Intake (Email/Phone/Portal/Chat/Note)
-    # Flag-off path: the /intake/* router is not mounted, the frontend
-    # SourceToggle is hidden via REACT_APP_LOGIQ_UNIVERSAL_INTAKE_FRONTEND,
-    # and Sprint 6/7/8 paths are byte-identical. Catalog builder is
-    # lazy: first /intake/extract call materialises the in-memory
-    # IntakeCatalogs from chunks.metadata_json (no startup cost).
+    # tunables. Catalog builder is lazy: first /intake/extract call
+    # materialises the in-memory IntakeCatalogs from
+    # chunks.metadata_json (no startup cost).
     # ─────────────────────────────────────────────────────────────
-    LOGIQ_UNIVERSAL_INTAKE_BACKEND: bool = False
     INTAKE_MAX_RAW_CHARS: int = 10000
     INTAKE_MAX_CANDIDATES: int = 5            # asked of the LLM
     INTAKE_MAX_CARDS: int = 4                 # shown to the engineer
@@ -986,26 +845,11 @@ class Settings(BaseSettings):
     }
 
     # ─────────────────────────────────────────────────────────────
-    # Sprint 2.9 — JSON Structure Validator
-    # Rejects uploads whose CONTENT looks like JSON (first non-whitespace
-    # byte is { or [) but fails strict parse. Flag-off = byte-identical
-    # pre-2.9 behavior (silent False in _is_gold_ticket_json on malformed
-    # JSON, fall-through to generic text chunking). See
-    # SPRINT_2_9_JSON_VALIDATOR.md for runtime acceptance walk.
-    # ─────────────────────────────────────────────────────────────
-    LOGIQ_JSON_VALIDATOR_BACKEND: bool = False
-
-    # ─────────────────────────────────────────────────────────────
-    # Sprint 3-PREP-A — doc_kind multi-corpus tagging
-    # Single master flag that gates the mode→corpus retrieval filter.
-    # Flag-off = retriever ignores doc_kinds kwarg even when passed;
-    # storage/ingestion always writes the doc_kind column (defaults to
-    # 'ticket') so data is ready when the flag flips on.
+    # Sprint 3-PREP-A — doc_kind multi-corpus tagging.
     # VALID_DOC_KINDS is a ClassVar so pydantic treats it as a constant,
     # not a settable field — the set is immutable and referenced via
     # settings.VALID_DOC_KINDS from ingestion for input validation.
     # ─────────────────────────────────────────────────────────────
-    LOGIQ_DOC_KIND_BACKEND: bool = False
     VALID_DOC_KINDS: ClassVar[frozenset] = frozenset({
         "ticket",            # JSON gold-ticket history (Troubleshooting)
         "sop",               # Standard operating procedures, runbooks
@@ -1016,15 +860,8 @@ class Settings(BaseSettings):
     })
 
     # ─────────────────────────────────────────────────────────────
-    # Sprint 3-PREP-B — Bulk ingestion (folder / S3 → corpus)
-    # Gates both the CLI (`backend/scripts/bulk_ingest.py`) and the
-    # doc_kind form field surfaced by the /upload endpoint + admin UI
-    # dropdown. Flag-off: CLI exits 2, /upload silently coerces any
-    # incoming doc_kind to "ticket" (backward-compatible), UI dropdown
-    # is disabled via REACT_APP_LOGIQ_BULK_INGEST_FRONTEND so the UX
-    # is byte-identical to post-PREP-A.
+    # Sprint 3-PREP-B — Bulk ingestion (folder / S3 → corpus) tunable.
     # ─────────────────────────────────────────────────────────────
-    LOGIQ_BULK_INGEST_BACKEND: bool = False
     BULK_INGEST_MAX_FILES_PER_RUN: int = 10000
 
     model_config = SettingsConfigDict(

@@ -1,8 +1,6 @@
 """Sprint 10 — Tier-1 Resolution Journey FastAPI router.
 
-All endpoints under prefix `/tier1/journey`. Every endpoint short-
-circuits with `404 detail="tier1_journey_flag_off"` when
-`LOGIQ_TIER1_JOURNEY_BACKEND` is False.
+All endpoints under prefix `/tier1/journey`.
 
 `/initial` runs Stage 0 + 1A + 1B aggregators in sequence and returns
 the bundle for the always-visible first paint. Per-stage GETs share an
@@ -177,14 +175,6 @@ def get_or_compute_consolidated_ledger(
     return payload
 
 
-# ─────────────────────────────────────────────────────────────
-# Flag gate (mirrors Sprint 7/8 pattern)
-# ─────────────────────────────────────────────────────────────
-def _require_flag() -> None:
-    if not getattr(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", False):
-        raise HTTPException(status_code=404, detail="tier1_journey_flag_off")
-
-
 # Sprint 10.6 §4 — lazy wrapper around backend.api.auth_dependency.
 # Module-level `from backend.api import auth_dependency` would
 # circular-import: api.py mounts this router at line 443, which fires
@@ -209,7 +199,6 @@ async def _lazy_auth_dependency(
 async def get_initial(session_id: str) -> JourneyInitial:
     """Stage 0 (Best-Ticket Distillation) + merged PivotInsights —
     eager, always visible."""
-    _require_flag()
 
     cohort = _load_or_cache(session_id)
     lookback = int(getattr(settings, "TIER1_JOURNEY_LOOKBACK_MONTHS", 18))
@@ -269,7 +258,6 @@ async def get_initial(session_id: str) -> JourneyInitial:
 # ─────────────────────────────────────────────────────────────
 @router.get("/{session_id}/pivot-insights", response_model=PivotInsights)
 async def get_pivot_insights(session_id: str) -> PivotInsights:
-    _require_flag()
     cohort = _load_or_cache(session_id)
     threshold = float(getattr(settings, "TIER1_JOURNEY_STAGE0_DOMINANT_THRESHOLD", 0.4))
     return PivotInsights(
@@ -283,7 +271,6 @@ async def get_pivot_insights(session_id: str) -> PivotInsights:
 # ─────────────────────────────────────────────────────────────
 @router.get("/{session_id}/stage-2", response_model=Stage2HistoricalMatches)
 async def get_stage_2(session_id: str) -> Stage2HistoricalMatches:
-    _require_flag()
     cohort = _load_or_cache(session_id)
     return build_stage2(cohort)
 
@@ -293,7 +280,6 @@ async def get_stage_2(session_id: str) -> Stage2HistoricalMatches:
 # ─────────────────────────────────────────────────────────────
 @router.get("/{session_id}/stage-3", response_model=Stage3TroubleshootingApproach)
 async def get_stage_3(session_id: str) -> Stage3TroubleshootingApproach:
-    _require_flag()
     cohort = _load_or_cache(session_id)
     # Sprint 13.24 PERF — share the consolidated-ledger LLM call with
     # /escalation-handoff-note via the session-keyed cache. First
@@ -318,7 +304,6 @@ async def get_stage_4(session_id: str) -> Stage4SearchKB:
     the alert payload from the engineer's intake form; this endpoint
     just supplies the dominant_root_cause line from Stage 0 so the
     handoff message stays accurate."""
-    _require_flag()
     cohort = _load_or_cache(session_id)
 
     # Pull the engineer's original alert from tier1_sessions.alert_payload
@@ -363,7 +348,6 @@ async def get_stage_4(session_id: str) -> Stage4SearchKB:
 async def get_stage_5(session_id: str):
     """Returns the existing Sprint 7 `Tier1EscalationPackage` shape with
     the journey-traversal log appended to `what_was_tried`."""
-    _require_flag()
     cohort = _load_or_cache(session_id)
 
     # Top-1 ticket metadata is the basis for the package (matches
@@ -415,7 +399,6 @@ async def get_escalation_routing(session_id: str) -> EscalationRouting:
     across the cohort. Returned as a separate endpoint so the existing
     /stage-5 (Sprint 7 Tier1EscalationPackage) wire shape stays
     byte-identical for the chat-Escalate consumers."""
-    _require_flag()
     cohort = _load_or_cache(session_id)
     return build_escalation_routing(cohort)
 
@@ -443,7 +426,6 @@ async def post_escalation_handoff_note(
     session_id: str,
     req: Optional[EscalationHandoffNoteRequest] = None,
 ) -> EscalationHandoffNoteResponse:
-    _require_flag()
 
     # Sprint 13.30 — Regenerate is a hard reload. Read `force` BEFORE
     # the cohort fetch so we can pop the cohort cache and let
@@ -652,7 +634,6 @@ async def search_kb_handoff(
     which made the row invisible to the engineer's authenticated
     GET /chat/sessions/{id} (filters by owner_id) — the 404 the user
     reported. Aligning ownership eliminates that 404 entirely."""
-    _require_flag()
 
     cohort = _load_or_cache(session_id)
     lookback = int(getattr(settings, "TIER1_JOURNEY_LOOKBACK_MONTHS", 18))
@@ -740,7 +721,6 @@ async def post_event(
     session_id: str,
     req: JourneyEventRequest,
 ) -> JourneyEventResponse:
-    _require_flag()
     ok = record_event(
         session_id=session_id,
         stage=req.stage,
@@ -768,7 +748,6 @@ async def get_resume_state(
     session_id: str,
     user_id: Optional[str] = Depends(_lazy_auth_dependency),
 ) -> ResumeStateResponse:
-    _require_flag()
 
     try:
         from sqlalchemy import text as _text

@@ -531,9 +531,6 @@ def _diagnose_json_structure(file_bytes: bytes) -> Dict[str, Any]:
       {"kind": "malformed_json", "line": N, "col": M, "reason": msg}
                                         → REJECT ingestion
     """
-    if not getattr(settings, "LOGIQ_JSON_VALIDATOR_BACKEND", False):
-        return {"kind": "not_json"}
-
     if not _looks_like_json(file_bytes):
         return {"kind": "not_json"}
 
@@ -862,53 +859,49 @@ def _ingest_gold_ticket_json(
         # directly, so we must not flatten or rename them.
         #
         # The ingestion is schema-tolerant: missing sections are simply
-        # skipped (no KeyError, no placeholder). When
-        # LOGIQ_SPRINT4_BACKEND=False, these fields still get written
-        # — the retrieval layer ignores them, and rollback is just a
-        # flag flip (no re-ingest required).
-        if getattr(settings, "LOGIQ_SPRINT4_BACKEND", False):
-            # Sprint 11 — Full-fidelity ingest. Replaces the prior cherry-pick
-            # (Sprint 4 + initial Sprint 11) which retained 6 then 12 specific
-            # parents. The single .update(ticket) below copies every top-level
-            # source key so any current or future journey reader can walk any
-            # path without an ingestion change. The slim flat fields above
-            # (snake_case: incident_number, priority, customer_name, doc_kind,
-            # …) coexist with the rich TitleCase keys (Metadata,
-            # Executive_Sharable_RCA, Forensic_Performance_Audit, …) — zero
-            # collisions, so the slim "SQL filter" view and the rich "render"
-            # view live side-by-side in the same JSONB.
-            row_metadata_json.update(ticket)
+        # skipped (no KeyError, no placeholder).
+        # Sprint 11 — Full-fidelity ingest. Replaces the prior cherry-pick
+        # (Sprint 4 + initial Sprint 11) which retained 6 then 12 specific
+        # parents. The single .update(ticket) below copies every top-level
+        # source key so any current or future journey reader can walk any
+        # path without an ingestion change. The slim flat fields above
+        # (snake_case: incident_number, priority, customer_name, doc_kind,
+        # …) coexist with the rich TitleCase keys (Metadata,
+        # Executive_Sharable_RCA, Forensic_Performance_Audit, …) — zero
+        # collisions, so the slim "SQL filter" view and the rich "render"
+        # view live side-by-side in the same JSONB.
+        row_metadata_json.update(ticket)
 
-            # ── Old cherry-pick, retained as commented history (Sprint 4
-            #    + Sprint 11 first pass). The "we forgot to add field X
-            #    to the keep list" failure mode (Stage 2 Technical_Snapshot,
-            #    the four parents the journey readers needed) is closed
-            #    permanently by .update() above. Do not re-introduce.
-            #
-            # if isinstance(ticket.get("Metadata"), dict):
-            #     row_metadata_json["Metadata"] = ticket["Metadata"]
-            # if isinstance(ticket.get("Symptom_Solution_Mapping"), dict):
-            #     row_metadata_json["Symptom_Solution_Mapping"] = ticket["Symptom_Solution_Mapping"]
-            # if isinstance(ticket.get("Operational_SOP"), dict):
-            #     row_metadata_json["Operational_SOP"] = ticket["Operational_SOP"]
-            # if isinstance(ticket.get("Knowledge_Base"), (list, dict)):
-            #     row_metadata_json["Knowledge_Base"] = ticket["Knowledge_Base"]
-            # if isinstance(ticket.get("remediation_payload"), dict):
-            #     row_metadata_json["remediation_payload"] = ticket["remediation_payload"]
-            # if isinstance(ticket.get("Header"), str):
-            #     row_metadata_json["Header"] = ticket["Header"]
-            # if ticket.get("Executive_Sharable_RCA") is not None:
-            #     row_metadata_json["Executive_Sharable_RCA"] = ticket["Executive_Sharable_RCA"]
-            # if ticket.get("Incident_Summary") is not None:
-            #     row_metadata_json["Incident_Summary"] = ticket["Incident_Summary"]
-            # if ticket.get("Forensic_Performance_Audit") is not None:
-            #     row_metadata_json["Forensic_Performance_Audit"] = ticket["Forensic_Performance_Audit"]
-            # if ticket.get("Key_Contributors") is not None:
-            #     row_metadata_json["Key_Contributors"] = ticket["Key_Contributors"]
-            # if ticket.get("QA_Auditor_Feedback") is not None:
-            #     row_metadata_json["QA_Auditor_Feedback"] = ticket["QA_Auditor_Feedback"]
-            # if ticket.get("ITIL_5_Why") is not None:
-            #     row_metadata_json["ITIL_5_Why"] = ticket["ITIL_5_Why"]
+        # ── Old cherry-pick, retained as commented history (Sprint 4
+        #    + Sprint 11 first pass). The "we forgot to add field X
+        #    to the keep list" failure mode (Stage 2 Technical_Snapshot,
+        #    the four parents the journey readers needed) is closed
+        #    permanently by .update() above. Do not re-introduce.
+        #
+        # if isinstance(ticket.get("Metadata"), dict):
+        #     row_metadata_json["Metadata"] = ticket["Metadata"]
+        # if isinstance(ticket.get("Symptom_Solution_Mapping"), dict):
+        #     row_metadata_json["Symptom_Solution_Mapping"] = ticket["Symptom_Solution_Mapping"]
+        # if isinstance(ticket.get("Operational_SOP"), dict):
+        #     row_metadata_json["Operational_SOP"] = ticket["Operational_SOP"]
+        # if isinstance(ticket.get("Knowledge_Base"), (list, dict)):
+        #     row_metadata_json["Knowledge_Base"] = ticket["Knowledge_Base"]
+        # if isinstance(ticket.get("remediation_payload"), dict):
+        #     row_metadata_json["remediation_payload"] = ticket["remediation_payload"]
+        # if isinstance(ticket.get("Header"), str):
+        #     row_metadata_json["Header"] = ticket["Header"]
+        # if ticket.get("Executive_Sharable_RCA") is not None:
+        #     row_metadata_json["Executive_Sharable_RCA"] = ticket["Executive_Sharable_RCA"]
+        # if ticket.get("Incident_Summary") is not None:
+        #     row_metadata_json["Incident_Summary"] = ticket["Incident_Summary"]
+        # if ticket.get("Forensic_Performance_Audit") is not None:
+        #     row_metadata_json["Forensic_Performance_Audit"] = ticket["Forensic_Performance_Audit"]
+        # if ticket.get("Key_Contributors") is not None:
+        #     row_metadata_json["Key_Contributors"] = ticket["Key_Contributors"]
+        # if ticket.get("QA_Auditor_Feedback") is not None:
+        #     row_metadata_json["QA_Auditor_Feedback"] = ticket["QA_Auditor_Feedback"]
+        # if ticket.get("ITIL_5_Why") is not None:
+        #     row_metadata_json["ITIL_5_Why"] = ticket["ITIL_5_Why"]
 
         enriched_rows.append(
             {
@@ -1916,8 +1909,8 @@ def process_document(
 
     # Hotfix: learn customer-specific vocabulary (identifiers, field names,
     # enum values) from the ingested text so query_expansion preserves these
-    # tokens verbatim. Flag-gated, fail-safe — must never block ingestion.
-    if getattr(settings, "LOGIQ_HOTFIX_BACKEND", False) and full_text:
+    # tokens verbatim. Fail-safe — must never block ingestion.
+    if full_text:
         try:
             from backend.services.vocabulary_learner import (
                 learn_from_content,

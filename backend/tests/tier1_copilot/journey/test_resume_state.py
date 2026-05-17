@@ -58,8 +58,7 @@ def test_resume_state_returns_stage_0_for_fresh_session(app_with_journey_authed)
     journey paints exactly the pre-10.7 first-load behaviour."""
     engine = _stub_engine_returning_row(None)  # no event row
 
-    with patch.object(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", True), \
-         patch("backend.db.connection.engine", engine):
+    with patch("backend.db.connection.engine", engine):
         client = TestClient(app_with_journey_authed)
         r = client.get("/tier1/journey/sess_fresh/resume-state")
 
@@ -80,8 +79,7 @@ def test_resume_state_returns_latest_stage_advanced(app_with_journey_authed):
         "created_at": last_at,
     })
 
-    with patch.object(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", True), \
-         patch("backend.db.connection.engine", engine):
+    with patch("backend.db.connection.engine", engine):
         client = TestClient(app_with_journey_authed)
         r = client.get("/tier1/journey/sess_advanced/resume-state")
 
@@ -117,8 +115,7 @@ def test_resume_state_ignores_helpful_events(app_with_journey_authed):
     engine = MagicMock()
     engine.connect.return_value = cm
 
-    with patch.object(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", True), \
-         patch("backend.db.connection.engine", engine):
+    with patch("backend.db.connection.engine", engine):
         client = TestClient(app_with_journey_authed)
         r = client.get("/tier1/journey/sess_helpful_only/resume-state")
 
@@ -145,8 +142,7 @@ def test_resume_state_handles_db_error_gracefully(app_with_journey_authed):
     engine = MagicMock()
     engine.connect.side_effect = RuntimeError("DB unreachable")
 
-    with patch.object(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", True), \
-         patch("backend.db.connection.engine", engine):
+    with patch("backend.db.connection.engine", engine):
         client = TestClient(app_with_journey_authed)
         r = client.get("/tier1/journey/sess_db_error/resume-state")
 
@@ -175,8 +171,7 @@ def test_resume_state_requires_auth():
         )
     app.dependency_overrides[_lazy_auth_dependency] = _reject_unauthenticated
 
-    with patch.object(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", True):
-        client = TestClient(app)
-        r = client.get("/tier1/journey/sess_x/resume-state")
+    client = TestClient(app)
+    r = client.get("/tier1/journey/sess_x/resume-state")
 
     assert r.status_code == 401

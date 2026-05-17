@@ -18,11 +18,9 @@ import UniversalIntakePanel from "./intake/UniversalIntakePanel";
 /**
  * Tier1IntakeForm — Sprint 6 default + Sprint 8 progressive variant.
  *
- * When REACT_APP_LOGIQ_TIER1_UX_FIXES_FRONTEND !== "true" the component
- * renders the Sprint 6 flat 9-field form (byte-identical to the
- * pre-Sprint-8 experience). When the flag is on, it renders the
- * progressive design spec'd in §6 — severity chips, 3 required fields
- * prominent, 6 optional collapsed behind "Add more context".
+ * Renders the progressive design spec'd in §6 — severity chips, 3
+ * required fields prominent, 6 optional collapsed behind
+ * "Add more context".
  */
 // Sprint 9 — when the universal-intake frontend flag is on, the form
 // is wrapped with source-selection state + an optional paste panel so

@@ -14,22 +14,14 @@ except Exception:
     pass
 
 
-def _make_client(*, ux_on: bool, sprint6_on: bool = True, sprint7_on: bool = True):
+def _make_client():
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from backend.tier1_copilot.routes import router
-    from backend.config import settings
 
     app = FastAPI()
     app.include_router(router)
-    patches = [
-        mock.patch.object(settings, "LOGIQ_TIER1_COPILOT_BACKEND", sprint6_on),
-        mock.patch.object(settings, "LOGIQ_TIER1_PROGRESSIVE_BACKEND", sprint7_on),
-        mock.patch.object(settings, "LOGIQ_TIER1_UX_FIXES_BACKEND", ux_on),
-    ]
-    for p in patches:
-        p.start()
-    return TestClient(app), patches
+    return TestClient(app), []
 
 
 def _teardown(patches):
@@ -54,21 +46,10 @@ def _fake_session(chunk_ids):
     )
 
 
-class FlagOffTests(unittest.TestCase):
-    def test_flag_off_returns_404(self):
-        client, patches = _make_client(ux_on=False)
-        try:
-            r = client.get("/tier1/session/sess_abc/match/0")
-            self.assertEqual(r.status_code, 404)
-            self.assertEqual(r.json()["detail"], "tier1_ux_fixes_flag_off")
-        finally:
-            _teardown(patches)
-
-
 class SessionNotFoundTests(unittest.TestCase):
     def test_missing_session_returns_404(self):
         from backend.tier1_copilot import routes
-        client, patches = _make_client(ux_on=True)
+        client, patches = _make_client()
         try:
             with mock.patch.object(routes, "get_session", return_value=None):
                 r = client.get("/tier1/session/sess_abc/match/0")
@@ -84,7 +65,7 @@ class OutOfRangeTests(unittest.TestCase):
         the integer path converter just passes negative integers through,
         so our 422 check fires in the handler."""
         from backend.tier1_copilot import routes
-        client, patches = _make_client(ux_on=True)
+        client, patches = _make_client()
         try:
             with mock.patch.object(
                 routes, "get_session", return_value=_fake_session(["c1", "c2"]),
@@ -97,7 +78,7 @@ class OutOfRangeTests(unittest.TestCase):
 
     def test_empty_top_5_returns_422(self):
         from backend.tier1_copilot import routes
-        client, patches = _make_client(ux_on=True)
+        client, patches = _make_client()
         try:
             with mock.patch.object(
                 routes, "get_session", return_value=_fake_session([]),
@@ -141,7 +122,7 @@ class HappyPathTests(unittest.TestCase):
             "Follow-up Question\nOutcome?\n"
         )
 
-        client, patches = _make_client(ux_on=True)
+        client, patches = _make_client()
         try:
             with mock.patch.object(routes, "get_session", return_value=sess), \
                  mock.patch.object(
@@ -183,7 +164,7 @@ class HappyPathTests(unittest.TestCase):
             "Most Likely Fix\nf.\n\nValidation\nv.\n\n"
             "Escalate If\ne.\n\nFollow-up Question\nfq.\n"
         )
-        client, patches = _make_client(ux_on=True)
+        client, patches = _make_client()
         try:
             with mock.patch.object(routes, "get_session", return_value=sess), \
                  mock.patch.object(

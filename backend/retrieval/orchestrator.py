@@ -25,8 +25,7 @@ from backend.retrieval.fusion import fuse_results, FusedResult
 from backend.retrieval.reranker import BaseReranker, create_reranker
 # Sprint 2.8 — regex-only aggregation detector used to raise the reranker
 # cap for list-style aggregation queries. Deterministic, no LLM cost, safe
-# to call on every retrieve(). When LOGIQ_COMPOUND_FILTER_BACKEND is off,
-# the result of this detection is ignored and the cap stays at RERANK_TOP_K.
+# to call on every retrieve().
 from backend.retrieval.metadata_sql import detect_aggregation_intent
 
 logger = logging.getLogger("acadia-log-iq")
@@ -502,21 +501,13 @@ def retrieve(
     # =====================================================================
     # Sprint 3-PREP-A — mode→corpus filter.
     # =====================================================================
-    # When LOGIQ_DOC_KIND_BACKEND is ON and the caller has requested one or
-    # more doc_kinds, narrow allowed_file_ids to documents matching those
-    # kinds BEFORE any channel runs. This reuses the existing access-filter
-    # plumbing — every search channel (vector, BM25, keyword, metadata,
-    # identifier exact) already honors allowed_file_ids, so the filter
-    # propagates with zero channel-level changes.
-    #
-    # Flag-off path: doc_kinds is ignored even when passed, matching §7
-    # rollback semantics. No SQL is issued, no logs are emitted beyond
-    # the existing [retrieve] entry line.
-    _apply_kind_filter = (
-        getattr(settings, "LOGIQ_DOC_KIND_BACKEND", False)
-        and bool(doc_kinds)
-    )
-    if _apply_kind_filter:
+    # When the caller has requested one or more doc_kinds, narrow
+    # allowed_file_ids to documents matching those kinds BEFORE any
+    # channel runs. This reuses the existing access-filter plumbing —
+    # every search channel (vector, BM25, keyword, metadata, identifier
+    # exact) already honors allowed_file_ids, so the filter propagates
+    # with zero channel-level changes.
+    if bool(doc_kinds):
         _candidates_before = len(allowed_file_ids or set())
         try:
             from backend.db.connection import SessionLocal
@@ -555,28 +546,25 @@ def retrieve(
     # settings.IDENTIFIER_PATTERNS, answer from an exact JSONB lookup on
     # primary_id and skip the four parallel channels entirely. Deterministic,
     # ~1ms, schema-agnostic (tickets, Jira issue keys, KB articles, ...).
-    if getattr(settings, "LOGIQ_HOTFIX_BACKEND", False):
-        # Prefer the raw, pre-normalization query when the caller supplied one
-        # — required so dash/underscore identifiers (INC-NEBULA-772, INC_546)
-        # are visible to the regex + vocab extractor. expand_query normalizes
-        # dashes to spaces, which corrupts letter-prefix identifier matching.
-        extract_source = raw_query if raw_query else query
-        logger.info(
-            "[retrieve] extraction source=%s len=%d",
-            "raw" if raw_query else "normalized",
-            len(extract_source or ""),
-        )
-        requested_identifiers = _extract_identifiers_hotfix(extract_source)
-        # Union with the legacy extractor so canonical ticket_number matches
-        # (needed by identifier_exact_search) are not lost. Legacy extractor
-        # also runs on the raw source when available.
-        legacy_ids = _extract_identifiers(extract_source)
-        seen_keys = {(c.upper(), t) for c, t in requested_identifiers}
-        for cid, itype in legacy_ids:
-            if (cid.upper(), itype) not in seen_keys:
-                requested_identifiers.append((cid, itype))
-    else:
-        requested_identifiers = _extract_identifiers(query)
+    # Prefer the raw, pre-normalization query when the caller supplied one
+    # — required so dash/underscore identifiers (INC-NEBULA-772, INC_546)
+    # are visible to the regex + vocab extractor. expand_query normalizes
+    # dashes to spaces, which corrupts letter-prefix identifier matching.
+    extract_source = raw_query if raw_query else query
+    logger.info(
+        "[retrieve] extraction source=%s len=%d",
+        "raw" if raw_query else "normalized",
+        len(extract_source or ""),
+    )
+    requested_identifiers = _extract_identifiers_hotfix(extract_source)
+    # Union with the legacy extractor so canonical ticket_number matches
+    # (needed by identifier_exact_search) are not lost. Legacy extractor
+    # also runs on the raw source when available.
+    legacy_ids = _extract_identifiers(extract_source)
+    seen_keys = {(c.upper(), t) for c, t in requested_identifiers}
+    for cid, itype in legacy_ids:
+        if (cid.upper(), itype) not in seen_keys:
+            requested_identifiers.append((cid, itype))
     logger.info("[retrieve] extracted identifiers=%s", requested_identifiers)
     # Legacy alias for any downstream reader still expecting ticket IDs.
     requested_ticket_ids = [
@@ -671,10 +659,7 @@ def retrieve(
                 # before falling back to the LIKE scan.
                 recovered: List[Dict[str, Any]] = []
                 multi_col_used = False
-                if (
-                    getattr(settings, "LOGIQ_HOTFIX_BACKEND", False)
-                    and getattr(settings, "IDENTIFIER_MULTI_COLUMN_LOOKUP", False)
-                ):
+                if getattr(settings, "IDENTIFIER_MULTI_COLUMN_LOOKUP", False):
                     try:
                         recovered = _multi_column_identifier_search(
                             identifiers=requested_identifiers,
@@ -686,7 +671,7 @@ def retrieve(
                         logger.warning("[multi_col_lookup] raised: %s", exc)
                         recovered = []
 
-                if not recovered and getattr(settings, "LOGIQ_HOTFIX_BACKEND", False):
+                if not recovered:
                     try:
                         recovered = _fallback_like_scan(
                             tokens=[cid for cid, _ in requested_identifiers],
@@ -999,21 +984,19 @@ def retrieve(
     # queries must surface all matching tickets, not just the top-10
     # "answer this one question"-optimal chunks. Detect aggregation
     # intent locally via the regex-only fast-path (no LLM cost) and
-    # raise the reranker cap for those queries only. Flag-off keeps
-    # the cap at RERANK_TOP_K (byte-identical pre-2.8 behavior).
+    # raise the reranker cap for those queries only.
     _rerank_cap = settings.RERANK_TOP_K
-    if getattr(settings, "LOGIQ_COMPOUND_FILTER_BACKEND", False):
-        try:
-            _agg_intent_probe = detect_aggregation_intent(raw_query or query)
-        except Exception as exc:
-            logger.warning("[rerank] aggregation probe failed: %s", exc)
-            _agg_intent_probe = None
-        if _agg_intent_probe is not None:
-            _rerank_cap = int(getattr(settings, "RERANK_TOP_K_AGGREGATION", 40))
-            logger.info(
-                "[rerank] aggregation intent detected (op=%s) → cap raised to %d",
-                _agg_intent_probe.operation, _rerank_cap,
-            )
+    try:
+        _agg_intent_probe = detect_aggregation_intent(raw_query or query)
+    except Exception as exc:
+        logger.warning("[rerank] aggregation probe failed: %s", exc)
+        _agg_intent_probe = None
+    if _agg_intent_probe is not None:
+        _rerank_cap = int(getattr(settings, "RERANK_TOP_K_AGGREGATION", 40))
+        logger.info(
+            "[rerank] aggregation intent detected (op=%s) → cap raised to %d",
+            _agg_intent_probe.operation, _rerank_cap,
+        )
 
     if _skip_rerank_tiny:
         logger.info(
@@ -1083,13 +1066,12 @@ def retrieve_by_fingerprint(
     return_chunk_id: bool = False,
 ) -> Optional[Any]:
     """Return the single best gold-ticket metadata_json for an exact
-    fingerprint match, or None if no match / flag off / invalid format.
+    fingerprint match, or None if no match / invalid format.
 
     Sprint 4 contract:
-      - Only runs when LOGIQ_SPRINT4_BACKEND is True.
-      - Validates against settings.FINGERPRINT_REGEX (UPPERCASE, hyphen
-        required). API layer also validates before calling, but the
-        defensive check here lets tests call this directly.
+      - Validates against settings.FINGERPRINT_REGEX. API layer also
+        validates before calling, but the defensive check here lets
+        tests call this directly.
       - Orders by Resolution_Quality_Score DESC, then created_at DESC,
         so the "best" historical record is returned when multiple
         tickets share the same fingerprint.
@@ -1102,11 +1084,8 @@ def retrieve_by_fingerprint(
         cache key for the per-chunk Expert Copilot answer cache added
         by migration 037. Existing callers (Sprint 4 + tests) do NOT
         pass this kwarg and still receive the original Optional[Dict]
-        return — byte-identical behavior.
+        return.
     """
-    if not getattr(settings, "LOGIQ_SPRINT4_BACKEND", False):
-        return (None, None) if return_chunk_id else None
-
     fp = (fingerprint or "").strip()
     if not re.match(getattr(settings, "FINGERPRINT_REGEX", r"^$"), fp):
         return (None, None) if return_chunk_id else None

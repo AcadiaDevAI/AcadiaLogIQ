@@ -1,10 +1,5 @@
 """Sprint 9 — Universal Intake FastAPI router.
 
-Mounted ONLY when LOGIQ_UNIVERSAL_INTAKE_BACKEND is True (the include
-in `backend/api.py` is itself flag-gated). Per-endpoint flag checks
-remain so tests can exercise the flag-off path without rebuilding the
-app.
-
 Endpoints:
   POST /intake/extract                     extract candidates
   POST /intake/extraction/{id}/feedback    log engineer pick/edit/reject
@@ -39,15 +34,8 @@ logger = logging.getLogger("acadia-log-iq")
 router = APIRouter(prefix="/intake", tags=["universal-intake"])
 
 
-def _require_flag() -> None:
-    if not getattr(settings, "LOGIQ_UNIVERSAL_INTAKE_BACKEND", False):
-        raise HTTPException(status_code=404, detail="universal_intake_flag_off")
-
-
 @router.post("/extract", response_model=ExtractResponse)
 async def extract(req: ExtractRequest) -> ExtractResponse:
-    _require_flag()
-
     raw = (req.raw_text or "").strip()
     if not raw:
         raise HTTPException(
@@ -120,7 +108,6 @@ async def extraction_feedback(
     extraction_id: str,
     body: ExtractionFeedbackRequest,
 ) -> ExtractionFeedbackResponse:
-    _require_flag()
     ok = log_extraction_feedback(
         extraction_id=extraction_id,
         picked_index=body.picked_index,
@@ -134,12 +121,11 @@ async def extraction_feedback(
 
 @router.get("/health", response_model=IntakeHealthResponse)
 async def health() -> IntakeHealthResponse:
-    flag_on = bool(getattr(settings, "LOGIQ_UNIVERSAL_INTAKE_BACKEND", False))
     catalogs = get_intake_catalogs(lazy_build=False)
     s, a, t, c = catalogs.health_snapshot()
     return IntakeHealthResponse(
-        ok=flag_on,
-        flag_on=flag_on,
+        ok=True,
+        flag_on=True,
         catalogs_built=catalogs.is_built(),
         severities=s,
         asset_families=a,

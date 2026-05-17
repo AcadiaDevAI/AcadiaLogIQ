@@ -208,13 +208,7 @@ def extract_topic(query: str, retrieved_chunks: List[Any]) -> Optional[str]:
         # Hotfix: emit the most-specific single noun so patterns aren't
         # fragmented across every permutation of co-occurring terms
         # (e.g. 'router_vpn_wan' vs 'vpn_wan' losing shared history).
-        try:
-            from backend.config import settings as _settings
-            if getattr(_settings, "LOGIQ_HOTFIX_BACKEND", False):
-                return sorted(matches, key=len, reverse=True)[0]
-        except Exception:
-            pass
-        return "_".join(sorted(matches[:3]))
+        return sorted(matches, key=len, reverse=True)[0]
 
     if retrieved_chunks:
         sections: List[str] = []

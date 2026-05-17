@@ -1,0 +1,427 @@
+
+===== phase1_logic (backend/tests/test_phase1_logic.py) exit=0 =====
+.                                                                        [100%]
+1 passed in 1.98s
+
+
+===== phase1_schema (backend/tests/test_phase1_schema.py) exit=0 =====
+.                                                                        [100%]
+1 passed in 1.18s
+
+
+===== phase2_parser (backend/tests/test_phase2_parser.py) exit=0 =====
+.                                                                        [100%]
+1 passed in 0.36s
+
+
+===== phase2_pipeline (backend/tests/test_phase2_pipeline.py) exit=0 =====
+.                                                                        [100%]
+1 passed in 1.14s
+
+
+===== phase2_versioning (backend/tests/test_phase2_versioning.py) exit=0 =====
+..                                                                       [100%]
+2 passed in 1.06s
+
+
+===== phase3_retrieval (backend/tests/test_retrieval_Phase3.py) exit=0 =====
+............................                                             [100%]
+28 passed in 0.57s
+
+
+===== agents (backend/tests/test_agents.py) exit=0 =====
+.......................                                                  [100%]
+23 passed in 0.67s
+
+
+===== validation (backend/tests/test_validation.py) exit=1 =====
+..............F........F                                                 [100%]
+================================== FAILURES ===================================
+____________________ TestValidator.test_empty_answer_fails ____________________
+backend\tests\test_validation.py:171: in test_empty_answer_fails
+    assert not r.passed or r.confidence < 0.3
+E   AssertionError: assert (not True or 0.4666666666666667 < 0.3)
+E    +  where True = ValidationResult(answer='', confidence=0.4666666666666667, passed=True, was_modified=False, confidence_detail=Confiden..., grounding_score=1.0, issues=[], version_warning='', fabrications=[]), version_warning='', issues=[], validation_ms=0).passed
+E    +  and   0.4666666666666667 = ValidationResult(answer='', confidence=0.4666666666666667, passed=True, was_modified=False, confidence_detail=Confiden..., grounding_score=1.0, issues=[], version_warning='', fabrications=[]), version_warning='', issues=[], validation_ms=0).confidence
+________ TestValidationEvalExamples.test_eval_honest_refusal_accepted _________
+backend\tests\test_validation.py:292: in test_eval_honest_refusal_accepted
+    assert r.passed
+E   AssertionError: assert False
+E    +  where False = ValidationResult(answer='- The generated answer could not be fully verified against the source documents.\n- Please tr...', issues=['Grounding score 0.00 below threshold 0.25', 'Grounding score 0.000 below threshold 0.25'], validation_ms=0).passed
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:validator.py:309 Validation FAILED (low grounding): 0.000
+=========================== short test summary info ===========================
+FAILED backend/tests/test_validation.py::TestValidator::test_empty_answer_fails
+FAILED backend/tests/test_validation.py::TestValidationEvalExamples::test_eval_honest_refusal_accepted
+2 failed, 22 passed in 0.33s
+
+
+===== sprint4_fingerprint (backend/tests/test_sprint4_fingerprint.py) exit=0 =====
+..........                                                               [100%]
+10 passed in 0.67s
+
+
+===== sprint5_expert_template (backend/tests/test_sprint5_expert_template.py) exit=0 =====
+................                                                         [100%]
+16 passed in 0.61s
+
+
+===== tests_services (backend/tests/services) exit=0 =====
+...........................                                              [100%]
+27 passed in 1.15s
+
+
+===== tests_scripts (backend/tests/scripts) exit=0 =====
+.......                                                                  [100%]
+7 passed in 0.61s
+
+
+===== journey_tests (backend/tests/tier1_copilot/journey) exit=1 =====
+.......................F..F........F..FF.FF.FFF.F....................... [ 47%]
+.......................F........FFFFFFFFFFFFFFFF...FFFFFF........F....F. [ 94%]
+.........                                                                [100%]
+================================== FAILURES ===================================
+__________________ test_db_error_does_not_break_distillation __________________
+backend\tests\tier1_copilot\journey\test_stage0_confidence.py:104: in test_db_error_does_not_break_distillation
+    assert len(out.how_they_did_it) == 3
+E   AssertionError: assert 1 == 3
+E    +  where 1 = len(['Verified DDC health - INC-PHOENIX-402'])
+E    +    where ['Verified DDC health - INC-PHOENIX-402'] = Stage0BestTicketDistillation(cohort_size=1, best_incident='INC-PHOENIX-402', best_quality_score=5, best_time_minutes=4...0, platform_median_minutes=None, profile_match='unrecognised cohort profile', sparse=False, evidence_strength='strong').how_they_did_it
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage0_confidence.py:150 [journey.stage0] corpus aggregate failed: connection refused
+_________________ test_distillation_extracts_resolution_steps _________________
+backend\tests\tier1_copilot\journey\test_stage0_confidence.py:211: in test_distillation_extracts_resolution_steps
+    assert len(out.how_they_did_it) == 5
+E   AssertionError: assert 1 == 5
+E    +  where 1 = len(['step 1 - INC-LISTY'])
+E    +    where ['step 1 - INC-LISTY'] = Stage0BestTicketDistillation(cohort_size=1, best_incident='INC-LISTY', best_quality_score=5, best_time_minutes=None, w...0, platform_median_minutes=None, profile_match='unrecognised cohort profile', sparse=False, evidence_strength='strong').how_they_did_it
+______________________ test_full_happy_path_phoenix_402 _______________________
+backend\tests\tier1_copilot\journey\test_stage0_confidence.py:461: in test_full_happy_path_phoenix_402
+    assert len(out.how_they_did_it) == 3
+E   AssertionError: assert 1 == 3
+E    +  where 1 = len(['Verified DDC health via Get-BrokerController - INC-PHOENIX-402'])
+E    +    where ['Verified DDC health via Get-BrokerController - INC-PHOENIX-402'] = Stage0BestTicketDistillation(cohort_size=1, best_incident='INC-PHOENIX-402', best_quality_score=5, best_time_minutes=4...18, platform_median_minutes=134, profile_match='unrecognised cohort profile', sparse=False, evidence_strength='strong').how_they_did_it
+_______________________ test_threshold_min_count_is_one _______________________
+backend\tests\tier1_copilot\journey\test_stage1_do_not_chase.py:43: in test_threshold_min_count_is_one
+    assert out.empty is False
+E   AssertionError: assert True is False
+E    +  where True = Stage1bDoNotChase(entries=[], empty=True, reason='no_data', synthesis_skipped=False).empty
+__________________ test_dedup_across_all_four_field_families __________________
+backend\tests\tier1_copilot\journey\test_stage1_do_not_chase.py:80: in test_dedup_across_all_four_field_families
+    assert e.occurrence_count == 4
+E   AssertionError: assert 3 == 4
+E    +  where 3 = DoNotChaseEntry(misleading_signal='cpu spike', rule_out_logic='CPU stayed below 60%', occurrence_count=3, seen_in_incidents=['INC-1', 'INC-2', 'INC-4']).occurrence_count
+____________________________ test_cap_at_8_entries ____________________________
+backend\tests\tier1_copilot\journey\test_stage1_do_not_chase.py:121: in test_cap_at_8_entries
+    assert len(out.entries) == 8
+E   AssertionError: assert 0 == 8
+E    +  where 0 = len([])
+E    +    where [] = Stage1bDoNotChase(entries=[], empty=True, reason='no_data', synthesis_skipped=False).entries
+__________________ test_sort_descending_by_occurrence_count ___________________
+backend\tests\tier1_copilot\journey\test_stage1_do_not_chase.py:136: in test_sort_descending_by_occurrence_count
+    assert len(out.entries) == 2
+E   AssertionError: assert 0 == 2
+E    +  where 0 = len([])
+E    +    where [] = Stage1bDoNotChase(entries=[], empty=True, reason='no_data', synthesis_skipped=False).entries
+___________ test_reason_field_no_recurring_when_each_ticket_unique ____________
+backend\tests\tier1_copilot\journey\test_stage1_do_not_chase.py:172: in test_reason_field_no_recurring_when_each_ticket_unique
+    assert out.reason == "no_recurring"
+E   AssertionError: assert 'no_data' == 'no_recurring'
+E     
+E     - no_recurring
+E     + no_data
+______________ test_reason_field_populated_when_entries_qualify _______________
+backend\tests\tier1_copilot\journey\test_stage1_do_not_chase.py:187: in test_reason_field_populated_when_entries_qualify
+    assert out.empty is False
+E   AssertionError: assert True is False
+E    +  where True = Stage1bDoNotChase(entries=[], empty=True, reason='no_data', synthesis_skipped=False).empty
+____________________ test_default_rule_out_when_all_blank _____________________
+backend\tests\tier1_copilot\journey\test_stage1_do_not_chase.py:199: in test_default_rule_out_when_all_blank
+    assert len(out.entries) == 1
+E   AssertionError: assert 0 == 1
+E    +  where 0 = len([])
+E    +    where [] = Stage1bDoNotChase(entries=[], empty=True, reason='no_data', synthesis_skipped=False).entries
+__________________ test_threshold_boundary_below_40_percent ___________________
+backend\tests\tier1_copilot\journey\test_stage1_smoking_gun.py:34: in test_threshold_boundary_below_40_percent
+    assert out.empty is True
+E   AssertionError: assert False is True
+E    +  where False = Stage1aSmokingGun(pivot_signal='signal-0', bypass_instruction=None, recommended_action=None, frequency_in_cohort_percent=20, seen_in_incidents=['INC-0'], empty=False, derived_from='mental_pivot_single').empty
+__________ test_consolidated_steps_unaffected_by_per_ticket_addition __________
+backend\tests\tier1_copilot\journey\test_stage3_per_ticket_details.py:211: in test_consolidated_steps_unaffected_by_per_ticket_addition
+    assert len(out.steps) >= 1
+               ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+______________________________ test_empty_cohort ______________________________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:9: in test_empty_cohort
+    assert out.steps == []
+           ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+_________________ test_dedup_case_insensitive_across_tickets __________________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:35: in test_dedup_case_insensitive_across_tickets
+    assert len(out.steps) == 1
+               ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-1 synthesis failed (Extra data: line 8 column 1 (char 375))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-2 synthesis failed (Extra data: line 8 column 1 (char 358))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-3 synthesis failed (Extra data: line 7 column 1 (char 278))
+________________________ test_ordinal_based_sequencing ________________________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:69: in test_ordinal_based_sequencing
+    actions = [s.action for s in out.steps]
+                                 ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-1 synthesis failed (Extra data: line 7 column 1 (char 297))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-2 synthesis failed (Extra data: line 7 column 1 (char 297))
+________ test_branching_detection_two_distinct_critical_interventions _________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:96: in test_branching_detection_two_distinct_critical_interventions
+    primary = [s for s in out.steps if s.branch_label == "Primary"]
+                          ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-0 synthesis failed (Extra data: line 7 column 1 (char 276))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-1 synthesis failed (Extra data: line 7 column 1 (char 282))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-2 synthesis failed (Extra data: line 7 column 1 (char 291))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-X synthesis failed (Extra data: line 8 column 1 (char 345))
+________________ test_no_branch_label_when_only_one_ci_or_none ________________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:114: in test_no_branch_label_when_only_one_ci_or_none
+    assert all(s.branch_label is None for s in out.steps)
+                                               ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-0 synthesis failed (Extra data: line 7 column 1 (char 245))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-1 synthesis failed (Extra data: line 7 column 1 (char 258))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-2 synthesis failed (Extra data: line 7 column 1 (char 245))
+_______________________________ test_max_8_cap ________________________________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:125: in test_max_8_cap
+    out = build_stage3(cohort, max_steps=8)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: build_stage3() got an unexpected keyword argument 'max_steps'
+_________________ test_resolution_steps_string_falls_through __________________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:138: in test_resolution_steps_string_falls_through
+    assert len(out.steps) == 1
+               ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-1 synthesis failed (Extra data: line 7 column 1 (char 294))
+_________________ test_dedup_collapses_normalized_duplicates __________________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:169: in test_dedup_collapses_normalized_duplicates
+    s for s in out.steps if "cpu" in s.action.lower()
+               ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-A synthesis failed (Extra data: line 8 column 1 (char 432))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-B synthesis failed (Extra data: line 7 column 1 (char 265))
+____________________ test_dedup_picks_longest_display_text ____________________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:194: in test_dedup_picks_longest_display_text
+    s for s in out.steps
+               ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-1 synthesis failed (Extra data: line 8 column 1 (char 262))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-2 synthesis failed (Extra data: line 8 column 1 (char 374))
+_____________ test_intent_pivot_only_from_diagnostic_logic_chunks _____________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:221: in test_intent_pivot_only_from_diagnostic_logic_chunks
+    by_action = {s.action.lower(): s for s in out.steps}
+                                              ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:589 [stage3_consolidated] inc=INC-1 dropping non-read-only Activity: 'Inspect BFD config to validate timer baseline'
+_________ test_sequencing_diagnostic_then_timeline_then_intervention __________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:249: in test_sequencing_diagnostic_then_timeline_then_intervention
+    cats = [s.category for s in out.steps]
+                                ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-MIX synthesis failed (Extra data: line 8 column 1 (char 402))
+____________ test_fallback_marker_when_two_distinct_interventions _____________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:274: in test_fallback_marker_when_two_distinct_interventions
+    interventions = [s for s in out.steps if s.category == "intervention"]
+                                ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-A synthesis failed (Extra data: line 7 column 1 (char 258))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-B synthesis failed (Extra data: line 7 column 1 (char 296))
+__________________ test_no_fallback_when_intervention_dedups __________________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:294: in test_no_fallback_when_intervention_dedups
+    interventions = [s for s in out.steps if s.category == "intervention"]
+                                ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-0 synthesis failed (Extra data: line 7 column 1 (char 258))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-1 synthesis failed (Extra data: line 7 column 1 (char 245))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-2 synthesis failed (Extra data: line 7 column 1 (char 258))
+__________________________ test_caps_at_eight_steps ___________________________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:308: in test_caps_at_eight_steps
+    out = build_stage3(cohort, max_steps=8)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: build_stage3() got an unexpected keyword argument 'max_steps'
+_________________ test_seen_in_incidents_preserves_rank_order _________________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:344: in test_seen_in_incidents_preserves_rank_order
+    matching = [s for s in out.steps if "shared" in s.action.lower()]
+                           ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-RANK0 synthesis failed (Extra data: line 7 column 1 (char 297))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-RANK2 synthesis failed (Extra data: line 8 column 1 (char 420))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-RANK4 synthesis failed (Extra data: line 7 column 1 (char 416))
+__________ test_completely_empty_cohort_returns_empty_steps_no_crash __________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:367: in test_completely_empty_cohort_returns_empty_steps_no_crash
+    assert out.steps == []
+           ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+______ test_intent_pivot_only_present_for_diagnostic_logic_chunks_source ______
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:464: in test_intent_pivot_only_present_for_diagnostic_logic_chunks_source
+    by_action = {s.action: s for s in out.steps}
+                                      ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-MIX synthesis failed (Extra data: line 8 column 1 (char 410))
+_____ test_command_field_only_present_for_diagnostic_logic_chunks_source ______
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:495: in test_command_field_only_present_for_diagnostic_logic_chunks_source
+    by_action = {s.action: s for s in out.steps}
+                                      ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-CMD synthesis failed (Extra data: line 7 column 1 (char 321))
+_________ test_dedupe_collapses_normalized_duplicates_across_tickets __________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:521: in test_dedupe_collapses_normalized_duplicates_across_tickets
+    matching = [s for s in out.steps if "line status" in s.action.lower()]
+                           ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-A synthesis failed (Extra data: line 8 column 1 (char 303))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-B synthesis failed (Extra data: line 8 column 1 (char 311))
+__________________ test_caps_at_eight_steps_realigned_corpus __________________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:537: in test_caps_at_eight_steps_realigned_corpus
+    out = build_stage3(cohort, max_steps=8)
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   TypeError: build_stage3() got an unexpected keyword argument 'max_steps'
+_________ test_does_not_crash_when_forensic_performance_audit_missing _________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:555: in test_does_not_crash_when_forensic_performance_audit_missing
+    actions = {s.action for s in out.steps}
+                                 ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-NOFPA synthesis failed (Extra data: line 8 column 1 (char 411))
+_____________________ test_multiple_field_families_merged _____________________
+backend\tests\tier1_copilot\journey\test_stage3_troubleshooting.py:584: in test_multiple_field_families_merged
+    matching = [s for s in out.steps if "link state" in s.action.lower()]
+                           ^^^^^^^^^
+.venv\Lib\site-packages\pydantic\main.py:1026: in __getattr__
+    raise AttributeError(f'{type(self).__name__!r} object has no attribute {item!r}')
+E   AttributeError: 'Stage3TroubleshootingApproach' object has no attribute 'steps'
+------------------------------ Captured log call ------------------------------
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-1 synthesis failed (Extra data: line 8 column 1 (char 329))
+WARNING  acadia-log-iq:stage3_consolidated.py:576 [stage3_consolidated] inc=INC-2 synthesis failed (Extra data: line 7 column 1 (char 330))
+______________ test_build_package_called_with_merged_what_tried _______________
+backend\tests\tier1_copilot\journey\test_stage5_escalation.py:114: in test_build_package_called_with_merged_what_tried
+    assert cwt[1]["step"].endswith("Confidence Lead")
+E   AssertionError: assert False
+E    +  where False = <built-in method endswith of str object at 0x000002A5139632D0>('Confidence Lead')
+E    +    where <built-in method endswith of str object at 0x000002A5139632D0> = 'Best Historical Match & Recommended Resolution'.endswith
+____________ test_rapid_stage_transitions_render_distinct_seconds _____________
+backend\tests\tier1_copilot\journey\test_stage5_escalation.py:224: in test_rapid_stage_transitions_render_distinct_seconds
+    pivot = next(v for k, v in by_stage.items() if "pivot_insights" in k)
+            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   StopIteration
+=========================== short test summary info ===========================
+FAILED backend/tests/tier1_copilot/journey/test_stage0_confidence.py::test_db_error_does_not_break_distillation
+FAILED backend/tests/tier1_copilot/journey/test_stage0_confidence.py::test_distillation_extracts_resolution_steps
+FAILED backend/tests/tier1_copilot/journey/test_stage0_confidence.py::test_full_happy_path_phoenix_402
+FAILED backend/tests/tier1_copilot/journey/test_stage1_do_not_chase.py::test_threshold_min_count_is_one
+FAILED backend/tests/tier1_copilot/journey/test_stage1_do_not_chase.py::test_dedup_across_all_four_field_families
+FAILED backend/tests/tier1_copilot/journey/test_stage1_do_not_chase.py::test_cap_at_8_entries
+FAILED backend/tests/tier1_copilot/journey/test_stage1_do_not_chase.py::test_sort_descending_by_occurrence_count
+FAILED backend/tests/tier1_copilot/journey/test_stage1_do_not_chase.py::test_reason_field_no_recurring_when_each_ticket_unique
+FAILED backend/tests/tier1_copilot/journey/test_stage1_do_not_chase.py::test_reason_field_populated_when_entries_qualify
+FAILED backend/tests/tier1_copilot/journey/test_stage1_do_not_chase.py::test_default_rule_out_when_all_blank
+FAILED backend/tests/tier1_copilot/journey/test_stage1_smoking_gun.py::test_threshold_boundary_below_40_percent
+FAILED backend/tests/tier1_copilot/journey/test_stage3_per_ticket_details.py::test_consolidated_steps_unaffected_by_per_ticket_addition
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_empty_cohort
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_dedup_case_insensitive_across_tickets
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_ordinal_based_sequencing
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_branching_detection_two_distinct_critical_interventions
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_no_branch_label_when_only_one_ci_or_none
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_max_8_cap
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_resolution_steps_string_falls_through
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_dedup_collapses_normalized_duplicates
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_dedup_picks_longest_display_text
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_intent_pivot_only_from_diagnostic_logic_chunks
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_sequencing_diagnostic_then_timeline_then_intervention
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_fallback_marker_when_two_distinct_interventions
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_no_fallback_when_intervention_dedups
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_caps_at_eight_steps
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_seen_in_incidents_preserves_rank_order
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_completely_empty_cohort_returns_empty_steps_no_crash
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_intent_pivot_only_present_for_diagnostic_logic_chunks_source
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_command_field_only_present_for_diagnostic_logic_chunks_source
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_dedupe_collapses_normalized_duplicates_across_tickets
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_caps_at_eight_steps_realigned_corpus
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_does_not_crash_when_forensic_performance_audit_missing
+FAILED backend/tests/tier1_copilot/journey/test_stage3_troubleshooting.py::test_multiple_field_families_merged
+FAILED backend/tests/tier1_copilot/journey/test_stage5_escalation.py::test_build_package_called_with_merged_what_tried
+FAILED backend/tests/tier1_copilot/journey/test_stage5_escalation.py::test_rapid_stage_transitions_render_distinct_seconds
+36 failed, 117 passed in 363.29s (0:06:03)
+
+
+===== tier1_unit_tests (backend/tier1_copilot/tests) exit=0 =====
+........................................................................ [ 77%]
+.....................                                                    [100%]
+93 passed in 3.05s
+
+
+===== intake_tests (backend/tier1_copilot/intake/tests) exit=1 =====
+.........................F........F.................                     [100%]
+================================== FAILURES ===================================
+____________ ExtractCandidatesTests.test_retry_on_first_malformed _____________
+backend\tier1_copilot\intake\tests\test_extractor.py:110: in test_retry_on_first_malformed
+    self.assertEqual(calls["n"], 2)
+E   AssertionError: 3 != 2
+______ ExtractHappyPathTests.test_extract_returns_validated_diversified _______
+backend\tier1_copilot\intake\tests\test_routes.py:142: in test_extract_returns_validated_diversified
+    self.assertEqual(body["candidates"][1]["severity"], "P3")
+E   AssertionError: None != 'P3'
+=========================== short test summary info ===========================
+FAILED backend/tier1_copilot/intake/tests/test_extractor.py::ExtractCandidatesTests::test_retry_on_first_malformed
+FAILED backend/tier1_copilot/intake/tests/test_routes.py::ExtractHappyPathTests::test_extract_returns_validated_diversified
+2 failed, 50 passed in 0.84s
+

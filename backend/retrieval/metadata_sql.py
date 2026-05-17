@@ -61,8 +61,7 @@ class AggIntent:
     numeric_equals: Optional[Tuple[str, int]] = None
     # Sprint 2.8 — content terms extracted deterministically from the
     # query after stopword + metadata subtraction. Empty list = no
-    # content filter applied. Populated only when
-    # LOGIQ_COMPOUND_FILTER_BACKEND is on; otherwise always [].
+    # content filter applied.
     content_terms: List[str] = field(default_factory=list)
 
 
@@ -335,8 +334,6 @@ _SCORE_EQUALITY_RE = re.compile(
 def _extract_numeric_equality(q: str) -> Optional[Tuple[str, int]]:
     """Sprint 2.6 — pull (field, value) equality filter from a query.
     Returns (canonical_field_name, int_value) or None."""
-    if not getattr(settings, "LOGIQ_NUMERIC_FILTER_BACKEND", False):
-        return None
     m = _SCORE_EQUALITY_RE.search(q or "")
     if not m:
         return None
@@ -435,11 +432,7 @@ def _extract_content_terms(
     from the candidate pool so they don't double-match.
 
     Returns up to 4 lowercase content terms, empty list when the query
-    has no remaining content signal (e.g., pure metadata queries).
-    Flag-off always returns []."""
-    if not getattr(settings, "LOGIQ_COMPOUND_FILTER_BACKEND", False):
-        return []
-
+    has no remaining content signal (e.g., pure metadata queries)."""
     tokens = _tokenize_query_for_content(query)
     # Sprint 2.8.1 — diagnostic. When the runtime log shows content_terms=[]
     # on a query that visibly contains a content token (e.g. BGP), this
@@ -686,29 +679,28 @@ def detect_aggregation_intent_v2(query: str) -> Optional[AggIntent]:
         # Sprint 2.8 — populate content_terms on the regex-path AggIntent
         # so compound queries routed through the fast-path (e.g. "BGP
         # tickets with score of 5") still get their content filter.
-        if getattr(settings, "LOGIQ_COMPOUND_FILTER_BACKEND", False):
-            claimed: Set[str] = set()
-            if regex_hit.customer_name:
-                for part in regex_hit.customer_name.lower().split():
+        claimed: Set[str] = set()
+        if regex_hit.customer_name:
+            for part in regex_hit.customer_name.lower().split():
+                claimed.add(part)
+        if regex_hit.priority:
+            claimed.add(regex_hit.priority.lower())
+        if regex_hit.numeric_equals is not None:
+            field_name, field_value = regex_hit.numeric_equals
+            claimed.add(field_name.lower())
+            claimed.add(str(field_value))
+        if regex_hit.component:
+            for part in regex_hit.component.lower().split():
+                claimed.add(part)
+        for raw_tok in _tokenize_query_for_content(q):
+            if re.match(r"^[A-Z]+-[A-Z0-9]+-[0-9]+$", raw_tok, re.I):
+                claimed.add(raw_tok.lower())
+                for part in raw_tok.lower().split("-"):
                     claimed.add(part)
-            if regex_hit.priority:
-                claimed.add(regex_hit.priority.lower())
-            if regex_hit.numeric_equals is not None:
-                field_name, field_value = regex_hit.numeric_equals
-                claimed.add(field_name.lower())
-                claimed.add(str(field_value))
-            if regex_hit.component:
-                for part in regex_hit.component.lower().split():
-                    claimed.add(part)
-            for raw_tok in _tokenize_query_for_content(q):
-                if re.match(r"^[A-Z]+-[A-Z0-9]+-[0-9]+$", raw_tok, re.I):
-                    claimed.add(raw_tok.lower())
-                    for part in raw_tok.lower().split("-"):
-                        claimed.add(part)
-            regex_hit.content_terms = _extract_content_terms(
-                query=q,
-                already_claimed=claimed,
-            )
+        regex_hit.content_terms = _extract_content_terms(
+            query=q,
+            already_claimed=claimed,
+        )
         logger.info(
             "[aggregation] routed via=regex op=%s customer=%s content_terms=%s",
             regex_hit.operation, regex_hit.customer_name, regex_hit.content_terms,
@@ -775,8 +767,7 @@ def detect_aggregation_intent_v2(query: str) -> Optional[AggIntent]:
 
     # Sprint 2.6 — carry classifier's numeric equality filter (if any).
     if (
-        getattr(settings, "LOGIQ_NUMERIC_FILTER_BACKEND", False)
-        and getattr(result, "numeric_filter_field", None)
+        getattr(result, "numeric_filter_field", None)
         and getattr(result, "numeric_filter_value", None) is not None
     ):
         intent.numeric_equals = (
@@ -794,33 +785,30 @@ def detect_aggregation_intent_v2(query: str) -> Optional[AggIntent]:
 
     # Sprint 2.8 — after all structured metadata has been claimed,
     # diff what's left of the query to get deterministic content terms.
-    # Runs only when the master flag is on; _extract_content_terms
-    # returns [] unconditionally when flag is off (double-guarded).
-    if getattr(settings, "LOGIQ_COMPOUND_FILTER_BACKEND", False):
-        claimed: Set[str] = set()
-        if intent.customer_name:
-            for part in intent.customer_name.lower().split():
+    claimed: Set[str] = set()
+    if intent.customer_name:
+        for part in intent.customer_name.lower().split():
+            claimed.add(part)
+    if intent.priority:
+        claimed.add(intent.priority.lower())
+    if intent.numeric_equals is not None:
+        field_name, field_value = intent.numeric_equals
+        claimed.add(field_name.lower())
+        claimed.add(str(field_value))
+    if intent.component:
+        for part in intent.component.lower().split():
+            claimed.add(part)
+    # Identifier tokens (INC-FOO-123) are handled by the identifier
+    # short-circuit, not by content filtering — claim them out.
+    for raw_tok in _tokenize_query_for_content(q):
+        if re.match(r"^[A-Z]+-[A-Z0-9]+-[0-9]+$", raw_tok, re.I):
+            claimed.add(raw_tok.lower())
+            for part in raw_tok.lower().split("-"):
                 claimed.add(part)
-        if intent.priority:
-            claimed.add(intent.priority.lower())
-        if intent.numeric_equals is not None:
-            field_name, field_value = intent.numeric_equals
-            claimed.add(field_name.lower())
-            claimed.add(str(field_value))
-        if intent.component:
-            for part in intent.component.lower().split():
-                claimed.add(part)
-        # Identifier tokens (INC-FOO-123) are handled by the identifier
-        # short-circuit, not by content filtering — claim them out.
-        for raw_tok in _tokenize_query_for_content(q):
-            if re.match(r"^[A-Z]+-[A-Z0-9]+-[0-9]+$", raw_tok, re.I):
-                claimed.add(raw_tok.lower())
-                for part in raw_tok.lower().split("-"):
-                    claimed.add(part)
-        intent.content_terms = _extract_content_terms(
-            query=q,
-            already_claimed=claimed,
-        )
+    intent.content_terms = _extract_content_terms(
+        query=q,
+        already_claimed=claimed,
+    )
 
     logger.info(
         "[aggregation] routed via=classifier op=%s confidence=%.2f content_terms=%s",
@@ -916,9 +904,6 @@ def _resolve_field_to_sql(
     Flag off: byte-identical to the original single-extract.
     """
     safe = re.sub(r"[^A-Za-z0-9_]", "", field_name or "")
-    if not getattr(settings, "LOGIQ_HOTFIX_BACKEND", False):
-        expr = f"{table_alias}.metadata_json->>'{safe}'"
-        return f"({expr}){cast}" if cast else expr
     variants = _field_variants(safe)
     exprs = [f"{table_alias}.metadata_json->>'{v}'" for v in variants]
     coalesced = "COALESCE(" + ", ".join(exprs) + ")"
@@ -959,34 +944,29 @@ def _build_ticket_scope_clauses(
     cn = filters.get("customer_name")
     if cn is not None:
         expr = _resolve_field_to_sql("customer_name")
-        if getattr(settings, "LOGIQ_COMPOUND_FILTER_BACKEND", False):
-            # Sprint 2.8 Bug F — "Aetheris" and "Aetheris Corp" and
-            # "Aetheris Corporation" should all match the same customer.
-            # Strip common corporate suffixes to derive a stable prefix,
-            # then match EITHER exact OR LIKE prefix. Short names
-            # (<5 chars after strip) fall back to exact to avoid
-            # catch-all "A%" matches.
-            cn_core = cn.strip().lower()
-            _CORP_SUFFIXES = (
-                " corp", " corporation", " inc", " inc.",
-                " llc", " ltd", " ltd.", " group", " co", " co.",
+        # Sprint 2.8 Bug F — "Aetheris" and "Aetheris Corp" and
+        # "Aetheris Corporation" should all match the same customer.
+        # Strip common corporate suffixes to derive a stable prefix,
+        # then match EITHER exact OR LIKE prefix. Short names
+        # (<5 chars after strip) fall back to exact to avoid
+        # catch-all "A%" matches.
+        cn_core = cn.strip().lower()
+        _CORP_SUFFIXES = (
+            " corp", " corporation", " inc", " inc.",
+            " llc", " ltd", " ltd.", " group", " co", " co.",
+        )
+        for suf in _CORP_SUFFIXES:
+            if cn_core.endswith(suf):
+                cn_core = cn_core[: -len(suf)].strip()
+                break
+        if len(cn_core) >= 5:
+            clauses.append(
+                f"(LOWER({expr}) = LOWER(:customer_name) "
+                f"OR LOWER({expr}) LIKE LOWER(:customer_name_prefix))"
             )
-            for suf in _CORP_SUFFIXES:
-                if cn_core.endswith(suf):
-                    cn_core = cn_core[: -len(suf)].strip()
-                    break
-            if len(cn_core) >= 5:
-                clauses.append(
-                    f"(LOWER({expr}) = LOWER(:customer_name) "
-                    f"OR LOWER({expr}) LIKE LOWER(:customer_name_prefix))"
-                )
-                params["customer_name"] = cn
-                params["customer_name_prefix"] = f"{cn_core}%"
-            else:
-                clauses.append(f"LOWER({expr}) = LOWER(:customer_name)")
-                params["customer_name"] = cn
+            params["customer_name"] = cn
+            params["customer_name_prefix"] = f"{cn_core}%"
         else:
-            # Flag off — pre-2.8 exact-match behavior.
             clauses.append(f"LOWER({expr}) = LOWER(:customer_name)")
             params["customer_name"] = cn
 
@@ -1026,7 +1006,7 @@ def _build_ticket_scope_clauses(
     # Sprint 2.6 — numeric equality filter (score = N, etc).
     # Value comes in as a tuple (field, int); field must be whitelisted.
     ne = filters.get("numeric_equals")
-    if ne is not None and getattr(settings, "LOGIQ_NUMERIC_FILTER_BACKEND", False):
+    if ne is not None:
         field_name, field_value = ne
         if field_name in _NUMERIC_EQUALITY_FIELDS:
             expr = _resolve_field_to_sql(_NUMERIC_EQUALITY_FIELDS[field_name])
@@ -1041,13 +1021,9 @@ def _build_ticket_scope_clauses(
     # in narrative) AND terms that are component labels. All terms are
     # AND'd together (strict recall — every term must appear somewhere
     # in each matching ticket). Capped at 4 terms to keep the AND chain
-    # manageable. Flag-off = no clause emitted.
+    # manageable.
     ct = filters.get("content_terms")
-    if (
-        ct
-        and isinstance(ct, list)
-        and getattr(settings, "LOGIQ_COMPOUND_FILTER_BACKEND", False)
-    ):
+    if ct and isinstance(ct, list):
         for idx, term in enumerate(ct[:4]):
             p_term = f"ct_term_{idx}"
             clauses.append(

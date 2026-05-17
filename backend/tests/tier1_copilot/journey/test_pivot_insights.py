@@ -62,8 +62,7 @@ def test_initial_endpoint_returns_merged_pivot_insights(app_with_journey):
     """Sprint 10.2 §7 — JourneyInitial.pivot_insights.smoking_gun and
     .do_not_chase both populate; old top-level stage_1a / stage_1b
     keys are ABSENT (the schema swap from Sprint 10 → 10.2 is complete)."""
-    with patch.object(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", True), \
-         patch(
+    with patch(
              "backend.tier1_copilot.journey.routes.load_cohort_metadata",
              return_value=_cohort_with_kb(),
          ), \
@@ -96,8 +95,7 @@ def test_initial_endpoint_returns_merged_pivot_insights(app_with_journey):
 def test_pivot_insights_standalone_endpoint(app_with_journey):
     """Sprint 10.2 — the new /pivot-insights endpoint exposes the same
     merged content for callers that want just the Stage 1 panel."""
-    with patch.object(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", True), \
-         patch(
+    with patch(
              "backend.tier1_copilot.journey.routes.load_cohort_metadata",
              return_value=_cohort_with_kb(),
          ), \
@@ -112,8 +110,3 @@ def test_pivot_insights_standalone_endpoint(app_with_journey):
     assert body["smoking_gun"]["empty"] is False
 
 
-def test_pivot_insights_endpoint_flag_off_returns_404(app_with_journey):
-    with patch.object(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", False):
-        client = TestClient(app_with_journey)
-        r = client.get("/tier1/journey/sess-X/pivot-insights")
-    assert r.status_code == 404

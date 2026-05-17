@@ -51,10 +51,6 @@ def _iter_chunk_groups(batch_size: int = 50) -> Iterable[Tuple[str, str]]:
 def backfill_all() -> int:
     """Walk every document in the chunks table, learn vocabulary,
     refresh the cache. Returns number of documents processed."""
-    if not getattr(settings, "LOGIQ_HOTFIX_BACKEND", False):
-        logger.info("[vocab_backfill] skipped - LOGIQ_HOTFIX_BACKEND=False")
-        return 0
-
     count = 0
     for doc_id, content in _iter_chunk_groups():
         try:

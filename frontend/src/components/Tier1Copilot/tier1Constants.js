@@ -49,34 +49,27 @@ export const CONFIDENCE_LABEL = {
   None: "No historical evidence",
 };
 
-// Sprint 7 build-time flag. When "true", LandingRouter mounts the
-// Tier1Workspace container in place of the Sprint 6 single-card flow.
-export const TIER1_PROGRESSIVE_ON =
-  process.env.REACT_APP_LOGIQ_TIER1_PROGRESSIVE_FRONTEND === "true";
+// Sprint 7 — LandingRouter mounts the Tier1Workspace container in
+// place of the Sprint 6 single-card flow.
+export const TIER1_PROGRESSIVE_ON = true;
 
 // ─────────────────────────────────────────────────────────────
-// Sprint 8 — UX polish flags + rewritten confidence copy
+// Sprint 8 — UX polish + rewritten confidence copy
+// Track A: confidence labels, wired buttons, skeletons, arrow
+// pagination fetch, intake redesign.
+// Track B: modern Acadia-navy theme.
 // ─────────────────────────────────────────────────────────────
-// Track A — behaviour fixes (confidence labels, wired buttons, skeletons,
-// arrow pagination fetch, intake redesign).
-export const TIER1_UX_FIXES_ON =
-  process.env.REACT_APP_LOGIQ_TIER1_UX_FIXES_FRONTEND === "true";
+export const TIER1_UX_FIXES_ON = true;
 
-// Track B — modern Acadia-navy theme.
-export const TIER1_MODERN_THEME_ON =
-  process.env.REACT_APP_LOGIQ_TIER1_MODERN_THEME === "true";
+export const TIER1_MODERN_THEME_ON = true;
 
-// Sprint 8.1 demo — temporary download buttons for UAT review.
-// Removable in a single follow-up commit (grep for "Sprint 8.1 demo").
-export const TIER1_DOWNLOAD_DEMO_ON =
-  process.env.REACT_APP_LOGIQ_TIER1_DOWNLOAD_DEMO === "true";
+// Sprint 8.1 demo — download buttons for UAT review.
+export const TIER1_DOWNLOAD_DEMO_ON = true;
 
 // ─────────────────────────────────────────────────────────────
 // Sprint 9 — Universal Intake (Email/Phone/Portal/Chat/Note).
-// Flag-off path: SourceToggle is hidden, Sprint 6/7/8 byte-identical.
 // ─────────────────────────────────────────────────────────────
-export const UNIVERSAL_INTAKE_ON =
-  process.env.REACT_APP_LOGIQ_UNIVERSAL_INTAKE_FRONTEND === "true";
+export const UNIVERSAL_INTAKE_ON = true;
 
 export const INTAKE_SOURCES = [
   { value: "alert", label: "Alert" },
@@ -108,13 +101,10 @@ export const REACTIVE_SUB_CHANNELS = INTAKE_SOURCES.filter(
 export const INTAKE_MAX_RAW_CHARS = 10000;
 
 // ─────────────────────────────────────────────────────────────
-// Sprint 10 — Tier-1 Resolution Journey.
-// Flag-off path: Tier1Workspace renders the existing Sprint 6/7/8
-// answer-card + chips path byte-identical. Flag-on: ResolutionJourney
-// replaces the answer card after Analyze.
+// Sprint 10 — Tier-1 Resolution Journey. ResolutionJourney replaces
+// the answer card after Analyze.
 // ─────────────────────────────────────────────────────────────
-export const TIER1_JOURNEY_ON =
-  process.env.REACT_APP_LOGIQ_TIER1_JOURNEY_FRONTEND === "true";
+export const TIER1_JOURNEY_ON = true;
 
 export const STAGE_LABELS = {
   environment_context: "Environment Context & Tech Component Profile",

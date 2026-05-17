@@ -408,10 +408,7 @@ def try_clarify(
         # Sprint 2.7 Bug C — at most one clarification round per logical
         # question chain. Caller passes count=1 on the refined /ask that
         # followed an earlier clarification selection.
-        if (
-            getattr(settings, "LOGIQ_ACCURACY_HOTFIX_BACKEND", False)
-            and session_clarif_count >= 1
-        ):
+        if session_clarif_count >= 1:
             result.skip_reason = "chain_cap_reached"
             logger.info(
                 "[interactive_clarifier] skip reason=chain_cap_reached "

@@ -1,9 +1,8 @@
 """Startup hook: build the alias dictionary once per process.
 
-Called from the parent app's FastAPI lifespan when
-LOGIQ_TIER1_COPILOT_BACKEND is True. Safe to call repeatedly — the
-AliasDictionary.rebuild_from_db is idempotent and swaps the internal
-map atomically.
+Called from the parent app's FastAPI lifespan. Safe to call repeatedly —
+the AliasDictionary.rebuild_from_db is idempotent and swaps the
+internal map atomically.
 """
 from __future__ import annotations
 
@@ -38,14 +37,10 @@ def build_alias_dictionary_on_startup() -> None:
 def build_tier1_runtime_state_on_startup() -> None:
     """Rebuild every in-memory tier1_copilot artefact in one DB pass.
 
-    Used by `backend/api.py` lifespan when either Tier-1 flag is on.
-    Never raises — each rebuild has its own try/except so a failure in
-    one doesn't poison the other."""
+    Used by `backend/api.py` lifespan. Never raises — each rebuild has
+    its own try/except so a failure in one doesn't poison the other."""
     build_alias_dictionary_on_startup()
     try:
-        from backend.config import settings
-        if not getattr(settings, "LOGIQ_UNIVERSAL_INTAKE_BACKEND", False):
-            return
         from backend.db.connection import engine
         from backend.tier1_copilot.intake.catalogs import get_intake_catalogs
         catalogs = get_intake_catalogs(lazy_build=False)

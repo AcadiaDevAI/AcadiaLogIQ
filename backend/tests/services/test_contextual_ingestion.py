@@ -1,12 +1,11 @@
 """Sprint 11 — Forward-fix tests for contextual_ingestion_service.
 
-These tests verify the additional rich-parent merge inside the existing
-LOGIQ_SPRINT4_BACKEND-gated block of `_ingest_gold_ticket_json`. The four
-parents the journey readers need (Executive_Sharable_RCA, Incident_Summary,
-Forensic_Performance_Audit, Key_Contributors) plus the two bonus parents
-(QA_Auditor_Feedback, ITIL_5_Why) must land on the chunk's metadata_json
-when the source ticket carries them, and must be absent (not null) when it
-does not.
+These tests verify the rich-parent merge inside `_ingest_gold_ticket_json`.
+The four parents the journey readers need (Executive_Sharable_RCA,
+Incident_Summary, Forensic_Performance_Audit, Key_Contributors) plus the
+two bonus parents (QA_Auditor_Feedback, ITIL_5_Why) must land on the
+chunk's metadata_json when the source ticket carries them, and must be
+absent (not null) when it does not.
 
 Run with: py -m unittest backend.tests.services.test_contextual_ingestion
 """
@@ -82,14 +81,13 @@ def _gold_ticket(**overrides):
     return base
 
 
-def _run_ingestion(tickets, *, flag_on=True):
+def _run_ingestion(tickets):
     """Invoke `_ingest_gold_ticket_json` with the given source tickets and
     return the chunk_rows list."""
     from backend.services import contextual_ingestion_service as cis
 
     file_bytes = json.dumps(tickets).encode("utf-8")
-    with mock.patch.object(cis.settings, "LOGIQ_SPRINT4_BACKEND", flag_on), \
-         mock.patch.object(cis.settings, "ENABLE_DUPLICATE_CHECK", False), \
+    with mock.patch.object(cis.settings, "ENABLE_DUPLICATE_CHECK", False), \
          mock.patch.object(cis.settings, "ENABLE_VERSION_DETECTION", False):
         result = cis._ingest_gold_ticket_json(
             file_bytes=file_bytes,
@@ -164,27 +162,6 @@ class RichMergeForwardFixTests(unittest.TestCase):
         self.assertIn("Key_Contributors", meta)
         self.assertIn("QA_Auditor_Feedback", meta)
 
-    def test_rich_merge_disabled_when_sprint4_flag_off(self):
-        rows = _run_ingestion([_gold_ticket()], flag_on=False)
-        meta = rows[0]["metadata_json"]
-        for key in (
-            "Executive_Sharable_RCA",
-            "Incident_Summary",
-            "Forensic_Performance_Audit",
-            "Key_Contributors",
-            "QA_Auditor_Feedback",
-            "ITIL_5_Why",
-            "Metadata",
-            "Symptom_Solution_Mapping",
-            "Operational_SOP",
-            "Knowledge_Base",
-            "remediation_payload",
-            "Header",
-        ):
-            self.assertNotIn(key, meta, f"{key} should not be present when flag is off")
-        # Slim flat keys still synthesised.
-        self.assertEqual(meta["incident_number"], "INC-0001")
-        self.assertEqual(meta["doc_kind"], "ticket")
 
 
 if __name__ == "__main__":

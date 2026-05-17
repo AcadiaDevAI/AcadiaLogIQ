@@ -68,16 +68,7 @@ def _stub_engine(corpus_row):
     return engine
 
 
-def test_initial_flag_off_returns_404(app_with_journey):
-    """LOGIQ_TIER1_JOURNEY_BACKEND=False → 404."""
-    with patch.object(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", False):
-        client = TestClient(app_with_journey)
-        r = client.get("/tier1/journey/sess-X/initial")
-    assert r.status_code == 404
-    assert r.json()["detail"] == "tier1_journey_flag_off"
-
-
-def test_initial_flag_on_returns_merged_pivot_insights(app_with_journey):
+def test_initial_returns_merged_pivot_insights(app_with_journey):
     """Sprint 10.2 — flag on, mocked cohort → JourneyInitial with the
     new shape: stage_0 (Best-Ticket Distillation) + pivot_insights
     wrapper containing both smoking_gun and do_not_chase. Old top-
@@ -94,8 +85,7 @@ def test_initial_flag_on_returns_merged_pivot_insights(app_with_journey):
 
     corpus_row = {"corpus_size": 918, "platform_median_minutes": 134.0}
 
-    with patch.object(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", True), \
-         patch(
+    with patch(
              "backend.tier1_copilot.journey.routes.load_cohort_metadata",
              return_value=cohort,
          ), \
@@ -155,8 +145,7 @@ def test_journey_initial_after_cache_hit_returns_cohort(app_with_journey):
     cohort[0]["Symptom_Solution_Mapping"]["Primary_Fix"] = "Restore BFD"
     corpus_row = {"corpus_size": 100, "platform_median_minutes": 50.0}
 
-    with patch.object(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", True), \
-         patch(
+    with patch(
              "backend.tier1_copilot.journey.routes.load_cohort_metadata",
              return_value=cohort,
          ), \
@@ -190,8 +179,7 @@ def test_event_post_writes_telemetry_row(app_with_journey):
     engine = MagicMock()
     engine.begin.return_value = cm
 
-    with patch.object(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", True), \
-         patch("backend.db.connection.engine", engine):
+    with patch("backend.db.connection.engine", engine):
         client = TestClient(app_with_journey)
         r = client.post(
             "/tier1/journey/sess-1/event",
@@ -206,20 +194,9 @@ def test_event_post_writes_telemetry_row(app_with_journey):
 
 def test_event_post_rejects_unknown_stage(app_with_journey):
     """Unknown stage → 422 from Pydantic Literal validation."""
-    with patch.object(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", True):
-        client = TestClient(app_with_journey)
-        r = client.post(
-            "/tier1/journey/sess-1/event",
-            json={"stage": "stage_99", "event_type": "helpful_clicked"},
-        )
+    client = TestClient(app_with_journey)
+    r = client.post(
+        "/tier1/journey/sess-1/event",
+        json={"stage": "stage_99", "event_type": "helpful_clicked"},
+    )
     assert r.status_code == 422
-
-
-def test_event_flag_off_returns_404(app_with_journey):
-    with patch.object(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", False):
-        client = TestClient(app_with_journey)
-        r = client.post(
-            "/tier1/journey/sess-1/event",
-            json={"stage": "stage_1a", "event_type": "helpful_clicked"},
-        )
-    assert r.status_code == 404

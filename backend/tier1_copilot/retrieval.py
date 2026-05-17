@@ -28,8 +28,8 @@ from backend.config import settings
 logger = logging.getLogger("acadia-log-iq")
 
 
-# Sprint 6 baseline weights — unchanged when LOGIQ_TIER1_PROGRESSIVE_BACKEND
-# is False. Every byte of Sprint 6 ranking behavior depends on this dict.
+# Sprint 6 baseline weights — fallback if the Sprint 7 settings dict
+# isn't available for any reason.
 _WEIGHTS = {
     "alert_type_match": 0.30,
     "asset_match": 0.20,
@@ -41,15 +41,12 @@ _WEIGHTS = {
 
 
 def _active_weights() -> Dict[str, float]:
-    """Pick the active weight dict based on the progressive flag.
+    """Return the Sprint 7 ranking weights from settings (with fallback).
 
     Sprint 7 shifts weight into `recency`, `success_frequency`,
     `same_customer_boost`, and `same_asset_family` (§3 of the sprint
-    spec). When the flag is off we return the Sprint 6 dict verbatim
-    so the scoring function's arithmetic is byte-identical to pre-7."""
-    if getattr(settings, "LOGIQ_TIER1_PROGRESSIVE_BACKEND", False):
-        return getattr(settings, "TIER1_RANKING_WEIGHTS", _WEIGHTS)
-    return _WEIGHTS
+    spec)."""
+    return getattr(settings, "TIER1_RANKING_WEIGHTS", _WEIGHTS)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -333,7 +330,6 @@ def _weighted_rank(
     normalized: Dict[str, Any],
 ) -> List[Dict[str, Any]]:
     weights = _active_weights()
-    sprint7 = getattr(settings, "LOGIQ_TIER1_PROGRESSIVE_BACKEND", False)
 
     alert_type_toks = set(_tokens(alert_input.get("alert_type")))
     asset_toks = set(_tokens(alert_input.get("asset_name")))
@@ -379,41 +375,41 @@ def _weighted_rank(
             q_norm = 0.0
         comps["resolution_quality"] = q_norm
 
-        if sprint7:
-            # Recency — linear decay over 365 days. Missing timestamps
-            # score 0.0 (neutral — do not penalize tickets without a
-            # parseable created_at).
-            comps["recency"] = _recency_score(meta, now)
-            # Success frequency — fraction of sibling tickets (same
-            # primary_fix) tagged as resolved. If we don't have sibling
-            # telemetry, treat quality_score as a proxy.
-            comps["success_frequency"] = q_norm
-            # Customer boost — 1.0 iff the alert's customer field matches
-            # the ticket's customer_name. Case-insensitive exact compare.
-            ticket_customer = (
-                (meta.get("customer_name") or meta.get("Customer_Name") or "")
-                .strip()
-                .lower()
+        # Sprint 7 — recency / success-frequency / customer / asset-family.
+        # Recency — linear decay over 365 days. Missing timestamps
+        # score 0.0 (neutral — do not penalize tickets without a
+        # parseable created_at).
+        comps["recency"] = _recency_score(meta, now)
+        # Success frequency — fraction of sibling tickets (same
+        # primary_fix) tagged as resolved. If we don't have sibling
+        # telemetry, treat quality_score as a proxy.
+        comps["success_frequency"] = q_norm
+        # Customer boost — 1.0 iff the alert's customer field matches
+        # the ticket's customer_name. Case-insensitive exact compare.
+        ticket_customer = (
+            (meta.get("customer_name") or meta.get("Customer_Name") or "")
+            .strip()
+            .lower()
+        )
+        comps["same_customer_boost"] = (
+            1.0 if alert_customer and alert_customer == ticket_customer else 0.0
+        )
+        # Asset-family boost — prefix-match via derive_asset_family.
+        ticket_family = (c.get("asset_family") or "").strip().lower() or (
+            derive_asset_family(
+                (meta.get("Affected_Assets") or [None])[0]
+                if isinstance(meta.get("Affected_Assets"), list)
+                else None
             )
-            comps["same_customer_boost"] = (
-                1.0 if alert_customer and alert_customer == ticket_customer else 0.0
-            )
-            # Asset-family boost — prefix-match via derive_asset_family.
-            ticket_family = (c.get("asset_family") or "").strip().lower() or (
-                derive_asset_family(
-                    (meta.get("Affected_Assets") or [None])[0]
-                    if isinstance(meta.get("Affected_Assets"), list)
-                    else None
-                )
-                or ""
-            )
-            comps["same_asset_family"] = (
-                1.0
-                if alert_asset_family
-                and ticket_family
-                and alert_asset_family == ticket_family
-                else 0.0
-            )
+            or ""
+        )
+        comps["same_asset_family"] = (
+            1.0
+            if alert_asset_family
+            and ticket_family
+            and alert_asset_family == ticket_family
+            else 0.0
+        )
 
         score = 0.0
         for key, w in weights.items():

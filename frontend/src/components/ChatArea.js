@@ -2,7 +2,6 @@ import React, { useRef, useEffect, useCallback, useState } from "react";
 import { message } from "antd";
 import { useChat } from "../hooks/ChatContext";
 import { askQuestion, listSessions } from "../services/api";
-import { settings as clientSettings } from "../config/clientSettings";
 import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
 import ModeBadge from "./ModeBadge";
@@ -89,14 +88,8 @@ export default function ChatArea() {
         });
         dispatch({ type: "SET_LOADING", payload: false });
 
-        // Sprint 2 — surface context-break modal if the backend emitted the
-        // hint. Gated on the frontend flag + Sprint 1 flag so no-op when
-        // either is off, matching the backend gate.
-        if (
-          clientSettings.LOGIQ_SPRINT2_FRONTEND &&
-          clientSettings.GUIDED_WORKFLOW_ENABLED &&
-          data.context_stats?.context_break === true
-        ) {
+        // Sprint 2 — surface context-break modal if the backend emitted the hint.
+        if (data.context_stats?.context_break === true) {
           dispatch({
             type: "SET_PENDING_CONTEXT_BREAK",
             payload: {
@@ -181,11 +174,7 @@ export default function ChatArea() {
         });
         dispatch({ type: "SET_LOADING", payload: false });
 
-        if (
-          clientSettings.LOGIQ_SPRINT2_FRONTEND &&
-          clientSettings.GUIDED_WORKFLOW_ENABLED &&
-          data.context_stats?.context_break === true
-        ) {
+        if (data.context_stats?.context_break === true) {
           dispatch({
             type: "SET_PENDING_CONTEXT_BREAK",
             payload: {
@@ -217,12 +206,10 @@ export default function ChatArea() {
     [state.messages, state.sessionId, dispatch]
   );
 
-  // Sprint 2 — pre-message form gating. Only renders when both flags are
-  // on, the session has no messages yet, and the selected sub-mode has a
-  // form component. Pre-flag shape unchanged: EmptyState still renders.
+  // Sprint 2 — pre-message form gating. Only renders when the session
+  // has no messages yet AND the selected sub-mode has a form component.
+  // Otherwise EmptyState still renders.
   const showSprint2Form =
-    clientSettings.LOGIQ_SPRINT2_FRONTEND &&
-    clientSettings.GUIDED_WORKFLOW_ENABLED &&
     state.messages.length === 0 &&
     state.selectedMode === "troubleshooting" &&
     (state.subMode === "customer_specific" ||
@@ -282,8 +269,7 @@ export default function ChatArea() {
                   clarificationDisabled={state.isLoading}
                   onPrefillInput={setPrefillValue}
                 />
-                {clientSettings.LOGIQ_SPRINT2_FRONTEND &&
-                  msg.role === "assistant" &&
+                {msg.role === "assistant" &&
                   msg.patternActive &&
                   msg.patternData && (
                     <PatternResponseCard
@@ -308,8 +294,7 @@ export default function ChatArea() {
         onPrefillConsumed={() => setPrefillValue(null)}
       />
 
-      {clientSettings.LOGIQ_SPRINT2_FRONTEND &&
-        clientSettings.GUIDED_WORKFLOW_ENABLED && <ContextBreakModal />}
+      <ContextBreakModal />
     </div>
   );
 }

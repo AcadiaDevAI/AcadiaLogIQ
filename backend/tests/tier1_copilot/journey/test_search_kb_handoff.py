@@ -414,8 +414,7 @@ def test_handoff_route_returns_200_with_valid_token_not_401():
         "redirect_url": "/chat/chat-AUTH-OK",
     }
 
-    with patch.object(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", True), \
-         patch(
+    with patch(
              "backend.tier1_copilot.journey.routes.load_cohort_metadata",
              return_value=[],
          ), \
@@ -490,9 +489,8 @@ def test_handoff_route_returns_401_without_auth():
 
     app.dependency_overrides[_lazy_auth_dependency] = _reject_unauthenticated
 
-    with patch.object(settings, "LOGIQ_TIER1_JOURNEY_BACKEND", True):
-        client = TestClient(app)
-        r = client.post("/tier1/journey/sess_no_auth/search-kb-handoff")
+    client = TestClient(app)
+    r = client.post("/tier1/journey/sess_no_auth/search-kb-handoff")
 
     assert r.status_code == 401
 

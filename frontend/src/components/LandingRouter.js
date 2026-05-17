@@ -9,7 +9,6 @@ import Tier1IntakeForm from "./Tier1Copilot/Tier1IntakeForm";
 import Tier1AnswerCard from "./Tier1Copilot/Tier1AnswerCard";
 import Tier1FollowupChips from "./Tier1Copilot/Tier1FollowupChips";
 import Tier1Workspace from "./Tier1Copilot/Tier1Workspace";
-import { TIER1_PROGRESSIVE_ON } from "./Tier1Copilot/tier1Constants";
 import { analyzeAlert } from "./Tier1Copilot/tier1Api";
 
 /**
@@ -25,13 +24,6 @@ import { analyzeAlert } from "./Tier1Copilot/tier1Api";
  * SET_MODE(troubleshooting) so AppLayout's `!state.selectedMode` check
  * flips and the user lands directly in ChatArea reading their answer.
  */
-// Sprint 6 — Tier-1 Copilot entry button. Hidden entirely when the
-// build-time flag REACT_APP_LOGIQ_TIER1_COPILOT_FRONTEND !== "true".
-// Keeping the flag read at module scope so it's evaluated once and
-// inlined by the bundler when off.
-const TIER1_FRONTEND_ON =
-  process.env.REACT_APP_LOGIQ_TIER1_COPILOT_FRONTEND === "true";
-
 export default function LandingRouter() {
   const { state, dispatch } = useChat();
   // Default landing is now Tier-1 Copilot (was "fingerprint").
@@ -134,7 +126,7 @@ export default function LandingRouter() {
   //   );
   // }
 
-  if (screen === "tier1" && TIER1_FRONTEND_ON) {
+  if (screen === "tier1") {
     const handleTier1Submit = async (payload) => {
       setTier1Busy(true);
       try {
@@ -164,11 +156,10 @@ export default function LandingRouter() {
       );
     }
 
-    // Sprint 7 — mount the progressive Workspace when the build-time
-    // flag is baked in AND the backend returned a Sprint-7 session_id
-    // (which only happens when LOGIQ_TIER1_PROGRESSIVE_BACKEND is true).
-    // Either flag off → fall back to the Sprint 6 card + chips layout.
-    if (TIER1_PROGRESSIVE_ON && tier1Result.session_id) {
+    // Sprint 7 — mount the progressive Workspace when the backend
+    // returned a Sprint-7 session_id. Falls back to the Sprint 6 card
+    // + chips layout when session_id is missing.
+    if (tier1Result.session_id) {
       return (
         <Tier1Workspace
           result={tier1Result}

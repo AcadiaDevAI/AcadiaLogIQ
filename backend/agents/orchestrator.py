@@ -51,31 +51,22 @@ def resolve_mode_doc_kinds(session_mode: Any) -> Optional[List[str]]:
     if not mode_name:
         return None
 
-    if (
-        mode_name == "escalation"
-        and getattr(settings, "LOGIQ_SPRINT3C_BACKEND", False)
-    ):
+    if mode_name == "escalation":
         return ["contact_customer"]
 
     # Sprint 3D — Ticket Handling mode routes to the SOP/runbook corpus.
     # Sub-mode (create/update/close/validate) does NOT change the corpus
     # filter — it only shapes the composer voice. All four sub-modes
     # retrieve from the same doc_kind=sop body.
-    if (
-        mode_name == "ticket_handling"
-        and getattr(settings, "LOGIQ_SPRINT3D_BACKEND", False)
-    ):
+    if mode_name == "ticket_handling":
         return ["sop"]
 
     # Sprint 3E — Vendor/OEM mode routes to the vendor corpora: contact
     # records (contact_vendor) AND prior vendor case records
     # (vendor_case). The composer voice then produces the three-part
     # response (case writeup + contact card + prior cases). Both
-    # doc_kinds are registered in VALID_DOC_KINDS (config.py:850–851).
-    if (
-        mode_name == "vendor_oem"
-        and getattr(settings, "LOGIQ_SPRINT3E_BACKEND", False)
-    ):
+    # doc_kinds are registered in VALID_DOC_KINDS.
+    if mode_name == "vendor_oem":
         return ["contact_vendor", "vendor_case"]
 
     return None
@@ -269,13 +260,10 @@ def _wrap_step_retriever_with_session_scope(
     """Hotfix: prepend session-scope tokens (customer, product, identifier)
     to each analyst step's retrieval text so cross-step context doesn't drift.
 
-    Byte-identical behavior when LOGIQ_HOTFIX_BACKEND is off OR session_scope
-    is empty OR original_fn is None.
+    Byte-identical behavior when session_scope is empty OR original_fn is None.
     """
     if original_fn is None:
         return None
-    if not getattr(settings, "LOGIQ_HOTFIX_BACKEND", False):
-        return original_fn
     tokens = [t for t in (session_scope or []) if t]
     if not tokens:
         return original_fn
@@ -294,12 +282,10 @@ def _wrap_step_retriever_with_session_scope(
             # retrieve()'s Sprint 2.5 raw-query extraction fires on the
             # dash-preserving form (INC-TITAN-812), not the scope-enriched
             # text. Fall back if the underlying fn doesn't accept raw_query.
-            if getattr(settings, "LOGIQ_ACCURACY_HOTFIX_BACKEND", False):
-                try:
-                    return original_fn(enriched, raw_query=step_text)
-                except TypeError:
-                    return original_fn(enriched)
-            return original_fn(enriched)
+            try:
+                return original_fn(enriched, raw_query=step_text)
+            except TypeError:
+                return original_fn(enriched)
         except Exception:
             return original_fn(step_text)
 
@@ -337,12 +323,9 @@ def _wrap_step_retriever_with_cache(
         # Sprint 2.5 raw-query extraction fires on analyst sub-steps and
         # preserves dash-delimited identifiers (INC-TITAN-812). Fall back
         # to single-arg invocation if underlying fn doesn't accept kwarg.
-        if getattr(settings, "LOGIQ_ACCURACY_HOTFIX_BACKEND", False):
-            try:
-                result = original_fn(step_text, raw_query=step_text)
-            except TypeError:
-                result = original_fn(step_text)
-        else:
+        try:
+            result = original_fn(step_text, raw_query=step_text)
+        except TypeError:
             result = original_fn(step_text)
 
         if ids and result is not None:
@@ -780,8 +763,7 @@ def run_agent_pipeline(
         # the query hit pattern_context or the analytical path, so the
         # synthesis step isn't "Skipped (budget exhausted)" on 3+ step plans.
         if (
-            getattr(settings, "LOGIQ_HOTFIX_BACKEND", False)
-            and not pattern_context
+            not pattern_context
             and plan_steps
             and len(plan_steps) >= 2
         ):
@@ -845,9 +827,8 @@ def run_agent_pipeline(
         # on, extend max_total by a fresh composer pool right before the
         # synthesis call so the Composer always gets a guaranteed slice
         # regardless of Analyst overrun.
-        _two_pool_on = (
-            getattr(settings, "LOGIQ_HOTFIX_BACKEND", False)
-            and getattr(settings, "AGENT_BUDGET_SEPARATE_COMPOSER_POOL", False)
+        _two_pool_on = bool(
+            getattr(settings, "AGENT_BUDGET_SEPARATE_COMPOSER_POOL", False)
         )
         if _two_pool_on:
             composer_pool = int(getattr(
@@ -948,9 +929,6 @@ def run_kb_pivot_pipeline(
     filter and voice_override="kb_pivot". Budget is a fresh half of
     AGENT_MAX_TOTAL_TOKENS (so a 👎 does not exhaust the session).
     """
-    if not getattr(settings, "LOGIQ_SPRINT3B_BACKEND", False):
-        raise RuntimeError("LOGIQ_SPRINT3B_BACKEND is off")
-
     if budget is None:
         budget = TokenBudget(max_total=max(1, settings.AGENT_MAX_TOTAL_TOKENS // 2))
 
