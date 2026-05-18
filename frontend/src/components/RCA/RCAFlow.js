@@ -30,19 +30,26 @@ import {
   Input,
   Space,
   Spin,
+  Tag,
+  Tooltip,
   Typography,
   message,
 } from "antd";
 import {
   ArrowLeftOutlined,
   CopyOutlined,
+  DislikeFilled,
+  DislikeOutlined,
   FilePdfOutlined,
   FileSearchOutlined,
   FileWordOutlined,
+  LikeFilled,
+  LikeOutlined,
   LoadingOutlined,
+  ReloadOutlined,
 } from "@ant-design/icons";
 
-import { generateRCA } from "./rcaApi";
+import { generateRCA, recordRCAFeedback } from "./rcaApi";
 import { exportPdf, exportWord } from "./rcaExport";
 
 
@@ -394,6 +401,82 @@ function ExportButtons({ getNode, filename, source }) {
 }
 
 
+// ─────────────────────────────────────────────────────────────
+// PanelFeedback — 👍 / 👎 row beneath each RCA report body.
+//
+// 👍 keeps the cached server-side result intact (others reading
+// the same incident get the cached output too).
+// 👎 invalidates the server-side cache and notifies the parent so
+// it can re-run that panel through the LLM. State is local; once
+// the engineer clicks, the icon stays filled until the panel
+// re-renders (which happens on regenerate or full reload).
+// ─────────────────────────────────────────────────────────────
+function PanelFeedback({ incidentNumber, panel, label, onDisliked, disabled }) {
+  const [selection, setSelection] = useState(null);
+  const [busy, setBusy] = useState(false);
+
+  const send = async (kind) => {
+    if (!incidentNumber || busy) return;
+    setBusy(true);
+    try {
+      const res = await recordRCAFeedback(incidentNumber, panel, kind);
+      setSelection(kind);
+      if (kind === "like") {
+        message.success(`Thanks — marked ${label} as helpful.`);
+      } else {
+        message.success(
+          `Thanks — ${label} flagged for regeneration.`
+          + (res?.invalidated ? " Cache cleared." : ""),
+        );
+        if (typeof onDisliked === "function") onDisliked();
+      }
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[rca.feedback]", err);
+      message.error("Couldn't record feedback — please try again.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Space size={6} style={{ marginTop: 12 }}>
+      <Text type="secondary" style={{ fontSize: 12 }}>
+        Was this {label} helpful?
+      </Text>
+      <Tooltip title="Helpful — keeps the cached result for everyone">
+        <Button
+          size="small"
+          icon={
+            selection === "like"
+              ? <LikeFilled style={{ color: "#10b981" }} />
+              : <LikeOutlined />
+          }
+          onClick={() => send("like")}
+          disabled={busy || disabled}
+        >
+          Helpful
+        </Button>
+      </Tooltip>
+      <Tooltip title="Dislike — clears the cached result so the next Generate produces a fresh report">
+        <Button
+          size="small"
+          icon={
+            selection === "dislike"
+              ? <DislikeFilled style={{ color: "#ef4444" }} />
+              : <DislikeOutlined />
+          }
+          onClick={() => send("dislike")}
+          disabled={busy || disabled}
+        >
+          Dislike
+        </Button>
+      </Tooltip>
+    </Space>
+  );
+}
+
+
 export default function RCAFlow({ onReturnToStages, initialPayload = null }) {
   // Sprint 13.32 — inject the PDF-style document CSS on first mount.
   // Idempotent; subsequent mounts hit the module guard and no-op.
@@ -407,6 +490,15 @@ export default function RCAFlow({ onReturnToStages, initialPayload = null }) {
   // ships exactly what's on screen — no parallel render, no drift.
   const customerPaperRef = useRef(null);
   const internalPaperRef = useRef(null);
+
+  // In-flight de-dupe. React StrictMode double-fires useEffect on
+  // mount in dev, and `busy`/setBusy is async (next render only), so
+  // a state guard alone can't block the second fire. This ref is
+  // mutated synchronously so the second fire short-circuits before
+  // it ever calls the API — preventing a wasted parallel LLM run
+  // that would also race the cache write. Also guards against rapid
+  // double-clicks from the user.
+  const inFlightIncRef = useRef(null);
 
   const [incidentNumber, setIncidentNumber] = useState("");
   const [busy, setBusy] = useState(false);
@@ -427,16 +519,29 @@ export default function RCAFlow({ onReturnToStages, initialPayload = null }) {
   // stubbed in this iteration — the modal said "feature in progress."
   const [uploadedFile, setUploadedFile] = useState(null);
 
+  // Track which panel (if any) is being regenerated so its header
+  // can show a small spinner without freezing the whole flow.
+  const [regeneratingPanel, setRegeneratingPanel] = useState(null);
+
   const canSubmit = !busy && !!incidentNumber.trim();
 
   const handleSubmit = async (opts = {}) => {
     const inc = (opts.incidentNumber ?? incidentNumber).trim();
     if (!inc || busy) return;
+    // StrictMode dev-mode re-fires this effect; without a ref guard
+    // the second fire kicks off a parallel POST that races the cache
+    // write and forces an extra LLM run. The ref is mutated
+    // synchronously so the second fire short-circuits immediately.
+    if (inFlightIncRef.current === inc) return;
+    inFlightIncRef.current = inc;
     setBusy(true);
     setFormError(null);
     setResult(null);
     try {
-      const data = await generateRCA(inc);
+      const data = await generateRCA(inc, {
+        regenerateCustomer: !!opts.regenerateCustomer,
+        regenerateInternal: !!opts.regenerateInternal,
+      });
       setResult(data);
     } catch (err) {
       const status = err?.response?.status;
@@ -457,6 +562,7 @@ export default function RCAFlow({ onReturnToStages, initialPayload = null }) {
       }
     } finally {
       setBusy(false);
+      inFlightIncRef.current = null;
     }
   };
 
@@ -490,6 +596,34 @@ export default function RCAFlow({ onReturnToStages, initialPayload = null }) {
     setUploadedFile(null);
   };
 
+  // Per-panel "Regenerate" — bypasses cache for just the named panel
+  // and re-runs the LLM. The other panel keeps whatever state it
+  // currently has (cached or freshly generated). The backend's
+  // `regenerate_*` flags drive this; we toggle only one per call.
+  const handleRegeneratePanel = async (panelKey) => {
+    const inc = (result?.incident_number || incidentNumber).trim();
+    if (!inc) return;
+    setRegeneratingPanel(panelKey);
+    try {
+      const data = await generateRCA(inc, {
+        regenerateCustomer: panelKey === "customer",
+        regenerateInternal: panelKey === "internal",
+      });
+      setResult(data);
+      message.success(
+        panelKey === "customer"
+          ? "Customer-Facing RCA regenerated."
+          : "Internal RCA regenerated.",
+      );
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.error("[rca.regenerate]", err);
+      message.error("Regenerate failed — please try again.");
+    } finally {
+      setRegeneratingPanel(null);
+    }
+  };
+
   // Convenience: only-file submission with no incident number ⇒
   // show the placeholder card instead of a request error.
   const fileOnlyMode = !!uploadedFile && !incidentNumber.trim() && !result;
@@ -505,14 +639,29 @@ export default function RCAFlow({ onReturnToStages, initialPayload = null }) {
         {
           key: "customer",
           label: (
-            <Space>
+            <Space wrap>
               <Text strong style={{ fontSize: 15 }}>
                 Customer-Facing External RCA
               </Text>
+              {regeneratingPanel === "customer" ? (
+                <Tag icon={<LoadingOutlined spin />} color="warning">
+                  Regenerating…
+                </Tag>
+              ) : null}
             </Space>
           ),
           extra: (
             <Space size={6} onClick={(e) => e.stopPropagation()}>
+              <Tooltip title="Regenerate this panel — bypasses cache and re-runs the LLM">
+                <Button
+                  size="small"
+                  icon={<ReloadOutlined />}
+                  onClick={() => handleRegeneratePanel("customer")}
+                  disabled={!!regeneratingPanel}
+                >
+                  Regenerate
+                </Button>
+              </Tooltip>
               <ExportButtons
                 getNode={() => customerPaperRef.current}
                 filename={`${result.incident_number || "RCA"}_Customer-Facing-RCA`}
@@ -535,7 +684,16 @@ export default function RCAFlow({ onReturnToStages, initialPayload = null }) {
                 />
               ) : null}
               {result.customer_facing_md ? (
-                <RCAMarkdown source={result.customer_facing_md} ref={customerPaperRef} />
+                <>
+                  <RCAMarkdown source={result.customer_facing_md} ref={customerPaperRef} />
+                  <PanelFeedback
+                    incidentNumber={result.incident_number}
+                    panel="customer_facing"
+                    label="Customer-Facing RCA"
+                    disabled={!!regeneratingPanel}
+                    onDisliked={() => handleRegeneratePanel("customer")}
+                  />
+                </>
               ) : !result.customer_facing_error ? (
                 <Empty
                   image={Empty.PRESENTED_IMAGE_SIMPLE}
@@ -548,17 +706,32 @@ export default function RCAFlow({ onReturnToStages, initialPayload = null }) {
         {
           key: "internal",
           label: (
-            <Space>
+            <Space wrap>
               <Text strong style={{ fontSize: 15 }}>
                 Internal Incident RCA
               </Text>
               <Text type="secondary" style={{ fontSize: 12 }}>
                 — Confidential, internal use only
               </Text>
+              {regeneratingPanel === "internal" ? (
+                <Tag icon={<LoadingOutlined spin />} color="warning">
+                  Regenerating…
+                </Tag>
+              ) : null}
             </Space>
           ),
           extra: (
             <Space size={6} onClick={(e) => e.stopPropagation()}>
+              <Tooltip title="Regenerate this panel — bypasses cache and re-runs the LLM">
+                <Button
+                  size="small"
+                  icon={<ReloadOutlined />}
+                  onClick={() => handleRegeneratePanel("internal")}
+                  disabled={!!regeneratingPanel}
+                >
+                  Regenerate
+                </Button>
+              </Tooltip>
               <ExportButtons
                 getNode={() => internalPaperRef.current}
                 filename={`${result.incident_number || "RCA"}_Internal-RCA`}
@@ -581,7 +754,16 @@ export default function RCAFlow({ onReturnToStages, initialPayload = null }) {
                 />
               ) : null}
               {result.internal_md ? (
-                <RCAMarkdown source={result.internal_md} ref={internalPaperRef} />
+                <>
+                  <RCAMarkdown source={result.internal_md} ref={internalPaperRef} />
+                  <PanelFeedback
+                    incidentNumber={result.incident_number}
+                    panel="internal"
+                    label="Internal RCA"
+                    disabled={!!regeneratingPanel}
+                    onDisliked={() => handleRegeneratePanel("internal")}
+                  />
+                </>
               ) : !result.internal_error ? (
                 <Empty
                   image={Empty.PRESENTED_IMAGE_SIMPLE}

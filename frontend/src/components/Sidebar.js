@@ -91,7 +91,7 @@ function groupByVersionFamily(files) {
   return result;
 }
 
-export default function Sidebar({ onOpenRca }) {
+export default function Sidebar({ onOpenRca, onOpenGapAnalysis }) {
   // Sprint 13.32 — `onOpenRca` is passed in from AppLayout. When the
   // RCA button below History is clicked, we call it to flip the
   // right pane over to the RCAFlow surface. Sidebar itself stays
@@ -482,6 +482,31 @@ export default function Sidebar({ onOpenRca }) {
               }}
             >
               Root Cause Analysis
+            </Button>
+          </Tooltip>
+        </div>
+      ) : null}
+
+      {/* Gap Analysis — sibling button below RCA, identical
+          colour/typography/size so the two read as a peer pair.
+          Wired up via AppLayout's `onOpenGapAnalysis` (mirrors the
+          RCA wiring). Hidden when the parent doesn't pass a handler
+          so existing call sites stay backwards-compatible. */}
+      {typeof onOpenGapAnalysis === "function" ? (
+        <div className="px-3 pt-2">
+          <Tooltip title="Generate a structured Gap Analysis and blameless post-mortem from a ticket number">
+            <Button
+              icon={<FileSearchOutlined />}
+              onClick={onOpenGapAnalysis}
+              block
+              className="rounded-lg h-9 font-medium text-sm"
+              style={{
+                backgroundColor: "var(--acadia-primary)",
+                borderColor: "var(--acadia-primary)",
+                color: "#fff"
+              }}
+            >
+              Gap Analysis
             </Button>
           </Tooltip>
         </div>

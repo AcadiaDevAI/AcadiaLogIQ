@@ -525,6 +525,21 @@ except Exception as _rca_exc:
         _rca_exc,
     )
 
+# Sprint — Gap Analysis flow (LogIQ Gap Analysis + Blameless Post-Mortem).
+# Independent fork of the RCA module; same parallel-LLM pattern but
+# different prompts, response shape, and (optionally) different
+# Bedrock model. Strict-auth gated. Mount in a try/except so a
+# downstream regression in the module never blocks startup.
+try:
+    from backend.tier1_copilot.gap_analysis.routes import router as _gap_analysis_router
+    app.include_router(_gap_analysis_router)
+    logger.info("[gap_analysis] router mounted at /gap-analysis")
+except Exception as _gap_exc:
+    logger.warning(
+        "[gap_analysis] failed to mount router (module disabled): %s",
+        _gap_exc,
+    )
+
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)

@@ -9,6 +9,8 @@ import AuthGate from "./components/AuthGate";
 import LandingRouter from "./components/LandingRouter";
 import RCAFlow from "./components/RCA/RCAFlow";
 import RCAEntryModal from "./components/RCA/RCAEntryModal";
+import GapAnalysisFlow from "./components/GapAnalysis/GapAnalysisFlow";
+import GapAnalysisEntryModal from "./components/GapAnalysis/GapAnalysisEntryModal";
 
 function BuildStamp() {
   return (
@@ -54,38 +56,46 @@ function AppLayout() {
     setRcaModalOpen(false);
   }, []);
 
-  // Sprint 13.32.2 — "Return to Stages" UX.
+  // ── Gap Analysis — independent state mirror of RCA's. ──────────
+  // Lives next to the RCA flags so the two features share AppLayout's
+  // "right pane takeover" semantics, but the flow components, payloads,
+  // and submission handlers are fully separate.
   //
-  // Always lands the engineer in the Tier-1 GUIDED TROUBLESHOOTING
-  // path (never the chat interface, never the Landing page when an
-  // alternative exists).
-  //
-  // Flow:
-  //   1. Read the last-active journey sid that ResolutionJourney
-  //      breadcrumbs into localStorage every time it mounts. When
-  //      present, that's the engineer's most recent live journey —
-  //      RESUME_JOURNEY restores it with Preliminary Tier 1 Checks
-  //      at the top.
-  //   2. When no breadcrumb exists (engineer never opened a journey
-  //      this session), still dispatch RESUME_JOURNEY with null so
-  //      `selectedMode` is cleared. AppLayout falls through to
-  //      LandingRouter, which defaults to screen="tier1" and shows
-  //      Tier1IntakeForm — the entry point of the guided path,
-  //      NOT the chat interface and NOT the marketing landing.
-  //   3. Finally flip rcaOpen=false so the RCA pane unmounts.
+  //   1. Sidebar "Gap Analysis" click → `gapModalOpen=true`.
+  //   2. Modal submit → `gapPayload` set + `gapOpen=true`. The right
+  //      pane flips to GapAnalysisFlow which auto-runs the request.
+  //   3. "Return" → `gapOpen=false` and (same RESUME_JOURNEY signal
+  //      RCA uses) so the engineer lands back on their journey.
+  const [gapModalOpen, setGapModalOpen] = useState(false);
+  const [gapOpen, setGapOpen] = useState(false);
+  const [gapPayload, setGapPayload] = useState(null);
+
+  const handleGapModalSubmit = useCallback((payload) => {
+    setGapPayload(payload);
+    setGapOpen(true);
+    setGapModalOpen(false);
+  }, []);
+
+  const handleReturnFromGapAnalysis = useCallback(() => {
+    // Mirror RCA's "Return to Stages" — drop the user on the
+    // landing intake form (Proactive / Reactive picker). Reset all
+    // mode state and clear any stale journey-resume signal so
+    // LandingRouter renders Tier1IntakeForm fresh rather than
+    // auto-mounting a previous Tier1Workspace.
+    dispatch({ type: "RESET_MODE_STATE" });
+    dispatch({ type: "CLEAR_JOURNEY_RESUME" });
+    setGapOpen(false);
+  }, [dispatch]);
+
+  // "Return to Stages" UX — land the engineer on the Tier-1 intake
+  // form (the Proactive / Reactive picker), regardless of whether
+  // they were in an active journey before opening RCA. Clearing
+  // selectedMode causes AppLayout's `showLanding` gate to flip true;
+  // clearing journeyResumeSessionId prevents LandingRouter's resume
+  // effect from synthesizing a Tier1Workspace mount.
   const handleReturnFromRca = useCallback(() => {
-    let lastJourneySid = null;
-    try {
-      lastJourneySid = localStorage.getItem("tier1_last_active_journey_session");
-    } catch {
-      /* privacy-mode / quota — fall through */
-    }
-
-    dispatch({
-      type: "RESUME_JOURNEY",
-      payload: { journeySessionId: lastJourneySid || null },
-    });
-
+    dispatch({ type: "RESET_MODE_STATE" });
+    dispatch({ type: "CLEAR_JOURNEY_RESUME" });
     setRcaOpen(false);
   }, [dispatch]);
 
@@ -97,14 +107,20 @@ function AppLayout() {
     <div className="flex h-screen overflow-hidden t-bg-primary">
       {/* Sidebar - desktop */}
       <div className="hidden md:flex">
-        <Sidebar onOpenRca={() => setRcaModalOpen(true)} />
+        <Sidebar
+          onOpenRca={() => setRcaModalOpen(true)}
+          onOpenGapAnalysis={() => setGapModalOpen(true)}
+        />
       </div>
 
       {/* Sidebar - mobile overlay */}
       {state.sidebarOpen && (
         <div className="md:hidden fixed inset-0 z-50 flex">
           <div className="flex-shrink-0">
-            <Sidebar onOpenRca={() => setRcaModalOpen(true)} />
+            <Sidebar
+              onOpenRca={() => setRcaModalOpen(true)}
+              onOpenGapAnalysis={() => setGapModalOpen(true)}
+            />
           </div>
           <div
             className="flex-1 bg-black/40"
@@ -122,6 +138,16 @@ function AppLayout() {
         onSubmit={handleRcaModalSubmit}
       />
 
+      {/* Gap Analysis entry modal — independent of the RCA modal.
+          Same flow shape: collect the incident number, hand the
+          payload to AppLayout, AppLayout flips the right pane to
+          GapAnalysisFlow. */}
+      <GapAnalysisEntryModal
+        open={gapModalOpen}
+        onClose={() => setGapModalOpen(false)}
+        onSubmit={handleGapModalSubmit}
+      />
+
       {/* Main area */}
       <div className="flex-1 flex flex-col min-w-0">
         <MobileHeader />
@@ -130,6 +156,15 @@ function AppLayout() {
             initialPayload={rcaPayload}
             onReturnToStages={handleReturnFromRca}
           />
+        ) : gapOpen ? (
+          /* Gap Analysis right-pane takeover — independent of RCA.
+             Only one of the two flows is ever active at a time
+             because their setters are wired to mutually exclusive
+             buttons; the strict if/else preserves that invariant. */
+          <GapAnalysisFlow
+            initialPayload={gapPayload}
+            onReturnToStages={handleReturnFromGapAnalysis}
+          />
         ) : showLanding ? (
           <LandingRouter />
         ) : (
@@ -137,7 +172,9 @@ function AppLayout() {
         )}
       </div>
 
-      <BuildStamp />
+      {/* BuildStamp watermark removed at user request — the component
+          definition above is left in place for diagnostic reuse but
+          is no longer rendered on the app shell. */}
     </div>
   );
 }
