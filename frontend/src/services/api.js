@@ -147,6 +147,94 @@ export const uploadFile = (file, fileType, onProgress, docKind) => {
 };
 export const getUploadStatus = (jobId) => api.get(`/upload_status/${jobId}`, { timeout: 30000 });
 
+// ─────────────────────────────────────────────────────────────
+// Phase 1 — S3 direct upload helpers (presigned PUT).
+//
+// Three-step flow (browser-friendly):
+//   1) presignUpload({ filename, content_type, size, doc_kind, file_type })
+//        → backend returns { upload_url, key, job_id, file_id, required_headers }
+//   2) putToS3(upload_url, file, content_type, onProgress)
+//        → browser PUTs bytes DIRECTLY to S3 (bypasses FastAPI)
+//   3) finalizeUpload({ job_id, key })
+//        → backend HEADs the object and schedules ingestion
+//
+// uploadFileV2 wraps all three in a single async call with the SAME
+// signature as the legacy uploadFile, so it's a drop-in replacement.
+// ─────────────────────────────────────────────────────────────
+
+export const presignUpload = ({ filename, content_type, size_bytes, doc_kind, file_type }) =>
+  api.post(
+    "/upload/presign",
+    {
+      filename,
+      content_type: content_type || "application/octet-stream",
+      size_bytes: typeof size_bytes === "number" ? size_bytes : null,
+      doc_kind: doc_kind || "ticket",
+      file_type: file_type || "kb",
+    },
+    { timeout: 30000 },
+  );
+
+export const finalizeUpload = ({ job_id, key, sha256 }) =>
+  api.post("/upload/finalize", { job_id, key, sha256 }, { timeout: 60000 });
+
+// Direct browser → S3 PUT. We use XHR (not fetch) because fetch still
+// does not expose upload-progress events. The Content-Type header MUST
+// match what the backend signed into the presigned URL or S3 rejects
+// the request as SignatureDoesNotMatch.
+export const putToS3 = (uploadUrl, file, contentType, onProgress) =>
+  new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", uploadUrl, true);
+    xhr.setRequestHeader("Content-Type", contentType || "application/octet-stream");
+    xhr.upload.onprogress = (e) => {
+      if (onProgress && e.lengthComputable) {
+        onProgress(Math.round((e.loaded / e.total) * 100));
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) {
+        const etag = (xhr.getResponseHeader("ETag") || "").replace(/"/g, "");
+        resolve({ status: xhr.status, etag });
+      } else {
+        reject(new Error(`S3 PUT failed: ${xhr.status} ${xhr.statusText} ${xhr.responseText || ""}`));
+      }
+    };
+    xhr.onerror = () => reject(new Error("S3 PUT network error"));
+    xhr.onabort = () => reject(new Error("S3 PUT aborted"));
+    xhr.send(file);
+  });
+
+// Drop-in replacement for uploadFile() — same signature, same return
+// shape ({ data: { job_id, file_id, ... } }) so call sites can swap
+// behind a single boolean flag.
+export const uploadFileV2 = async (file, fileType, onProgress, docKind) => {
+  const presign = await presignUpload({
+    filename: file.name,
+    content_type: file.type || "application/octet-stream",
+    size_bytes: file.size,
+    doc_kind: docKind,
+    file_type: fileType,
+  });
+  const { upload_url, key, job_id, file_id, storage_uri } = presign.data;
+
+  await putToS3(upload_url, file, file.type || "application/octet-stream", onProgress);
+  // Snap the bar to 100% — finalize is server-side and finishes in <1s.
+  if (onProgress) onProgress(100);
+
+  const fin = await finalizeUpload({ job_id, key });
+  return {
+    data: {
+      job_id,
+      file_id,
+      storage_uri,
+      message: "Uploaded to S3. Processing started.",
+      file_hash: "",            // legacy compatibility shape
+      ...fin.data,
+    },
+  };
+};
+
 export const listFiles = () => api.get("/files");
 export const deleteFile = (fileId) => api.delete(`/files/${fileId}`);
 

@@ -345,7 +345,7 @@ export default function Sidebar({ onOpenRca }) {
                       )}
                       <div className="min-w-0">
                         <div className="flex items-center gap-1.5">
-                          <p className="text-xs t-text truncate max-w-[140px]" style={isInvalid ? { color: "#ef4444" } : undefined}>{f.name}</p>
+                          <p className="text-xs t-text truncate max-w-[140px]" style={isInvalid ? { color: "#ef4444" } : undefined}>{f.name || `(unnamed · ${(f.id || "").slice(0, 8)})`}</p>
                           <DocKindBadge kind={f.doc_kind} />
                         </div>
                         <p className="text-[10px] t-text-muted">

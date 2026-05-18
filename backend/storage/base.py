@@ -31,3 +31,18 @@ class StorageProvider(ABC):
         S3 provider returns None because the file is remote.
         """
         raise NotImplementedError
+
+    def read_bytes(self, storage_uri: str) -> bytes:
+        """
+        Read raw bytes for a previously stored object.
+
+        Default implementation resolves to a local Path; remote backends
+        (S3) override this. Subclasses MUST override when the object is
+        not addressable as a local file.
+        """
+        path = self.resolve_local_path(storage_uri)
+        if path is None or not path.exists():
+            raise FileNotFoundError(
+                f"Cannot read bytes — storage URI not resolvable locally: {storage_uri}"
+            )
+        return path.read_bytes()

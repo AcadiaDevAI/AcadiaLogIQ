@@ -8,7 +8,14 @@ import {
   CloseCircleOutlined,
 } from "@ant-design/icons";
 import { useChat } from "../hooks/ChatContext";
-import { uploadFile, getUploadStatus } from "../services/api";
+import { uploadFile, uploadFileV2, getUploadStatus } from "../services/api";
+
+// Phase 1 — direct-to-S3 upload toggle. When true, the panel calls
+// uploadFileV2 (presign → PUT to S3 → finalize). When false (default),
+// it keeps the legacy multipart POST /upload path. Flip by setting
+// REACT_APP_UPLOAD_VIA_S3=true in frontend/.env and rebuilding.
+const USE_S3_UPLOAD =
+  (process.env.REACT_APP_UPLOAD_VIA_S3 || "false").toLowerCase() === "true";
 
 const { Dragger } = Upload;
 
@@ -53,7 +60,8 @@ export default function UploadPanel({ onUploadComplete }) {
         setUploadProgress((p) => ({ ...p, [fileKey]: 0 }));
         setJobStatuses((s) => ({ ...s, [fileKey]: "uploading" }));
 
-        const res = await uploadFile(
+        const _uploader = USE_S3_UPLOAD ? uploadFileV2 : uploadFile;
+        const res = await _uploader(
           file,
           "kb",
           (pct) => {

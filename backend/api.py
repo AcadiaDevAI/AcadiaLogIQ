@@ -260,6 +260,21 @@ def _might_flip_aggregation(original: str, rewritten: str, intent) -> bool:
 
 storage = LocalStorageProvider()
 
+# Phase 1 — S3 direct-upload pipeline (presigned PUT). Initialised once at
+# module load. Returns None when STORAGE_TYPE != "s3" or no bucket is
+# configured — the /upload/presign + /upload/finalize routes return 503
+# in that case. The legacy /upload (multipart) route is unaffected.
+from backend.storage import get_s3_upload_provider
+
+s3_upload_provider = get_s3_upload_provider()
+if s3_upload_provider is not None:
+    logger.info(
+        "[upload] S3 direct-upload pipeline enabled bucket=%s prefix=%s",
+        s3_upload_provider.bucket_name, s3_upload_provider.prefix,
+    )
+else:
+    logger.info("[upload] S3 direct-upload pipeline DISABLED (STORAGE_TYPE != 's3' or bucket not set)")
+
 
 class JobInfo(TypedDict, total=False):
     job_id: str
@@ -1306,13 +1321,79 @@ async def index_file_job(
     update_ingestion_job(job_id, status="running")
     t_total_start = _time.perf_counter()
 
+    # Visibility — confirm the filename we'll write into documents.name
+    # actually arrived non-empty. Aligns with the [upload.finalize]
+    # scheduling log so you can grep one job_id across the pipeline.
+    logger.info(
+        "[index_file_job] start job=%s file_id=%s filename=%r file_type=%s "
+        "size_mb=%.2f doc_kind=%s storage_uri=%s",
+        job_id, file_id, filename, file_type, file_size_mb, doc_kind, storage_uri,
+    )
+
+    # When the upload came in via the S3 presigned-PUT pipeline,
+    # ``storage_uri`` is an ``s3://`` URI rather than a local path. The
+    # parser still needs a Path on disk, so we download the object to a
+    # NamedTemporaryFile here and clean it up in the outer finally
+    # block below. The legacy ``local://`` path is byte-identical.
+    _s3_temp_file: Optional[Path] = None
+
     try:
-        local_path = storage.resolve_local_path(storage_uri)
+        if storage_uri.startswith("s3://"):
+            if s3_upload_provider is None:
+                raise RuntimeError(
+                    "Got s3:// storage_uri but S3 upload pipeline is "
+                    f"not configured: {storage_uri}"
+                )
+            import tempfile as _tempfile
+            logger.info(
+                "[upload.s3] downloading object for ingestion uri=%s",
+                storage_uri,
+            )
+            try:
+                s3_bytes = await asyncio.to_thread(
+                    s3_upload_provider.read_bytes, storage_uri,
+                )
+            except Exception as _s3_exc:
+                # Spell out the most common cause — missing s3:GetObject
+                # on the backend's IAM principal. Without this line the
+                # boto3 ClientError detail gets swallowed in the generic
+                # "Indexing failed" log below and operators stare at the
+                # error column wondering why.
+                raise RuntimeError(
+                    f"S3 GetObject failed for {storage_uri}: {_s3_exc}. "
+                    f"Verify the backend IAM identity has s3:GetObject "
+                    f"on arn:aws:s3:::{s3_upload_provider.bucket_name}/*"
+                ) from _s3_exc
+            suffix = Path(filename).suffix or ".bin"
+            tf = _tempfile.NamedTemporaryFile(delete=False, suffix=suffix)
+            try:
+                tf.write(s3_bytes)
+            finally:
+                tf.close()
+            local_path = Path(tf.name)
+            _s3_temp_file = local_path
+            logger.info(
+                "[upload.s3] downloaded %d bytes uri=%s temp=%s",
+                len(s3_bytes), storage_uri, local_path,
+            )
+        else:
+            local_path = storage.resolve_local_path(storage_uri)
         if not local_path or not local_path.exists():
             raise RuntimeError(f"Stored file path is not readable: {storage_uri}")
 
         job = get_ingestion_job(job_id)
-        file_hash = job["file_hash"] if job else ""
+        # S3 path: file_hash isn't computed at presign time (we don't
+        # have the bytes); fall back to S3 ETag from the job row when
+        # the legacy file_hash column is empty so duplicate detection
+        # still has something to key off. The ETag is only equal to the
+        # MD5 for single-part uploads — sufficient for files <100MB.
+        file_hash = (job["file_hash"] if job else "") or ""
+        if not file_hash and storage_uri.startswith("s3://") and _s3_temp_file is not None:
+            file_hash = calculate_file_hash_bytes(s3_bytes)
+            logger.info(
+                "[upload.s3] computed local file_hash for job=%s hash=%s",
+                job_id, file_hash[:12],
+            )
 
         # ── Phase 1: Parse + contextual enrichment (Haiku LLM calls) ──
         t_parse_start = _time.perf_counter()
@@ -1542,6 +1623,17 @@ async def index_file_job(
             error=str(exc),
             completed_at=datetime.now(timezone.utc),
         )
+    finally:
+        # Clean up the temp file we downloaded from S3 (if any). Local
+        # path uploads have no temp file and skip this branch entirely.
+        if _s3_temp_file is not None:
+            try:
+                _s3_temp_file.unlink(missing_ok=True)
+            except Exception as _cleanup_exc:
+                logger.warning(
+                    "[upload.s3] temp file cleanup failed path=%s err=%s",
+                    _s3_temp_file, _cleanup_exc,
+                )
 
 
 @app.middleware("http")
@@ -1979,6 +2071,255 @@ async def upload(
         message="Uploaded. Processing started.",
         file_hash=file_hash,
     )
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase 1 — Presigned-PUT S3 upload pipeline
+#
+# Two endpoints replace the multipart POST /upload above when the
+# operator sets STORAGE_TYPE=s3 + S3_UPLOAD_BUCKET in the backend env
+# AND the frontend toggles REACT_APP_UPLOAD_VIA_S3=true. Until both
+# are flipped, this is dead code from the frontend's perspective —
+# the legacy /upload route stays the production hot path.
+#
+# Flow:
+#   1) Browser POSTs /upload/presign  → gets {upload_url, key, job_id}
+#   2) Browser PUTs file bytes directly to upload_url (no API hop)
+#   3) Browser POSTs /upload/finalize → API HEADs S3 + schedules ingest
+#
+# Why two endpoints?  The API never touches the file bytes — bandwidth
+# stays on the S3 path, and FastAPI stays horizontally scalable.
+# ─────────────────────────────────────────────────────────────
+
+from backend.uploads.schemas import (
+    FinalizeUploadRequest,
+    FinalizeUploadResponse,
+    PresignUploadRequest,
+    PresignUploadResponse,
+)
+from backend.uploads.service import (
+    finalize_upload as _svc_finalize_upload,
+    issue_presigned_upload as _svc_issue_presigned_upload,
+)
+
+
+def _require_s3_pipeline() -> Any:
+    """Return the configured S3 provider or 503 with an actionable error.
+
+    Centralised so both routes give the same response when the operator
+    forgot to set STORAGE_TYPE / S3_UPLOAD_BUCKET in env.
+    """
+    if s3_upload_provider is None:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "S3 upload pipeline not configured. Set STORAGE_TYPE=s3 "
+                "and S3_UPLOAD_BUCKET in backend/.env, then restart."
+            ),
+        )
+    return s3_upload_provider
+
+
+@app.post("/upload/presign", response_model=PresignUploadResponse)
+@limiter.limit("100/minute")
+async def upload_presign(
+    request: Request,
+    payload: PresignUploadRequest,
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    """Issue a one-shot presigned PUT URL for a single file.
+
+    The returned ``upload_url`` MUST be PUT to with the exact same
+    ``Content-Type`` header listed in ``required_headers`` — otherwise
+    S3 rejects the signature.
+    """
+    s3 = _require_s3_pipeline()
+    return _svc_issue_presigned_upload(
+        req=payload,
+        user_id=_normalize_owner_id(user_id),
+        s3=s3,
+    )
+
+
+@app.post("/upload/finalize", response_model=FinalizeUploadResponse)
+@limiter.limit("100/minute")
+async def upload_finalize(
+    request: Request,
+    payload: FinalizeUploadRequest,
+    background_tasks: BackgroundTasks,
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    """Verify the S3 object exists and schedule background ingestion.
+
+    Idempotent on the API side via job-owner check; the underlying
+    ingestion ``index_file_job`` is itself safe to re-enter (it
+    deduplicates by file hash + version).
+    """
+    s3 = _require_s3_pipeline()
+    response, job = _svc_finalize_upload(
+        req=payload,
+        user_id=_normalize_owner_id(user_id),
+        s3=s3,
+    )
+
+    # ── Filename resolution (belt-and-suspenders) ──
+    # The job row's file_name was set at presign time, but defend
+    # against the (rare) case where the column came back empty by
+    # reconstructing the filename from the trailing segment of the
+    # S3 key. Without this, documents.name lands as '' and the
+    # sidebar shows a size-only entry.
+    resolved_filename = (job.get("file_name") or "").strip()
+    if not resolved_filename:
+        # The S3 key is "{prefix}/{tenant_slug}/{filename}" — last
+        # path segment is always the user-supplied filename.
+        resolved_filename = (payload.key or "").rsplit("/", 1)[-1] or "uploaded_file"
+        logger.warning(
+            "[upload.finalize] job=%s had empty file_name in DB; "
+            "reconstructed from S3 key tail: %s",
+            payload.job_id, resolved_filename,
+        )
+    logger.info(
+        "[upload.finalize] scheduling ingest job=%s filename=%r uri=%s",
+        payload.job_id, resolved_filename, response.storage_uri,
+    )
+
+    # The legacy /upload above uses BackgroundTasks for ingestion —
+    # we mirror that here so the contract (job moves to "running" then
+    # "done"/"error", visible via /upload_status/{job_id}) is identical.
+    background_tasks.add_task(
+        index_file_job,
+        payload.job_id,                     # job_id
+        response.storage_uri,                # s3://bucket/key
+        resolved_filename,                   # filename — never empty
+        job.get("file_type") or "kb",
+        response.file_id,
+        _normalize_owner_id(user_id),
+        response.size_bytes / (1024 * 1024),  # file_size_mb
+        # doc_kind isn't persisted on the ingestion_jobs row today;
+        # default to 'ticket' to match legacy /upload's coerce-on-unknown
+        # behavior. Phase 2 will plumb the value through when we add a
+        # doc_kind column to ingestion_jobs.
+        "ticket",
+    )
+
+    return response
+
+
+@app.get("/upload/diagnose/{job_id}")
+async def upload_diagnose(
+    job_id: str,
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    """End-to-end pipeline snapshot for a given upload job.
+
+    Returns ingestion-job state, whether the S3 object is present, and
+    whether a documents row was written. Saves you from cross-checking
+    three places by hand when an upload "succeeds in S3" but doesn't
+    appear in the sidebar.
+    """
+    job = get_ingestion_job(job_id)
+    if not job:
+        raise HTTPException(404, "job_not_found")
+
+    owner_id = _normalize_owner_id(user_id)
+    if str(job.get("owner_id") or "") != owner_id:
+        raise HTTPException(404, "job_not_found")
+
+    file_id = job.get("file_id")
+    file_name = job.get("file_name") or ""
+
+    # ── S3 presence check (only when an S3 upload is configured) ──
+    s3_state: Dict[str, Any] = {"checked": False}
+    if s3_upload_provider is not None and file_name:
+        # Reconstruct the expected key from job metadata. This is a
+        # best-effort probe — operators who hand-deleted the object
+        # will see "missing" here, which is exactly the diagnosis they
+        # need.
+        from backend.uploads.keys import build_upload_key, derive_tenant_slug
+
+        try:
+            slug = derive_tenant_slug(owner_id)
+            key = build_upload_key(
+                prefix=settings.S3_KEY_PREFIX,
+                tenant_slug=slug,
+                filename=file_name,
+            )
+            head = s3_upload_provider.head_object(key)
+            s3_state = {
+                "checked": True,
+                "present": True,
+                "bucket": s3_upload_provider.bucket_name,
+                "key": key,
+                "size_bytes": head["content_length"],
+                "etag": head["etag"],
+                "content_type": head.get("content_type", ""),
+            }
+        except FileNotFoundError:
+            s3_state = {
+                "checked": True,
+                "present": False,
+                "bucket": s3_upload_provider.bucket_name,
+                "key": key,
+            }
+        except Exception as exc:
+            s3_state = {
+                "checked": True,
+                "present": None,
+                "error": str(exc),
+            }
+
+    # ── Documents row check ──────────────────────────────────────
+    doc_state: Dict[str, Any] = {"present": False}
+    if file_id:
+        try:
+            from backend.db.connection import SessionLocal
+            from sqlalchemy import text as _sql_text
+            with SessionLocal() as db:
+                row = db.execute(
+                    _sql_text(
+                        """
+                        SELECT id::text AS id, name, status, ingestion_status,
+                               ingestion_error
+                        FROM documents
+                        WHERE id = :id
+                        """
+                    ),
+                    {"id": file_id},
+                ).mappings().first()
+            if row:
+                doc_state = {
+                    "present": True,
+                    **dict(row),
+                }
+        except Exception as exc:
+            doc_state = {"present": None, "error": str(exc)}
+
+    return {
+        "job": dict(job),
+        "s3": s3_state,
+        "documents_row": doc_state,
+        "next_hint": _diagnose_hint(job, s3_state, doc_state),
+    }
+
+
+def _diagnose_hint(job: dict, s3_state: dict, doc_state: dict) -> str:
+    """One-line plain-English summary of where the file is stuck."""
+    status = (job.get("status") or "").lower()
+    if status == "pending_upload" and not s3_state.get("present"):
+        return "Browser never finished the PUT to S3 — call /upload/finalize after the PUT completes."
+    if status == "pending_upload" and s3_state.get("present"):
+        return "S3 has the object but /upload/finalize was never called — frontend bug."
+    if status == "queued" and not doc_state.get("present"):
+        return "Ingestion task queued but not yet running — wait or check backend logs for BackgroundTask exceptions."
+    if status == "running":
+        return "Ingestion in progress — re-check in 30-60s."
+    if status == "error":
+        return f"Ingestion failed: {job.get('error') or '(no error detail)'}"
+    if status == "done" and not doc_state.get("present"):
+        return "Ingestion completed but no documents row — likely exact_duplicate of an earlier upload; check duplicate detection."
+    if status == "done" and doc_state.get("present"):
+        return "All good — file should appear in the sidebar."
+    return f"Unhandled state: status={status} s3_present={s3_state.get('present')} doc_present={doc_state.get('present')}"
 
 
 @app.get("/upload_status/{job_id}", response_model=JobStatus)

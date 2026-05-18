@@ -37,6 +37,24 @@ class Settings(BaseSettings):
     ]
 
     # ----------------------------------------------------------------
+    # Upload storage backend selector (Phase 1 — S3 direct upload).
+    # ----------------------------------------------------------------
+    # STORAGE_TYPE="local"  → legacy: files saved under UPLOAD_DIR
+    # STORAGE_TYPE="s3"     → new path: browser uploads directly to
+    #                         S3_UPLOAD_BUCKET via presigned PUT URLs
+    #                         issued by /upload/presign; ingestion is
+    #                         confirmed by /upload/finalize.
+    #
+    # The legacy /upload (multipart) route is unaffected by this knob;
+    # it always uses LocalStorageProvider. Switching this to "s3" only
+    # enables the new endpoints — clients choose which path to use.
+    STORAGE_TYPE: str = "local"
+    S3_UPLOAD_BUCKET: str = ""
+    S3_KEY_PREFIX: str = "tenants"
+    S3_PRESIGN_PUT_EXPIRY_SECONDS: int = 300   # one-shot, 5 minutes
+    S3_PRESIGN_GET_EXPIRY_SECONDS: int = 900   # reserved for Phase 2 view-original
+
+    # ----------------------------------------------------------------
     # AWS / Bedrock — model IDs
     # ----------------------------------------------------------------
 
