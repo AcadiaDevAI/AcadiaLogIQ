@@ -883,7 +883,21 @@ class Settings(BaseSettings):
     BULK_INGEST_MAX_FILES_PER_RUN: int = 10000
 
     model_config = SettingsConfigDict(
-        env_file=str(BASE_DIR / ".env"),
+        # Production runtime config now comes from AWS Secrets Manager
+        # — see backend/core/secrets.py. The bootstrap call in
+        # backend/api.py populates os.environ before this Settings
+        # instance is built, so pydantic reads the same values without
+        # needing to touch the .env file directly.
+        #
+        # The old behavior (read keys from backend/.env) is kept as a
+        # documented fallback path: bootstrap_environment() invokes
+        # python-dotenv on backend/.env whenever AWS is unreachable
+        # or AWS_SECRETS_DISABLED=true is set. So .env still works on
+        # a laptop without AWS access — we just don't let pydantic
+        # double-load it (which would override an operator's exported
+        # env vars on the command line).
+        #
+        # env_file=str(BASE_DIR / ".env"),   # ← legacy; loaded via secrets.bootstrap fallback now
         env_file_encoding="utf-8",
         case_sensitive=True,
         extra="ignore",

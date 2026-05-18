@@ -176,18 +176,11 @@ def get_or_compute_consolidated_ledger(
 
 
 # Sprint 10.6 §4 — lazy wrapper around backend.api.auth_dependency.
-# Module-level `from backend.api import auth_dependency` would
-# circular-import: api.py mounts this router at line 443, which fires
-# BEFORE auth_dependency is defined further down at line 520. The
-# wrapper defers the import to request time. FastAPI injects `request`
-# and `x_api_key` into the wrapper signature directly; we forward both
-# to the lazy-imported real function.
-async def _lazy_auth_dependency(
-    request: Request,
-    x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-) -> Optional[str]:
-    from backend.api import auth_dependency
-    return await auth_dependency(request, x_api_key)
+# The shared implementation lives in backend/_lazy_auth.py so all
+# sub-routers (tier1, journey, intake) use the same code path. The
+# local alias is retained for backward compatibility with tests that
+# import `_lazy_auth_dependency` from this module.
+from backend._lazy_auth import lazy_auth_dependency as _lazy_auth_dependency
 
 
 # ─────────────────────────────────────────────────────────────
@@ -196,7 +189,10 @@ async def _lazy_auth_dependency(
 # Stage 0 returns Best-Ticket Distillation (was ConfidenceLead).
 # ─────────────────────────────────────────────────────────────
 @router.get("/{session_id}/initial", response_model=JourneyInitial)
-async def get_initial(session_id: str) -> JourneyInitial:
+async def get_initial(
+    session_id: str,
+    user_id: Optional[str] = Depends(_lazy_auth_dependency),
+) -> JourneyInitial:
     """Stage 0 (Best-Ticket Distillation) + merged PivotInsights —
     eager, always visible."""
 
@@ -257,7 +253,10 @@ async def get_initial(session_id: str) -> JourneyInitial:
 # for callers that want just the Stage 1 panel content.
 # ─────────────────────────────────────────────────────────────
 @router.get("/{session_id}/pivot-insights", response_model=PivotInsights)
-async def get_pivot_insights(session_id: str) -> PivotInsights:
+async def get_pivot_insights(
+    session_id: str,
+    user_id: Optional[str] = Depends(_lazy_auth_dependency),
+) -> PivotInsights:
     cohort = _load_or_cache(session_id)
     threshold = float(getattr(settings, "TIER1_JOURNEY_STAGE0_DOMINANT_THRESHOLD", 0.4))
     return PivotInsights(
@@ -270,7 +269,10 @@ async def get_pivot_insights(session_id: str) -> PivotInsights:
 # /stage-2 — Historical Matches
 # ─────────────────────────────────────────────────────────────
 @router.get("/{session_id}/stage-2", response_model=Stage2HistoricalMatches)
-async def get_stage_2(session_id: str) -> Stage2HistoricalMatches:
+async def get_stage_2(
+    session_id: str,
+    user_id: Optional[str] = Depends(_lazy_auth_dependency),
+) -> Stage2HistoricalMatches:
     cohort = _load_or_cache(session_id)
     return build_stage2(cohort)
 
@@ -279,7 +281,10 @@ async def get_stage_2(session_id: str) -> Stage2HistoricalMatches:
 # /stage-3 — Troubleshooting Approach
 # ─────────────────────────────────────────────────────────────
 @router.get("/{session_id}/stage-3", response_model=Stage3TroubleshootingApproach)
-async def get_stage_3(session_id: str) -> Stage3TroubleshootingApproach:
+async def get_stage_3(
+    session_id: str,
+    user_id: Optional[str] = Depends(_lazy_auth_dependency),
+) -> Stage3TroubleshootingApproach:
     cohort = _load_or_cache(session_id)
     # Sprint 13.24 PERF — share the consolidated-ledger LLM call with
     # /escalation-handoff-note via the session-keyed cache. First
@@ -299,7 +304,10 @@ async def get_stage_3(session_id: str) -> Stage3TroubleshootingApproach:
 # /stage-4 — Search KB / SOP handoff payload
 # ─────────────────────────────────────────────────────────────
 @router.get("/{session_id}/stage-4", response_model=Stage4SearchKB)
-async def get_stage_4(session_id: str) -> Stage4SearchKB:
+async def get_stage_4(
+    session_id: str,
+    user_id: Optional[str] = Depends(_lazy_auth_dependency),
+) -> Stage4SearchKB:
     """Pre-filled chat message + allowed_doc_kinds. The frontend reads
     the alert payload from the engineer's intake form; this endpoint
     just supplies the dominant_root_cause line from Stage 0 so the
@@ -345,7 +353,10 @@ async def get_stage_4(session_id: str) -> Stage4SearchKB:
 # /stage-5 — Escalation package (reuses Sprint 7 generator)
 # ─────────────────────────────────────────────────────────────
 @router.get("/{session_id}/stage-5")
-async def get_stage_5(session_id: str):
+async def get_stage_5(
+    session_id: str,
+    user_id: Optional[str] = Depends(_lazy_auth_dependency),
+):
     """Returns the existing Sprint 7 `Tier1EscalationPackage` shape with
     the journey-traversal log appended to `what_was_tried`."""
     cohort = _load_or_cache(session_id)
@@ -394,7 +405,10 @@ async def get_stage_5(session_id: str):
     "/{session_id}/escalation-routing",
     response_model=EscalationRouting,
 )
-async def get_escalation_routing(session_id: str) -> EscalationRouting:
+async def get_escalation_routing(
+    session_id: str,
+    user_id: Optional[str] = Depends(_lazy_auth_dependency),
+) -> EscalationRouting:
     """Aggregated Resolution_Groups + Team_Path + Vendor_OEM_Engagement
     across the cohort. Returned as a separate endpoint so the existing
     /stage-5 (Sprint 7 Tier1EscalationPackage) wire shape stays
@@ -425,6 +439,7 @@ async def get_escalation_routing(session_id: str) -> EscalationRouting:
 async def post_escalation_handoff_note(
     session_id: str,
     req: Optional[EscalationHandoffNoteRequest] = None,
+    user_id: Optional[str] = Depends(_lazy_auth_dependency),
 ) -> EscalationHandoffNoteResponse:
 
     # Sprint 13.30 — Regenerate is a hard reload. Read `force` BEFORE
@@ -720,6 +735,7 @@ async def search_kb_handoff(
 async def post_event(
     session_id: str,
     req: JourneyEventRequest,
+    user_id: Optional[str] = Depends(_lazy_auth_dependency),
 ) -> JourneyEventResponse:
     ok = record_event(
         session_id=session_id,

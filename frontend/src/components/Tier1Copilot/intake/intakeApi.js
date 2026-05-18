@@ -1,18 +1,12 @@
 // Sprint 9 — Universal Intake API client.
-// Reuses the same axios pattern as tier1Api.js so Clerk + X-API-Key
-// headers propagate identically.
+//
+// Uses the SHARED axios instance from services/api.js so the Clerk
+// Bearer-token interceptor attaches `Authorization: Bearer ...` on
+// every request. Earlier this file constructed its own axios client
+// (no interceptors), which worked while the backend tolerated
+// anonymous requests and broke when auth_dependency became strict.
 
-import axios from "axios";
-
-//const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:8000";
-const API_BASE = window.location.origin.replace(":8501", ":8000");
-const API_KEY = process.env.REACT_APP_API_KEY || "";
-
-const client = axios.create({
-  baseURL: API_BASE,
-  timeout: 60000,
-  headers: { ...(API_KEY ? { "X-API-Key": API_KEY } : {}) },
-});
+import { api as client } from "../../../services/api";
 
 export async function extractIntake(payload) {
   // payload = { source, raw_text, session_id?, context_hints? }

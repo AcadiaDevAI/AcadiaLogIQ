@@ -11,8 +11,9 @@ import logging
 import uuid
 from typing import Any, Callable, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from backend._lazy_auth import lazy_auth_dependency
 from backend.config import settings
 from backend.tier1_copilot.alias_dictionary import get_alias_dictionary
 from backend.tier1_copilot.cache import (
@@ -78,7 +79,10 @@ router = APIRouter(prefix="/tier1", tags=["tier1-copilot"])
 # /tier1/analyze
 # ─────────────────────────────────────────────────────────────
 @router.post("/analyze", response_model=Tier1AnalyzeResponse)
-async def analyze(req: Tier1AnalyzeRequest) -> Tier1AnalyzeResponse:
+async def analyze(
+    req: Tier1AnalyzeRequest,
+    user_id: Optional[str] = Depends(lazy_auth_dependency),
+) -> Tier1AnalyzeResponse:
     alias_dict = get_alias_dictionary()
     normalized = normalize_alert(req, alias_dict)
     signature_hash = normalized["signature_hash"]
@@ -265,7 +269,10 @@ async def analyze(req: Tier1AnalyzeRequest) -> Tier1AnalyzeResponse:
 # /tier1/feedback
 # ─────────────────────────────────────────────────────────────
 @router.post("/feedback", response_model=Tier1FeedbackResponse)
-async def feedback(req: Tier1FeedbackRequest) -> Tier1FeedbackResponse:
+async def feedback(
+    req: Tier1FeedbackRequest,
+    user_id: Optional[str] = Depends(lazy_auth_dependency),
+) -> Tier1FeedbackResponse:
     ok = record_feedback(
         response_id=req.response_id,
         session_id=req.session_id,
@@ -314,6 +321,7 @@ async def health() -> Tier1HealthResponse:
 @router.post("/session", response_model=Tier1SessionStatus)
 async def create_session_endpoint(
     req: Tier1SessionCreateRequest,
+    user_id: Optional[str] = Depends(lazy_auth_dependency),
 ) -> Tier1SessionStatus:
     """Explicit session creation — /analyze also creates implicitly.
     Exposed so a client that pre-loads a saved alert can spin up a
@@ -338,7 +346,10 @@ async def create_session_endpoint(
 
 
 @router.get("/session/{session_id}/status", response_model=Tier1SessionStatus)
-async def session_status(session_id: str) -> Tier1SessionStatus:
+async def session_status(
+    session_id: str,
+    user_id: Optional[str] = Depends(lazy_auth_dependency),
+) -> Tier1SessionStatus:
     sess = get_session(session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail="session_not_found")
@@ -366,7 +377,9 @@ async def session_status(session_id: str) -> Tier1SessionStatus:
 
 @router.post("/session/{session_id}/match-index", response_model=Tier1SessionStatus)
 async def swap_match_index(
-    session_id: str, req: Tier1MatchIndexRequest,
+    session_id: str,
+    req: Tier1MatchIndexRequest,
+    user_id: Optional[str] = Depends(lazy_auth_dependency),
 ) -> Tier1SessionStatus:
     sess = get_session(session_id)
     if sess is None:
@@ -398,7 +411,9 @@ async def swap_match_index(
     "/session/{session_id}/action", response_model=Tier1ActionLogResponse,
 )
 async def log_action(
-    session_id: str, req: Tier1ActionLogRequest,
+    session_id: str,
+    req: Tier1ActionLogRequest,
+    user_id: Optional[str] = Depends(lazy_auth_dependency),
 ) -> Tier1ActionLogResponse:
     entry: dict = {"step": req.step, "result": req.result}
     if req.note:
@@ -420,6 +435,7 @@ async def log_action(
 )
 async def deeper_diagnostics(
     req: Tier1DeeperDiagnosticsRequest,
+    user_id: Optional[str] = Depends(lazy_auth_dependency),
 ) -> Tier1DeeperDiagnosticsResponse:
     sess = get_session(req.session_id)
     if sess is None:
@@ -443,6 +459,7 @@ async def deeper_diagnostics(
 )
 async def escalation_package(
     req: Tier1EscalationPackageRequest,
+    user_id: Optional[str] = Depends(lazy_auth_dependency),
 ) -> Tier1EscalationPackageResponse:
     sess = get_session(req.session_id)
     if sess is None:
@@ -471,7 +488,10 @@ async def escalation_package(
 
 
 @router.post("/explain", response_model=Tier1ExplainResponse)
-async def explain(req: Tier1ExplainRequest) -> Tier1ExplainResponse:
+async def explain(
+    req: Tier1ExplainRequest,
+    user_id: Optional[str] = Depends(lazy_auth_dependency),
+) -> Tier1ExplainResponse:
     sess = get_session(req.session_id)
     if sess is None:
         raise HTTPException(status_code=404, detail="session_not_found")
@@ -726,7 +746,9 @@ def _coerce_answer_section(answer_dict: Any) -> Tier1AnswerSection:
     response_model=Tier1AnalyzeResponse,
 )
 async def get_session_match(
-    session_id: str, match_index: int,
+    session_id: str,
+    match_index: int,
+    user_id: Optional[str] = Depends(lazy_auth_dependency),
 ) -> Tier1AnalyzeResponse:
     """Return the rank-N match in Tier1AnalyzeResponse shape.
 

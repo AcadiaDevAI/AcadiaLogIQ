@@ -26,6 +26,25 @@ from slowapi.errors import RateLimitExceeded
 from slowapi.util import get_remote_address
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+# ─────────────────────────────────────────────────────────────
+# AWS Secrets Manager bootstrap.
+#
+# Must run BEFORE ``from backend.config import settings`` — pydantic's
+# Settings() snapshots os.environ at module-load time, so any secrets
+# we want pydantic to see must already be present in os.environ.
+#
+# This call fetches the JSON secret blob from AWS Secrets Manager and
+# populates os.environ with every key inside. If AWS is unreachable
+# (network, missing IAM perm, or AWS_SECRETS_DISABLED=true), it
+# transparently falls back to the legacy backend/.env file via
+# python-dotenv so laptop development keeps working.
+#
+# See backend/core/secrets.py for the full design.
+# ─────────────────────────────────────────────────────────────
+from backend.core.secrets import bootstrap_environment
+
+bootstrap_environment()
+
 from backend.config import settings
 from backend.clerk_auth import clerk_auth_dependency, is_clerk_enabled, get_clerk_user_display
 from backend.storage.local_storage import LocalStorageProvider
@@ -403,16 +422,40 @@ async def lifespan(app: FastAPI):
     global bm25
     logger.info("Starting API...")
 
-    # ── Log auth configuration on startup ──
+    # ── Auth configuration: fail loud on misconfiguration ──
+    # Strict mode — Clerk MUST be configured. If CLERK_ENABLED is on
+    # but a key is missing, OR CLERK_ENABLED is "true" string-but-not-
+    # really, we surface a CRITICAL log here so the misconfig is
+    # impossible to miss in the boot log. Protected requests will still
+    # 503 (see auth_dependency); this just makes the operator-facing
+    # warning arrive at process-start instead of first-request-time.
+    clerk_enabled_setting = getattr(settings, 'CLERK_ENABLED', 'NOT SET')
+    secret_set = bool(getattr(settings, 'CLERK_SECRET_KEY', ''))
+    publishable_set = bool(getattr(settings, 'CLERK_PUBLISHABLE_KEY', ''))
     clerk_on = is_clerk_enabled()
     logger.info("=== AUTH CONFIG ===")
-    logger.info("  CLERK_ENABLED setting: %s", getattr(settings, 'CLERK_ENABLED', 'NOT SET'))
-    logger.info("  CLERK_SECRET_KEY set: %s", bool(getattr(settings, 'CLERK_SECRET_KEY', '')))
-    logger.info("  CLERK_PUBLISHABLE_KEY set: %s", bool(getattr(settings, 'CLERK_PUBLISHABLE_KEY', '')))
+    logger.info("  CLERK_ENABLED setting: %s", clerk_enabled_setting)
+    logger.info("  CLERK_SECRET_KEY set: %s", secret_set)
+    logger.info("  CLERK_PUBLISHABLE_KEY set: %s", publishable_set)
     logger.info("  is_clerk_enabled() = %s", clerk_on)
     if not clerk_on:
-        logger.warning("  ⚠️  Clerk is NOT enabled — all requests will be 'anonymous'!")
-        logger.warning("  ⚠️  Set CLERK_ENABLED=true, CLERK_SECRET_KEY, and CLERK_PUBLISHABLE_KEY in .env")
+        # Mark the situation in the loudest terms possible. Every
+        # protected route below will 503 until the operator fixes it.
+        logger.critical(
+            "  *** CLERK AUTH IS NOT CONFIGURED — every protected "
+            "endpoint will return 503. Set CLERK_ENABLED=true, "
+            "CLERK_SECRET_KEY, and CLERK_PUBLISHABLE_KEY in the secret "
+            "store and restart. ***"
+        )
+    elif str(clerk_enabled_setting).lower() == "true" and not (secret_set and publishable_set):
+        # is_clerk_enabled() already covers this case (returns False)
+        # but keep an explicit branch so operators get a single,
+        # specific diagnostic instead of just "not enabled".
+        logger.critical(
+            "  *** CLERK_ENABLED=true but a Clerk key is missing "
+            "(secret=%s publishable=%s) — fix the secret store. ***",
+            secret_set, publishable_set,
+        )
     logger.info("===================")
 
     bm25 = get_bm25_index()
@@ -519,49 +562,83 @@ allow_origins=[
     "http://100.48.5.177:3000",
 ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    # Narrowed from "*" so the browser preflight can't be tricked into
+    # whitelisting arbitrary methods/headers. Add new entries here as
+    # endpoints grow.
+    allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+    allow_headers=[
+        "Authorization",   # Clerk Bearer JWT
+        "Content-Type",    # application/json + multipart
+        "Accept",
+        # Note: X-API-Key was intentionally removed. The strict
+        # Clerk-only ``auth_dependency`` ignores it; allowing it here
+        # would mislead callers into thinking it still works.
+    ],
     expose_headers=["X-Processing-Time"],
     max_age=600,
 )
 
 
-def verify_api_key(x_api_key: Optional[str] = Header(default=None, alias="X-API-Key")) -> bool:
-    if settings.API_KEY:
-        if not x_api_key or x_api_key != settings.API_KEY:
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid API key")
-    return True
+# ─────────────────────────────────────────────────────────────
+# Strict Clerk-only auth.
+#
+# Earlier revisions of this file accepted X-API-Key as a fallback when
+# Clerk was disabled — that opened a silent "anonymous mode" hole if
+# CLERK_ENABLED, CLERK_SECRET_KEY, or CLERK_PUBLISHABLE_KEY were ever
+# misconfigured. The fallback is gone. Every protected route MUST
+# present a valid Clerk Bearer JWT.
+#
+# Misconfigured deployment? auth_dependency below returns 503 instead
+# of silently allowing access. Operators get a loud failure mode.
+#
+# The legacy ``verify_api_key`` function and the ``X-API-Key`` header
+# parameter are retained on this signature only to keep the symbol
+# importable for older sub-modules (none currently use it). They are
+# functional no-ops — the header is ignored.
+# ─────────────────────────────────────────────────────────────
 
 
 async def auth_dependency(
     request: Request,
     x_api_key: Optional[str] = Header(default=None, alias="X-API-Key"),
-) -> Optional[str]:
-    """
-    Returns the authenticated user's Clerk ID, or raises 401.
+) -> str:
+    """Resolve the authenticated user's Clerk ID, or raise.
 
-    When Clerk is enabled:
-      - Valid JWT → returns user_id (e.g., "user_2xABC123")
-      - Missing/invalid JWT → clerk_auth_dependency raises 401
-    When Clerk is disabled:
-      - API key mode or open mode → returns None (becomes "anonymous")
-    """
-    if is_clerk_enabled():
-        user_id = await clerk_auth_dependency(request)
-        # Extra safety: if clerk_auth_dependency somehow returns None
-        # without raising, reject anyway
-        if not user_id:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Authentication required. Please sign in.",
-            )
-        logger.debug("Auth: clerk user_id=%s", user_id)
-        return user_id
+    Always returns a non-empty ``user_id`` on success.
 
-    # Clerk not enabled — fall back to API key or open mode
-    verify_api_key(x_api_key)
-    logger.debug("Auth: Clerk disabled, using anonymous")
-    return None
+    Raises
+    ------
+    HTTPException(401) — JWT missing/invalid/expired (via clerk_auth)
+    HTTPException(503) — Clerk not configured (operator misconfiguration)
+    """
+    if not is_clerk_enabled():
+        # Loud failure rather than silent open access. If you see this
+        # in prod, check CLERK_ENABLED / CLERK_SECRET_KEY /
+        # CLERK_PUBLISHABLE_KEY are all present in AWS Secrets Manager.
+        logger.error(
+            "auth_dependency: Clerk auth not configured (CLERK_ENABLED=%r, "
+            "CLERK_SECRET_KEY set=%s, CLERK_PUBLISHABLE_KEY set=%s) — "
+            "rejecting request to %s",
+            getattr(settings, "CLERK_ENABLED", None),
+            bool(getattr(settings, "CLERK_SECRET_KEY", None)),
+            bool(getattr(settings, "CLERK_PUBLISHABLE_KEY", None)),
+            request.url.path,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Authentication is not configured on this server.",
+        )
+
+    user_id = await clerk_auth_dependency(request)
+    if not user_id:
+        # Defense in depth — clerk_auth_dependency should always raise
+        # 401 on bad tokens, but guard against a refactor regression.
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authentication required. Please sign in.",
+        )
+    logger.debug("Auth: clerk user_id=%s", user_id)
+    return user_id
 
 
 class ClarificationSelection(BaseModel):
@@ -1667,7 +1744,9 @@ async def health_check():
             "bedrock": "available",
         },
         "search_mode": "hybrid (pgvector + BM25 + re-ranking + doc-aware query expansion)",
-        "auth_mode": "clerk" if is_clerk_enabled() else ("api_key" if settings.API_KEY else "open"),
+        # Strict Clerk-only auth. If clerk isn't enabled the backend
+        # rejects every protected request with 503 — see auth_dependency.
+        "auth_mode": "clerk" if is_clerk_enabled() else "misconfigured",
     }
 
 
@@ -1675,25 +1754,36 @@ async def health_check():
 # Auth Debug — call this to diagnose config issues
 # =========================================================
 @app.get("/auth/debug")
-async def auth_debug(request: Request):
-    """
-    Diagnostic endpoint — shows auth configuration and whether
-    the current request has a valid JWT. No auth required.
+async def auth_debug(
+    request: Request,
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    """Diagnostic endpoint — auth configuration + current JWT state.
+
+    Auth REQUIRED. This endpoint discloses internal configuration
+    (Clerk key presence, JWT issuer, JWKS URL) that's helpful to
+    operators but should never be visible to the public internet.
+    Setting ``Depends(auth_dependency)`` here means a caller must
+    already hold a valid Clerk JWT before they can inspect the
+    config — which closes the info-disclosure surface.
     """
     clerk_enabled = is_clerk_enabled()
     has_bearer = bool(request.headers.get("Authorization", "").startswith("Bearer "))
-    
+
     result = {
         "clerk_enabled": clerk_enabled,
         "clerk_enabled_setting": getattr(settings, 'CLERK_ENABLED', 'NOT SET'),
         "clerk_secret_key_set": bool(getattr(settings, 'CLERK_SECRET_KEY', '')),
         "clerk_publishable_key_set": bool(getattr(settings, 'CLERK_PUBLISHABLE_KEY', '')),
         "request_has_bearer_token": has_bearer,
-        "auth_mode": "clerk" if clerk_enabled else ("api_key" if settings.API_KEY else "open"),
+        "auth_mode": "clerk",
+        "caller_user_id": user_id,
     }
-    
-    # If there's a Bearer token and Clerk is enabled, try to decode it
-    if clerk_enabled and has_bearer:
+
+    # The caller already passed auth_dependency above, so we know the
+    # token is valid. Re-decode here only to surface the issuer / sub
+    # claims for diagnostic display.
+    if has_bearer:
         try:
             from backend.clerk_auth import extract_bearer_token, verify_clerk_token
             token = extract_bearer_token(request)
@@ -1702,32 +1792,24 @@ async def auth_debug(request: Request):
                 result["jwt_valid"] = True
                 result["jwt_user_id"] = payload.get("sub")
                 result["jwt_issuer"] = payload.get("iss")
-            else:
-                result["jwt_valid"] = False
-                result["jwt_error"] = "No token extracted"
         except Exception as e:
             result["jwt_valid"] = False
             result["jwt_error"] = str(e)
-    elif has_bearer and not clerk_enabled:
-        result["warning"] = "Bearer token present but Clerk is NOT enabled — token is being IGNORED"
-    
+
     return result
 
 
 @app.get("/me")
 async def get_current_user(request: Request, user_id: Optional[str] = Depends(auth_dependency)):
-    if is_clerk_enabled() and user_id:
-        payload = getattr(request.state, "clerk_payload", {})
-        return {
-            "authenticated": True,
-            "user_id": user_id,
-            "issuer": payload.get("iss"),
-            "auth_mode": "clerk",
-        }
+    # Reaching this point means ``auth_dependency`` already verified the
+    # Clerk JWT — anonymous fallback no longer exists, so the response
+    # always reflects an authenticated caller.
+    payload = getattr(request.state, "clerk_payload", {})
     return {
-        "authenticated": False,
-        "user_id": None,
-        "auth_mode": "api_key" if settings.API_KEY else "open",
+        "authenticated": True,
+        "user_id": user_id,
+        "issuer": payload.get("iss"),
+        "auth_mode": "clerk",
     }
 
 

@@ -18,9 +18,10 @@ import json
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
+from backend._lazy_auth import lazy_auth_dependency
 from .bedrock_claude import invoke as claude_invoke
 from .prompts import CUSTOMER_FACING_PROMPT, INTERNAL_INCIDENT_PROMPT
 from .ticket_lookup import find_ticket_by_incident_number
@@ -84,7 +85,10 @@ def _call_llm(template: str, ticket_json: str, max_tokens: int) -> str:
 
 
 @router.post("/{incident_number}", response_model=RCAResponse)
-async def generate_rca(incident_number: str) -> RCAResponse:
+async def generate_rca(
+    incident_number: str,
+    user_id: Optional[str] = Depends(lazy_auth_dependency),
+) -> RCAResponse:
     """Look up the ticket by Incident_Number, run both LLM calls in
     parallel, return two Markdown blobs. Per-panel failure-open."""
     inc = (incident_number or "").strip()

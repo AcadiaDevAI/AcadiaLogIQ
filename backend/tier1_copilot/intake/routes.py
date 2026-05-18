@@ -8,9 +8,11 @@ Endpoints:
 from __future__ import annotations
 
 import logging
+from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from backend._lazy_auth import lazy_auth_dependency
 from backend.config import settings
 from backend.tier1_copilot.intake.audit import (
     log_extraction,
@@ -35,7 +37,10 @@ router = APIRouter(prefix="/intake", tags=["universal-intake"])
 
 
 @router.post("/extract", response_model=ExtractResponse)
-async def extract(req: ExtractRequest) -> ExtractResponse:
+async def extract(
+    req: ExtractRequest,
+    user_id: Optional[str] = Depends(lazy_auth_dependency),
+) -> ExtractResponse:
     raw = (req.raw_text or "").strip()
     if not raw:
         raise HTTPException(
@@ -107,6 +112,7 @@ async def extract(req: ExtractRequest) -> ExtractResponse:
 async def extraction_feedback(
     extraction_id: str,
     body: ExtractionFeedbackRequest,
+    user_id: Optional[str] = Depends(lazy_auth_dependency),
 ) -> ExtractionFeedbackResponse:
     ok = log_extraction_feedback(
         extraction_id=extraction_id,

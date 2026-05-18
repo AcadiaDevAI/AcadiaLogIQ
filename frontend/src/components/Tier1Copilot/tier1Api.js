@@ -1,19 +1,13 @@
 // Sprint 6 — Tier-1 Copilot API client.
-// Reuses the shared axios instance from services/api.js so Clerk tokens
-// and X-API-Key headers propagate the same way they do for /ask and
-// /fingerprint/lookup.
+//
+// Uses the SHARED axios instance from services/api.js so the Clerk
+// Bearer-token interceptor attaches `Authorization: Bearer ...` on
+// every request. Earlier this file constructed its own axios client
+// (no interceptors) which meant Tier-1 calls bypassed Clerk — fine
+// while the backend tolerated anonymous, broken now that
+// auth_dependency is strict and returns 401 without a JWT.
 
-import axios from "axios";
-
-//const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:8000";
-const API_BASE = window.location.origin.replace(":8501", ":8000");
-const API_KEY = process.env.REACT_APP_API_KEY || "";
-
-const client = axios.create({
-  baseURL: API_BASE,
-  timeout: 60000,
-  headers: { ...(API_KEY ? { "X-API-Key": API_KEY } : {}) },
-});
+import { api as client } from "../../services/api";
 
 export async function analyzeAlert(payload) {
   // payload = { severity, asset_name, alert_type, customer?, location?,
