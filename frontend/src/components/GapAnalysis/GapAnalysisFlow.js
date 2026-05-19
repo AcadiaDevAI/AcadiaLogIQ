@@ -549,7 +549,12 @@ export default function GapAnalysisFlow({ onReturnToStages, initialPayload = nul
       setIncidentNumber(initialPayload.incidentNumber);
       handleSubmit({ incidentNumber: initialPayload.incidentNumber });
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // One-shot — the prop only changes when the modal re-opens,
+    // which won't happen while this flow is mounted. Intentional
+    // narrow dep list; if react-hooks/exhaustive-deps is ever
+    // enabled in this project it'll want handleSubmit added, but
+    // that would create an infinite loop because handleSubmit
+    // captures state setters.
   }, [initialPayload]);
 
   const handleStartOver = () => {

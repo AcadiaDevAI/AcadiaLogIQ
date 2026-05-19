@@ -21,9 +21,8 @@ from fastapi import (
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
-from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi import _rate_limit_exceeded_handler
 from slowapi.errors import RateLimitExceeded
-from slowapi.util import get_remote_address
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 # ─────────────────────────────────────────────────────────────
@@ -139,11 +138,42 @@ if sys.version_info < (3, 11):
     raise RuntimeError("Python 3.11+ required")
 
 
-logging.basicConfig(
-    level=getattr(logging, settings.LOG_LEVEL.upper(), logging.INFO),
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+# ─────────────────────────────────────────────────────────────
+# Observability — structured logging + request_id correlation.
+#
+# Replaces the legacy ``logging.basicConfig(...)`` call. Behaviour
+# stays backward-compatible for every existing ``logger.info(...)``
+# call in this codebase — they keep working unchanged but now emit
+# JSON lines (in prod) with ``request_id`` / ``user_id`` correlation
+# fields injected automatically by the ContextFilter inside
+# ``observability/log_setup.py``.
+#
+# Formatter selection (env var ``LOG_FORMAT``):
+#   * ``json`` (default)  — newline-delimited JSON for CloudWatch.
+#   * ``text``            — human-readable for laptop dev.
+#
+# See ``backend/observability/__init__.py`` for the public surface.
+# ─────────────────────────────────────────────────────────────
+from backend.observability import (
+    configure_logging,
+    RequestContextMiddleware,
+    init_sentry,
 )
+
+configure_logging(level=settings.LOG_LEVEL, fmt=settings.LOG_FORMAT)
 logger = logging.getLogger("acadia-log-iq")
+
+# Sentry MUST be initialised before any logger.warning/error/exception
+# fires that we want captured. We init here at module load (right
+# after logging is up) so the auth-config CRITICAL line in the
+# lifespan startup still flows into Sentry on a misconfigured deploy.
+# DSN-empty → silent no-op; the rest of boot is unaffected.
+init_sentry(
+    dsn=settings.SENTRY_DSN,
+    environment=settings.SENTRY_ENV,
+    release=settings.SENTRY_RELEASE,
+    traces_sample_rate=settings.SENTRY_TRACES_SAMPLE_RATE,
+)
 
 
 CHARS_PER_TOKEN = 3
@@ -466,7 +496,62 @@ async def lifespan(app: FastAPI):
     glossary_count = rebuild_glossary_from_postgres()
     logger.info("Glossary store ready: %d acronyms learned from documents", glossary_count)
 
+    # ── Periodic glossary refresher ────────────────────────────────
+    # The glossary store is an in-process cache of a Postgres truth
+    # (document_metadata + chunks). Without a refresher each worker
+    # would be frozen at boot time — a new document ingested by
+    # worker A would not produce expanded acronyms on worker B until
+    # the next deploy. We refresh every GLOSSARY_REFRESH_SECONDS so
+    # drift across replicas is bounded.
+    #
+    # Set GLOSSARY_REFRESH_SECONDS=0 to disable (used by tests and
+    # one-shot tooling that doesn't want a background loop).
+    refresher_task: Optional[asyncio.Task] = None
+    refresh_interval = int(getattr(settings, "GLOSSARY_REFRESH_SECONDS", 0) or 0)
+    if refresh_interval > 0:
+        async def _glossary_refresher_loop():
+            while True:
+                try:
+                    await asyncio.sleep(refresh_interval)
+                    # ``rebuild_glossary_from_postgres`` is sync + does a
+                    # DB scan; offload to a thread so the event loop
+                    # stays responsive. Failure-open — a single bad
+                    # refresh logs a WARNING and keeps the previous
+                    # in-memory state.
+                    try:
+                        n = await asyncio.to_thread(rebuild_glossary_from_postgres)
+                        logger.info(
+                            "[glossary] refresh OK: %d acronyms", n,
+                        )
+                    except Exception as refresh_exc:
+                        logger.warning(
+                            "[glossary] refresh failed (%s) — "
+                            "keeping previous in-memory state",
+                            refresh_exc,
+                        )
+                except asyncio.CancelledError:
+                    # Graceful shutdown — propagate so the task exits
+                    # cleanly instead of hanging the lifespan teardown.
+                    raise
+        refresher_task = asyncio.create_task(
+            _glossary_refresher_loop(), name="glossary-refresher",
+        )
+        logger.info(
+            "[glossary] refresher scheduled every %ds", refresh_interval,
+        )
+    else:
+        logger.info("[glossary] refresher disabled (GLOSSARY_REFRESH_SECONDS=0)")
+
     yield
+
+    # ── Shutdown — cancel the refresher first so it doesn't try to
+    # run a DB query after the engine has been disposed by FastAPI.
+    if refresher_task is not None:
+        refresher_task.cancel()
+        try:
+            await refresher_task
+        except (asyncio.CancelledError, Exception):
+            pass
     logger.info("Shutting down...")
 
 
@@ -540,9 +625,34 @@ except Exception as _gap_exc:
         _gap_exc,
     )
 
-limiter = Limiter(key_func=get_remote_address)
+# Phase 1 — async job polling endpoint (``GET /jobs/{id}``).
+# The RCA + Gap Analysis routes now return 202 + job_id on
+# cache-miss; the frontend hits /jobs/{id} every 2 s to track
+# status, then re-POSTs the original route (which returns 200 from
+# cache once the worker is done).
+try:
+    from backend.jobs.routes import router as _jobs_router
+    app.include_router(_jobs_router)
+    logger.info("[jobs] router mounted at /jobs")
+except Exception as _jobs_exc:
+    logger.warning(
+        "[jobs] failed to mount router (module disabled): %s",
+        _jobs_exc,
+    )
+
+# Phase 4 — shared per-user rate limiter (see
+# backend/observability/rate_limit.py). The Limiter is now defined
+# in a separate module so sub-routers (RCA, Gap Analysis, jobs) can
+# import it without creating a circular dependency on api.py.
+from slowapi.middleware import SlowAPIMiddleware
+from backend.observability.rate_limit import limiter
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+# SlowAPIMiddleware is required for the @limiter.limit decorator to
+# fire under ASGI / Starlette (which is what FastAPI uses). Without
+# this middleware the decorator is a silent no-op — exactly the
+# misconfiguration the Phase 4 smoke caught.
+app.add_middleware(SlowAPIMiddleware)
 
 app.add_middleware(
     CORSMiddleware,
@@ -589,9 +699,26 @@ allow_origins=[
         # Clerk-only ``auth_dependency`` ignores it; allowing it here
         # would mislead callers into thinking it still works.
     ],
-    expose_headers=["X-Processing-Time"],
+    expose_headers=["X-Processing-Time", "X-Request-ID"],
     max_age=600,
 )
+
+
+# ─────────────────────────────────────────────────────────────
+# Request-id correlation middleware.
+#
+# Mints (or accepts) ``X-Request-ID`` for every inbound request,
+# binds it onto a ContextVar so every log line — application or
+# uvicorn.access — carries the same correlation field, and echoes
+# the ID back via the response header so the caller can quote it
+# in a support ticket.
+#
+# Registered AFTER ``CORSMiddleware`` because FastAPI runs the
+# *most-recently-added* middleware first on inbound; this puts the
+# ContextVar binding closest to the request edge, before any user
+# handler runs.
+# ─────────────────────────────────────────────────────────────
+app.add_middleware(RequestContextMiddleware)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -652,6 +779,15 @@ async def auth_dependency(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Authentication required. Please sign in.",
         )
+    # Bind the verified user_id onto the request-scoped ContextVar so
+    # every downstream log line (Bedrock call, DB write, error trace)
+    # carries the same correlation field as the access log. We bind
+    # AFTER Clerk validates the JWT so an unauthenticated caller can
+    # never spoof user_id in the logs by sending a header. ContextVars
+    # auto-reset when the asyncio Context unwinds — no manual cleanup
+    # needed inside a request handler.
+    from backend.observability import bind_user_id  # local import: avoid circular
+    bind_user_id(user_id)
     logger.debug("Auth: clerk user_id=%s", user_id)
     return user_id
 
@@ -1736,8 +1872,98 @@ async def log_requests(request: Request, call_next):
     response = await call_next(request)
     ms = (time.perf_counter() - start) * 1000.0
     response.headers["X-Processing-Time"] = f"{ms:.2f}ms"
-    logger.info("%s %s -> %s (%.2fms)", request.method, request.url.path, response.status_code, ms)
+    # The human-readable ``msg`` stays identical to the legacy format
+    # for grep continuity. The structured ``extra`` payload promotes
+    # method / route / status / duration_ms to top-level JSON fields,
+    # which CloudWatch Logs Insights treats as queryable columns.
+    # ``request_id`` / ``user_id`` are injected automatically by the
+    # ContextFilter — no need to pass them here.
+    logger.info(
+        "%s %s -> %s (%.2fms)",
+        request.method, request.url.path, response.status_code, ms,
+        extra={
+            "method": request.method,
+            "route": request.url.path,
+            "status": response.status_code,
+            "duration_ms": round(ms, 2),
+        },
+    )
     return response
+
+
+# ─────────────────────────────────────────────────────────────
+# Build identity — captured once at module load so each /health
+# response carries deterministic deploy fingerprints.
+#
+# Source priority:
+#   1. ``GIT_SHA`` / ``BUILD_TIMESTAMP`` env vars  → set by the deploy
+#      pipeline (e.g. redeploy.sh exports them).
+#   2. ``.git/HEAD`` walk                          → laptop dev fallback.
+#   3. literal "unknown"                           → fully decoupled run.
+#
+# The /health response also includes a Sentry-enabled boolean so
+# operators can confirm error monitoring is active without poking the
+# Sentry dashboard.
+# ─────────────────────────────────────────────────────────────
+
+
+def _resolve_git_sha() -> str:
+    """Return the current commit SHA (short form) or 'unknown'.
+
+    Tries ``GIT_SHA`` env var first (set by CI / deploy scripts), then
+    falls back to reading ``.git/HEAD`` so laptop runs still produce
+    a useful value. Never raises.
+    """
+    import os
+    env_sha = (os.environ.get("GIT_SHA") or "").strip()
+    if env_sha:
+        return env_sha[:12]
+    try:
+        from pathlib import Path
+        head = Path(__file__).resolve().parent.parent / ".git" / "HEAD"
+        if head.exists():
+            ref = head.read_text(encoding="utf-8").strip()
+            if ref.startswith("ref: "):
+                ref_path = head.parent / ref[5:]
+                if ref_path.exists():
+                    return ref_path.read_text(encoding="utf-8").strip()[:12]
+            return ref[:12]
+    except Exception:
+        pass
+    return "unknown"
+
+
+_BUILD_INFO = {
+    "git_sha": _resolve_git_sha(),
+    # BUILD_TIMESTAMP is exported by redeploy.sh and the docker-compose
+    # build args (kept in sync with the frontend bundle stamp).
+    "build_timestamp": (
+        (__import__("os").environ.get("BUILD_TIMESTAMP") or "unknown").strip()
+    ),
+    "boot_time": datetime.now(timezone.utc).isoformat(),
+}
+
+
+# ─────────────────────────────────────────────────────────────
+# Liveness probe — deliberately cheap.
+#
+# The ALB target group + Fargate container health check both poll
+# this endpoint every 30 s × N containers. The full ``/health`` route
+# below queries the DB and reads BM25 + glossary state — fine for an
+# operator probe but expensive at the ALB cadence. The liveness path
+# stays tight: a static 200 + a process uptime field.
+#
+# Readiness ("am I ready to serve traffic?") is what ``/health``
+# answers. ALB uses liveness; CI smoke tests and operators use
+# /health for the richer view.
+# ─────────────────────────────────────────────────────────────
+@app.get("/health/live")
+async def health_live():
+    return {
+        "status": "ok",
+        "uptime_since": _BUILD_INFO.get("boot_time"),
+        "git_sha": _BUILD_INFO.get("git_sha"),
+    }
 
 
 @app.get("/health")
@@ -1751,7 +1977,11 @@ async def health_check():
     return {
         "status": "healthy",
         "timestamp": datetime.now(timezone.utc).isoformat(),
-        "model": settings.BEDROCK_LLM_MODEL, 
+        "model": settings.BEDROCK_LLM_MODEL,
+        # Build identity — useful for "is the new version actually
+        # deployed?" diagnostics and for cross-referencing CloudWatch
+        # log lines with a specific commit.
+        "build": _BUILD_INFO,
         "services": {
             "vector_store": f"{chunk_count} chunks" if chunk_count >= 0 else "uninitialized",
             "bm25_index": f"{bm25.size} docs" if bm25 else "uninitialized",
@@ -1762,6 +1992,12 @@ async def health_check():
         # Strict Clerk-only auth. If clerk isn't enabled the backend
         # rejects every protected request with 503 — see auth_dependency.
         "auth_mode": "clerk" if is_clerk_enabled() else "misconfigured",
+        # Observability flags — confirm at a glance whether error
+        # monitoring is hooked up on this deploy.
+        "observability": {
+            "log_format": settings.LOG_FORMAT,
+            "sentry_enabled": bool((settings.SENTRY_DSN or "").strip()),
+        },
     }
 
 
@@ -2141,26 +2377,65 @@ async def upload(
     storage_uri = storage.save_bytes(relative_name, content)
     file_hash = calculate_file_hash_bytes(content)
 
-    create_ingestion_job(
-        job_id=job_id,
-        file_id=file_id,
-        owner_id=owner_id,
-        file_name=file.filename,
-        file_type=file_type,
-        file_hash=file_hash,
-    )
-
-    background_tasks.add_task(
-        index_file_job,
-        job_id,
-        storage_uri,
-        file.filename,
-        file_type,
-        file_id,
-        owner_id,
-        size_mb,
-        resolved_doc_kind,           # Sprint 3-PREP-B — thread to process_document
-    )
+    # Phase 5 — ingestion runs on the worker fleet, not in-process.
+    # Behaviour is gated on ``settings.INGESTION_VIA_WORKER``:
+    #
+    #   true  (default, production posture): enqueue an
+    #         ingest_document job; the worker container does the work.
+    #   false (rollback escape hatch):       use the legacy
+    #         ``background_tasks.add_task(index_file_job, ...)`` path
+    #         — heavy work runs in the API process. Lets ops roll back
+    #         the migration via env flag without a redeploy if staging
+    #         surfaces a regression.
+    if settings.INGESTION_VIA_WORKER:
+        from backend.jobs.ingestion_queue import enqueue_ingestion_job
+        enqueue_ingestion_job(
+            job_id=job_id,
+            file_id=file_id,
+            owner_id=owner_id,
+            file_name=file.filename,
+            file_type=file_type,
+            file_hash=file_hash,
+            payload={
+                "job_id": job_id,
+                "storage_uri": storage_uri,
+                "filename": file.filename,
+                "file_type": file_type,
+                "file_id": file_id,
+                "owner_id": owner_id,
+                "file_size_mb": size_mb,
+                "doc_kind": resolved_doc_kind,
+            },
+        )
+    else:
+        # Legacy in-process path. Identical to the pre-Phase-5
+        # implementation — create the row, schedule the async task.
+        # Note: this branch DOES NOT scale past 2-3 concurrent
+        # ingests on a single API container; if you find yourself
+        # toggling here under load, redeploy with the worker path on.
+        create_ingestion_job(
+            job_id=job_id,
+            file_id=file_id,
+            owner_id=owner_id,
+            file_name=file.filename,
+            file_type=file_type,
+            file_hash=file_hash,
+        )
+        background_tasks.add_task(
+            index_file_job,
+            job_id,
+            storage_uri,
+            file.filename,
+            file_type,
+            file_id,
+            owner_id,
+            size_mb,
+            resolved_doc_kind,
+        )
+        logger.warning(
+            "[upload] INGESTION_VIA_WORKER=false — running ingest in-process. "
+            "This is a temporary fallback; flip back to true once staged.",
+        )
 
     return UploadResponse(
         job_id=job_id,
@@ -2280,24 +2555,48 @@ async def upload_finalize(
         payload.job_id, resolved_filename, response.storage_uri,
     )
 
-    # The legacy /upload above uses BackgroundTasks for ingestion —
-    # we mirror that here so the contract (job moves to "running" then
-    # "done"/"error", visible via /upload_status/{job_id}) is identical.
-    background_tasks.add_task(
-        index_file_job,
-        payload.job_id,                     # job_id
-        response.storage_uri,                # s3://bucket/key
-        resolved_filename,                   # filename — never empty
-        job.get("file_type") or "kb",
-        response.file_id,
-        _normalize_owner_id(user_id),
-        response.size_bytes / (1024 * 1024),  # file_size_mb
-        # doc_kind isn't persisted on the ingestion_jobs row today;
-        # default to 'ticket' to match legacy /upload's coerce-on-unknown
-        # behavior. Phase 2 will plumb the value through when we add a
-        # doc_kind column to ingestion_jobs.
-        "ticket",
-    )
+    # Phase 5 ingestion routing — same flag as the legacy /upload
+    # route (``settings.INGESTION_VIA_WORKER``):
+    #
+    #   true  → attach payload + leave row pending; worker claims it.
+    #   false → legacy ``background_tasks.add_task(index_file_job, ...)``.
+    #
+    # The row's other fields (file_name, file_type, owner_id, hash)
+    # were populated at presign time, so both branches operate on
+    # the same DB row — only the "what runs the ingest" answer differs.
+    if settings.INGESTION_VIA_WORKER:
+        from backend.jobs.ingestion_queue import attach_payload_and_enqueue
+        attach_payload_and_enqueue(
+            job_id=payload.job_id,
+            payload={
+                "job_id": payload.job_id,
+                "storage_uri": response.storage_uri,
+                "filename": resolved_filename,
+                "file_type": job.get("file_type") or "kb",
+                "file_id": response.file_id,
+                "owner_id": _normalize_owner_id(user_id),
+                "file_size_mb": response.size_bytes / (1024 * 1024),
+                "doc_kind": "ticket",  # legacy default — coerce-on-unknown
+            },
+        )
+    else:
+        # Legacy in-process path. The ingestion_jobs row is already
+        # created (at presign time); we just kick off the async task.
+        background_tasks.add_task(
+            index_file_job,
+            payload.job_id,
+            response.storage_uri,
+            resolved_filename,
+            job.get("file_type") or "kb",
+            response.file_id,
+            _normalize_owner_id(user_id),
+            response.size_bytes / (1024 * 1024),
+            "ticket",
+        )
+        logger.warning(
+            "[upload.finalize] INGESTION_VIA_WORKER=false — running ingest "
+            "in-process. Temporary fallback; flip back to true after staging.",
+        )
 
     return response
 

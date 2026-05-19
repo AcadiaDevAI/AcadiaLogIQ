@@ -1,14 +1,25 @@
 // Gap Analysis — API client.
 //
-// Single endpoint: POST /gap-analysis/{incident_number}
-// Routes through the shared authenticated `api` instance from
-// services/api.js so Clerk JWT + 401-retry interceptors are
-// inherited — same auth contract as RCA / journey / intake clients.
+// Phase 1 rewrite — long-running LLM calls now run on the worker
+// container. The HTTP contract from this client's point of view:
+//
+//   * POST /gap-analysis/{inc} → 200 + payload      (both panels cached)
+//   * POST /gap-analysis/{inc} → 202 + job IDs      (LLM work pending)
+//   * GET  /jobs/{id}          → status polling
+//
+// We hide that distinction from GapAnalysisFlow.js so the existing
+// `generateGapAnalysis(inc, opts)` signature keeps working unchanged
+// — callers get back the same `{gap_analysis_md, post_mortem_md, ...}`
+// shape regardless of cache hit / generation.
+//
+// Routes through the shared authenticated `api` instance so Clerk JWT
+// + 401-retry interceptors are inherited.
 
 import { api } from "../../services/api";
+import { pollJobs } from "../../services/jobPolling";
 
 
-// Look up a ticket by Incident_Number and generate two reports
+// Look up a ticket by Incident_Number and run both LLM calls
 // server-side in parallel. Response shape:
 //   {
 //     incident_number: string,
@@ -16,14 +27,15 @@ import { api } from "../../services/api";
 //     post_mortem_md: string,
 //     gap_analysis_error: string | null,
 //     post_mortem_error: string | null,
+//     gap_analysis_cached: bool,
+//     post_mortem_cached: bool,
 //   }
 //
-// Throws on 4xx/5xx; callers distinguish 404 ("ticket not found")
-// from 500 ("LLM / DB failure") by inspecting err.response.
-// `opts` is optional. Recognised keys:
-//   regenerateGapAnalysis : boolean  — force-refresh Gap Analysis panel
-//   regeneratePostMortem  : boolean  — force-refresh Post-Mortem panel
-// Both default to false → cache lookup honoured.
+// `opts.regenerateGapAnalysis` / `opts.regeneratePostMortem` force-
+// refresh the matching panel.
+// `opts.signal` — optional AbortSignal so a user navigating away cancels polling.
+// `opts.onProgress` — optional callback invoked with each poll
+//                     response; lets the UI render attempt counters.
 export async function generateGapAnalysis(incidentNumber, opts = {}) {
   const inc = (incidentNumber || "").trim();
   if (!inc) {
@@ -35,19 +47,40 @@ export async function generateGapAnalysis(incidentNumber, opts = {}) {
     regenerate_gap_analysis: !!opts.regenerateGapAnalysis,
     regenerate_post_mortem: !!opts.regeneratePostMortem,
   };
-  // The two LLM calls run server-side in parallel and the Gap
-  // Analysis panel routinely produces 12k+ output tokens at the
-  // current max_tokens budget — observed wall-clock ~4 min on a
-  // fresh (cache-miss) generation. The shared `api` instance
-  // defaults to 180s which is too tight, so override per-call
-  // here. Cached hits return in milliseconds, so the long timeout
-  // only matters on first-time generation.
-  const { data } = await api.post(
+
+  // Initial POST. 200 = both panels cached; 202 = enqueued.
+  const initial = await api.post(
     `/gap-analysis/${encodeURIComponent(inc)}`,
     body,
-    { timeout: 600000 },  // 10 min — covers worst-case fresh LLM run
+    { timeout: 600000 },
   );
-  return data;
+
+  if (initial.status === 200) {
+    return initial.data;
+  }
+
+  // Slow path — poll the returned job IDs.
+  const { gap_analysis_job_id, post_mortem_job_id } = initial.data || {};
+  const jobIds = [gap_analysis_job_id, post_mortem_job_id].filter(Boolean);
+
+  await pollJobs(jobIds, {
+    signal: opts.signal,
+    onProgress: opts.onProgress,
+  });
+
+  // Re-POST without regenerate flags to retrieve the cached panels.
+  const finalResp = await api.post(
+    `/gap-analysis/${encodeURIComponent(inc)}`,
+    { regenerate_gap_analysis: false, regenerate_post_mortem: false },
+    { timeout: 60000 },
+  );
+
+  if (finalResp.status !== 200) {
+    const err = new Error("unexpected_status_after_jobs");
+    err.response = finalResp;
+    throw err;
+  }
+  return finalResp.data;
 }
 
 

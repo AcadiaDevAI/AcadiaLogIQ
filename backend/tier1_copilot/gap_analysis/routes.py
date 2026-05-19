@@ -48,10 +48,11 @@ import json
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from pydantic import BaseModel, ConfigDict, Field
 
 from backend._lazy_auth import lazy_auth_dependency
+from backend.observability.rate_limit import limiter
 from backend.tier1_copilot._shared.report_cache import (
     FEEDBACK_DISLIKE,
     REPORT_KIND_GAP_ANALYSIS,
@@ -61,6 +62,7 @@ from backend.tier1_copilot._shared.report_cache import (
     record_feedback,
     save_cached_report,
 )
+from backend.jobs import enqueue as enqueue_job
 
 from .bedrock_claude import invoke as claude_invoke
 from .prompts import (
@@ -220,12 +222,36 @@ def _cached_or_llm(
     return md, False
 
 
-@router.post("/{incident_number}", response_model=GapAnalysisResponse)
+class GapAnalysisAsyncResponse(BaseModel):
+    """202 response when one or both Gap Analysis panels are enqueued."""
+    incident_number: str
+    gap_analysis_cached: bool = False
+    post_mortem_cached: bool = False
+    gap_analysis_md: Optional[str] = None
+    post_mortem_md: Optional[str] = None
+    gap_analysis_job_id: Optional[str] = None
+    post_mortem_job_id: Optional[str] = None
+
+
+@router.post(
+    "/{incident_number}",
+    response_model=None,
+    responses={
+        200: {"model": GapAnalysisResponse, "description": "Both panels served from cache"},
+        202: {"model": GapAnalysisAsyncResponse, "description": "One or both panels enqueued — poll /jobs/{id}"},
+    },
+)
+# Phase 4 — per-user rate limit, 5/min on Gap Analysis Generate.
+# Same shared limiter the RCA route uses; per-user keying means a
+# busy engineer doesn't lock out the rest of the team.
+@limiter.limit("5/minute")
 async def generate_gap_analysis(
+    request: Request,
     incident_number: str,
+    response: Response,
     payload: Optional[GapAnalysisGenerateRequest] = None,
     user_id: Optional[str] = Depends(lazy_auth_dependency),
-) -> GapAnalysisResponse:
+):
     """Look up the ticket by ``Incident_Number`` and return both
     Gap Analysis panels.
 
@@ -243,100 +269,175 @@ async def generate_gap_analysis(
     Per-panel failure-open: a failure on one panel never blocks
     the other.
     """
+    """Generate Gap Analysis + Blameless Post-Mortem with the fast-path
+    / slow-path pattern.
+
+    See ``backend/tier1_copilot/rca/routes.py::generate_rca`` for the
+    full design rationale — same pattern: return 200 + payload when
+    everything is cached, 202 + job_ids when one or both panels need
+    a fresh LLM call.
+    """
     inc = (incident_number or "").strip()
     if not inc:
         raise HTTPException(status_code=400, detail="incident_number_required")
 
     req = payload or GapAnalysisGenerateRequest()
 
+    # Cache probe FIRST — fast path returns 200 directly with no
+    # worker round-trip when nothing needs regenerating.
+    gap_cached_md = (
+        None
+        if req.regenerate_gap_analysis
+        else get_cached_report(REPORT_KIND_GAP_ANALYSIS, inc)
+    )
+    pm_cached_md = (
+        None
+        if req.regenerate_post_mortem
+        else get_cached_report(REPORT_KIND_POST_MORTEM, inc)
+    )
+
+    if gap_cached_md and pm_cached_md:
+        logger.info(
+            "[gap_analysis] both panels cached inc=%s — returning 200 directly", inc,
+        )
+        return GapAnalysisResponse(
+            incident_number=inc,
+            gap_analysis_md=gap_cached_md,
+            post_mortem_md=pm_cached_md,
+            gap_analysis_error=None,
+            post_mortem_error=None,
+            gap_analysis_cached=True,
+            post_mortem_cached=True,
+        )
+
+    # Slow path — at least one panel needs the LLM. Validate ticket
+    # first so a typo returns 404 immediately regardless of execution
+    # mode (sync vs worker).
     ticket = find_ticket_by_incident_number(inc)
     if ticket is None:
         logger.info("[gap_analysis] lookup miss inc=%s", inc)
         raise HTTPException(status_code=404, detail="ticket_not_found")
 
-    # Serialise once, reuse for both prompts. ``default=str`` keeps the
-    # call working even if the schema accumulates datetime / UUID /
-    # Decimal values that aren't natively JSON-serialisable.
-    try:
-        ticket_json = json.dumps(ticket, ensure_ascii=False, default=str)
-    except Exception as exc:
-        logger.warning("[gap_analysis] json.dumps failed inc=%s (%s)", inc, exc)
-        raise HTTPException(status_code=500, detail="ticket_serialisation_failed")
+    # ── Local-dev / no-worker mode ──────────────────────────────
+    # When ``REPORTS_VIA_WORKER=false`` (the default), the LLM calls
+    # run in-process via the original ``_cached_or_llm`` +
+    # ``asyncio.to_thread`` pattern. Identical to the pre-Phase-1
+    # behaviour the local dev stack expects. Set
+    # ``REPORTS_VIA_WORKER=true`` in production task definitions to
+    # switch to the queue-based async path below.
+    from backend.config import settings as _settings
+    if not getattr(_settings, "REPORTS_VIA_WORKER", False):
+        try:
+            ticket_json = json.dumps(ticket, ensure_ascii=False, default=str)
+        except Exception as exc:
+            logger.warning("[gap_analysis] json.dumps failed inc=%s (%s)", inc, exc)
+            raise HTTPException(status_code=500, detail="ticket_serialisation_failed")
 
-    # Parallel kickoff via threadpool. A cached panel returns
-    # near-instantly (single DB read) while the other panel is
-    # still running real LLM work.
-    gap_task = asyncio.to_thread(
-        _cached_or_llm,
-        report_kind=REPORT_KIND_GAP_ANALYSIS,
-        incident_number=inc,
-        template=GAP_ANALYSIS_MASTER_PROMPT,
-        ticket_json=ticket_json,
-        max_tokens=_MAX_TOKENS_GAP_ANALYSIS,
-        regenerate=req.regenerate_gap_analysis,
-    )
-    pm_task = asyncio.to_thread(
-        _cached_or_llm,
-        report_kind=REPORT_KIND_POST_MORTEM,
-        incident_number=inc,
-        template=BLAMELESS_POSTMORTEM_PROMPT,
-        ticket_json=ticket_json,
-        max_tokens=_MAX_TOKENS_POST_MORTEM,
-        regenerate=req.regenerate_post_mortem,
-    )
-    gap_result, pm_result = await asyncio.gather(
-        gap_task, pm_task, return_exceptions=True,
-    )
-
-    # ── Gap Analysis panel ──
-    gap_md = ""
-    gap_err: Optional[str] = None
-    gap_cached = False
-    if isinstance(gap_result, BaseException):
-        logger.warning(
-            "[gap_analysis] Gap Analysis call failed inc=%s (%s)",
-            inc, gap_result,
+        gap_task = asyncio.to_thread(
+            _cached_or_llm,
+            report_kind=REPORT_KIND_GAP_ANALYSIS,
+            incident_number=inc,
+            template=GAP_ANALYSIS_MASTER_PROMPT,
+            ticket_json=ticket_json,
+            max_tokens=_MAX_TOKENS_GAP_ANALYSIS,
+            regenerate=req.regenerate_gap_analysis,
         )
-        gap_err = "Gap Analysis report generation failed — please retry."
-    elif isinstance(gap_result, tuple) and len(gap_result) == 2:
-        md, gap_cached = gap_result
-        gap_md = (md or "").strip()
-        if not gap_md:
-            gap_err = "Gap Analysis report returned empty output."
-
-    # ── Blameless Post-Mortem panel ──
-    pm_md = ""
-    pm_err: Optional[str] = None
-    pm_cached = False
-    if isinstance(pm_result, BaseException):
-        logger.warning(
-            "[gap_analysis] Post-Mortem call failed inc=%s (%s)",
-            inc, pm_result,
+        pm_task = asyncio.to_thread(
+            _cached_or_llm,
+            report_kind=REPORT_KIND_POST_MORTEM,
+            incident_number=inc,
+            template=BLAMELESS_POSTMORTEM_PROMPT,
+            ticket_json=ticket_json,
+            max_tokens=_MAX_TOKENS_POST_MORTEM,
+            regenerate=req.regenerate_post_mortem,
         )
-        pm_err = "Blameless Post-Mortem generation failed — please retry."
-    elif isinstance(pm_result, tuple) and len(pm_result) == 2:
-        md, pm_cached = pm_result
-        pm_md = (md or "").strip()
-        if not pm_md:
-            pm_err = "Blameless Post-Mortem returned empty output."
+        gap_result, pm_result = await asyncio.gather(
+            gap_task, pm_task, return_exceptions=True,
+        )
+
+        gap_md = ""
+        gap_err: Optional[str] = None
+        gap_cached = False
+        if isinstance(gap_result, BaseException):
+            logger.warning("[gap_analysis] Gap Analysis call failed inc=%s (%s)", inc, gap_result)
+            gap_err = "Gap Analysis report generation failed — please retry."
+        elif isinstance(gap_result, tuple) and len(gap_result) == 2:
+            md, gap_cached = gap_result
+            gap_md = (md or "").strip()
+            if not gap_md:
+                gap_err = "Gap Analysis report returned empty output."
+
+        pm_md = ""
+        pm_err: Optional[str] = None
+        pm_cached = False
+        if isinstance(pm_result, BaseException):
+            logger.warning("[gap_analysis] Post-Mortem call failed inc=%s (%s)", inc, pm_result)
+            pm_err = "Blameless Post-Mortem generation failed — please retry."
+        elif isinstance(pm_result, tuple) and len(pm_result) == 2:
+            md, pm_cached = pm_result
+            pm_md = (md or "").strip()
+            if not pm_md:
+                pm_err = "Blameless Post-Mortem returned empty output."
+
+        logger.info(
+            "[gap_analysis] sync inc=%s gap_chars=%d cached=%s pm_chars=%d cached=%s "
+            "gap_err=%s pm_err=%s",
+            inc, len(gap_md), gap_cached, len(pm_md), pm_cached,
+            bool(gap_err), bool(pm_err),
+        )
+        return GapAnalysisResponse(
+            incident_number=inc,
+            gap_analysis_md=gap_md,
+            post_mortem_md=pm_md,
+            gap_analysis_error=gap_err,
+            post_mortem_error=pm_err,
+            gap_analysis_cached=gap_cached,
+            post_mortem_cached=pm_cached,
+        )
+
+    # ── Worker / async mode (REPORTS_VIA_WORKER=true) ───────────
+    gap_job_id: Optional[str] = None
+    pm_job_id: Optional[str] = None
+
+    if gap_cached_md is None:
+        try:
+            gap_job_id = enqueue_job(
+                kind=REPORT_KIND_GAP_ANALYSIS,
+                incident_number=inc,
+                requested_by=user_id,
+                payload={"regenerate": bool(req.regenerate_gap_analysis)},
+            )
+        except Exception as exc:
+            logger.warning("[gap_analysis] enqueue gap failed inc=%s (%s)", inc, exc)
+            raise HTTPException(status_code=503, detail="job_queue_unavailable")
+
+    if pm_cached_md is None:
+        try:
+            pm_job_id = enqueue_job(
+                kind=REPORT_KIND_POST_MORTEM,
+                incident_number=inc,
+                requested_by=user_id,
+                payload={"regenerate": bool(req.regenerate_post_mortem)},
+            )
+        except Exception as exc:
+            logger.warning("[gap_analysis] enqueue pm failed inc=%s (%s)", inc, exc)
+            raise HTTPException(status_code=503, detail="job_queue_unavailable")
 
     logger.info(
-        "[gap_analysis] inc=%s gap_chars=%d cached=%s pm_chars=%d cached=%s "
-        "gap_err=%s pm_err=%s",
-        inc,
-        len(gap_md), gap_cached,
-        len(pm_md), pm_cached,
-        bool(gap_err), bool(pm_err),
+        "[gap_analysis] 202 inc=%s gap_job=%s pm_job=%s "
+        "gap_cached=%s pm_cached=%s",
+        inc, gap_job_id, pm_job_id,
+        bool(gap_cached_md), bool(pm_cached_md),
     )
-
-    return GapAnalysisResponse(
+    response.status_code = status.HTTP_202_ACCEPTED
+    return GapAnalysisAsyncResponse(
         incident_number=inc,
-        gap_analysis_md=gap_md,
-        post_mortem_md=pm_md,
-        gap_analysis_error=gap_err,
-        post_mortem_error=pm_err,
-        gap_analysis_cached=gap_cached,
-        post_mortem_cached=pm_cached,
+        gap_analysis_cached=bool(gap_cached_md),
+        post_mortem_cached=bool(pm_cached_md),
+        gap_analysis_md=gap_cached_md,
+        post_mortem_md=pm_cached_md,
+        gap_analysis_job_id=gap_job_id,
+        post_mortem_job_id=pm_job_id,
     )
 
 

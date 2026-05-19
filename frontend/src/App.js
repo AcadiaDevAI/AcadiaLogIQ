@@ -51,6 +51,13 @@ function AppLayout() {
   const [rcaPayload, setRcaPayload] = useState(null);
 
   const handleRcaModalSubmit = useCallback((payload) => {
+    // Close the Gap Analysis flow if it's open — the render chain
+    // checks rcaOpen FIRST, so without this the new RCA submit would
+    // still work but a stale gapOpen=true would render Gap Analysis
+    // again the moment RCA returns. Symmetric with handleGapModalSubmit
+    // below.
+    setGapOpen(false);
+    setGapPayload(null);
     setRcaPayload(payload);
     setRcaOpen(true);
     setRcaModalOpen(false);
@@ -71,6 +78,12 @@ function AppLayout() {
   const [gapPayload, setGapPayload] = useState(null);
 
   const handleGapModalSubmit = useCallback((payload) => {
+    // Close the RCA flow if it's open — the render chain checks
+    // rcaOpen BEFORE gapOpen, so without this Gap Analysis would
+    // never appear when the user navigates from RCA → Gap. This was
+    // the exact bug: "click Gap Analysis from RCA does nothing".
+    setRcaOpen(false);
+    setRcaPayload(null);
     setGapPayload(payload);
     setGapOpen(true);
     setGapModalOpen(false);

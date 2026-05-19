@@ -9,10 +9,21 @@ services:
     env_file:
       - ./backend/.env
     environment:
+      - APP_ROLE=api
       - STORAGE_TYPE=local
       - LOCAL_STORAGE_PATH=/app/uploads
       - UPLOAD_DIR=/app/uploads
       - PYTHONUNBUFFERED=1
+      # Phase 2 — gunicorn settings. Tune in production via the ECS
+      # task definition; defaults here are sensible for an EC2 t3.medium.
+      - GUNICORN_WORKERS=2
+      - GUNICORN_TIMEOUT=120
+      - GUNICORN_KEEPALIVE=75
+      # Phase 0.4 — tight DB pool so multi-worker + multi-container
+      # fits in the RDS max_connections budget. Adjust if RDS class
+      # is upgraded.
+      - DB_POOL_SIZE=3
+      - DB_MAX_OVERFLOW=5
     volumes:
       - uploads:/app/uploads
     healthcheck:
@@ -22,6 +33,135 @@ services:
       retries: 5
       start_period: 30s
     restart: unless-stopped
+    # ─────────────────────────────────────────────────────────────
+    # CloudWatch Logs shipping.
+    #
+    # The container writes structured JSON to stdout (see
+    # backend/observability/log_setup.py). The Docker ``awslogs``
+    # driver forwards each line verbatim into CloudWatch Logs Insights
+    # without touching the backend — log format and shipping are
+    # decoupled. Disable temporarily by commenting the ``logging:``
+    # block and Docker falls back to the default ``json-file`` driver
+    # so a botched IAM update never wedges the container.
+    #
+    # IAM requirements on the EC2 instance role:
+    #   logs:CreateLogGroup, logs:CreateLogStream, logs:PutLogEvents
+    # ─────────────────────────────────────────────────────────────
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION:-us-east-1}
+        awslogs-group: /acadialogiq/${APP_ENV:-dev}/backend
+        # Stream name = container short ID + boot timestamp so each
+        # restart gets its own stream (clean separator for incident
+        # forensics). ``{{.ID}}`` and ``{{.Name}}`` are interpolated
+        # by the Docker daemon at container start.
+        awslogs-stream: api-{{.Name}}-{{.ID}}
+        # Auto-create the group on first start so a fresh EC2 deploy
+        # doesn't need a separate ``aws logs create-log-group`` step.
+        awslogs-create-group: "true"
+        # The backend already emits one JSON document per line; no
+        # need for the multiline pattern matcher.
+        mode: non-blocking
+        # Buffer up to 4 MiB if CloudWatch is slow to ACK — protects
+        # the container from back-pressure during log-storm conditions.
+        max-buffer-size: 4m
+
+  # Phase 1 — async LLM job consumer.
+  # Same image as the api service; APP_ROLE=worker switches the
+  # entrypoint to ``python -m backend.jobs.worker``. No published
+  # port — the worker only talks to Postgres + Bedrock + S3.
+  # Scales independently from the API. In Fargate (Phase 3) this
+  # becomes its own ECS service with target-tracking on
+  # ``report_jobs.status = 'pending'`` row count.
+  # Report worker — RCA + Gap Analysis LLM generations.
+  # Specialised via WORKER_KINDS so an OOM in the ingest worker (big
+  # PDF) can't kill an in-flight report job. Tight memory (1 GB) is
+  # plenty for Bedrock-bound work.
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: acadialogiq-worker
+    depends_on:
+      api:
+        condition: service_healthy
+    env_file:
+      - ./backend/.env
+    environment:
+      - APP_ROLE=worker
+      # Restrict this worker to report kinds. ingest_document goes
+      # to the ingest-worker service below.
+      - WORKER_KINDS=rca_customer,rca_internal,gap_analysis_gap,gap_analysis_pm
+      - STORAGE_TYPE=local
+      - LOCAL_STORAGE_PATH=/app/uploads
+      - PYTHONUNBUFFERED=1
+      # Worker pools size separately — they hold a DB connection
+      # only briefly per job and don't compete with the API tier.
+      - DB_POOL_SIZE=2
+      - DB_MAX_OVERFLOW=2
+      # Worker doesn't need the periodic glossary refresher (it
+      # doesn't serve retrieval queries). Disabling saves a DB scan
+      # every 5 minutes for no benefit.
+      - GLOSSARY_REFRESH_SECONDS=0
+    # Memory cap — Bedrock-bound work stays comfortably under 1 GB.
+    # If an ECS / docker-compose host crosses this the OOM kills only
+    # the report worker; ingest worker (below) is unaffected.
+    mem_limit: 1g
+    volumes:
+      - uploads:/app/uploads
+    restart: unless-stopped
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION:-us-east-1}
+        awslogs-group: /acadialogiq/${APP_ENV:-dev}/worker
+        awslogs-stream: worker-{{.Name}}-{{.ID}}
+        awslogs-create-group: "true"
+        mode: non-blocking
+        max-buffer-size: 4m
+
+  # Ingest worker — document parsing + embedding generation.
+  # Separated from the report worker because PyMuPDF can briefly use
+  # 2 GB on a 50 MB PDF and an OOM would kill any in-flight report
+  # job sharing the process. WORKER_KINDS makes the queue claim
+  # ignore report kinds entirely; the ALB / API tier never talks to
+  # this container directly.
+  ingest_worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: acadialogiq-ingest-worker
+    depends_on:
+      api:
+        condition: service_healthy
+    env_file:
+      - ./backend/.env
+    environment:
+      - APP_ROLE=worker
+      - WORKER_KINDS=ingest_document
+      - STORAGE_TYPE=local
+      - LOCAL_STORAGE_PATH=/app/uploads
+      - PYTHONUNBUFFERED=1
+      - DB_POOL_SIZE=2
+      - DB_MAX_OVERFLOW=2
+      - GLOSSARY_REFRESH_SECONDS=0
+    # Higher memory ceiling — PyMuPDF on large PDFs + Titan embedding
+    # batches can briefly spike RAM. 2 GB gives comfortable headroom;
+    # bump to 4 GB if the operator regularly ingests >100 MB PDFs.
+    mem_limit: 2g
+    volumes:
+      - uploads:/app/uploads
+    restart: unless-stopped
+    logging:
+      driver: awslogs
+      options:
+        awslogs-region: ${AWS_REGION:-us-east-1}
+        awslogs-group: /acadialogiq/${APP_ENV:-dev}/ingest-worker
+        awslogs-stream: ingest-worker-{{.Name}}-{{.ID}}
+        awslogs-create-group: "true"
+        mode: non-blocking
+        max-buffer-size: 4m
 
   ui:
     build:
@@ -44,6 +184,13 @@ services:
         # Changing this arg invalidates the build stage cache and
         # guarantees a fresh bundle hash + visible version stamp.
         BUILD_TIMESTAMP: ${BUILD_TIMESTAMP:-unknown}
+
+        # Sentry frontend DSN — public token (designed for browser
+        # embedding). Empty → SDK init becomes a no-op so the build
+        # still ships without Sentry. Add to ``.env`` (or your deploy
+        # exports) when you're ready to enable error monitoring.
+        REACT_APP_SENTRY_DSN: ${REACT_APP_SENTRY_DSN:-}
+        REACT_APP_SENTRY_ENV: ${REACT_APP_SENTRY_ENV:-dev}
     container_name: acadialogiq-ui
     ports:
       - "8501:80"

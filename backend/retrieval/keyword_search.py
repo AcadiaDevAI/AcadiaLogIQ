@@ -199,7 +199,13 @@ def fulltext_search(
         return []
 
     # --- Construct SQL with ts_rank ---
-    # We search both content and contextualized_content via a combined tsvector
+    # Migration 045 added ``content_tsv`` as a STORED generated column
+    # (= to_tsvector over contextualized + raw content) + a GIN index.
+    # Reading it directly instead of recomputing the tsvector per-row
+    # changes this query from "seq scan + per-row tokenisation" to a
+    # single GIN probe. At the current 31-chunk corpus the difference
+    # is invisible; at 100 K+ chunks it's the difference between a
+    # millisecond query and a multi-second one.
     sql = """
         SELECT
             c.id,
@@ -214,17 +220,16 @@ def fulltext_search(
             d.owner_id,
             d.name           AS source,
             d.file_type,
-            ts_rank(
-                to_tsvector('english', COALESCE(c.contextualized_content, '') || ' ' || COALESCE(c.content, '')),
-                to_tsquery('english', :tsquery)
-            ) AS rank
+            ts_rank(c.content_tsv, to_tsquery('english', :tsquery)) AS rank
         FROM chunks c
         JOIN documents d          ON d.id = c.document_id
         JOIN document_versions dv ON dv.id = c.document_version_id
         WHERE
-            -- Full-text match
-            to_tsvector('english', COALESCE(c.contextualized_content, '') || ' ' || COALESCE(c.content, ''))
-            @@ to_tsquery('english', :tsquery)
+            -- Full-text match against the indexed tsvector column.
+            -- ``@@`` is what makes the GIN index get used; an inline
+            -- ``to_tsvector`` would force a per-row recompute and
+            -- defeat the index entirely.
+            c.content_tsv @@ to_tsquery('english', :tsquery)
             -- Owner filter
             AND d.owner_id = :owner_id
     """
@@ -250,10 +255,7 @@ def fulltext_search(
         params["allowed_ids"] = tuple(allowed_file_ids)
 
     sql += """
-        AND ts_rank(
-            to_tsvector('english', COALESCE(c.contextualized_content, '') || ' ' || COALESCE(c.content, '')),
-            to_tsquery('english', :tsquery)
-        ) >= :min_rank
+        AND ts_rank(c.content_tsv, to_tsquery('english', :tsquery)) >= :min_rank
         ORDER BY rank DESC
         LIMIT :limit
     """

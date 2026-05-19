@@ -1,0 +1,166 @@
+name: Build + Deploy
+
+# Triggered on push to main (deploy to dev), tags (deploy to prod),
+# or manually via workflow_dispatch. The same workflow runs for both
+# environments; ``env`` and ``image_tag`` are computed from the
+# triggering ref.
+#
+# Required GitHub Actions secrets:
+#   AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY  (deploy IAM user)
+#   ECR_REPOSITORY                            (e.g. acadialogiq-backend)
+#   AWS_ACCOUNT_ID                            (used to compute ECR URI)
+#
+# Required GitHub Actions vars:
+#   AWS_REGION (default us-east-1)
+#   ECS_CLUSTER, ECS_SERVICE_API, ECS_SERVICE_WORKER (resolved from
+#       the Terraform outputs after the first apply)
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      env:
+        description: 'Deployment environment'
+        required: true
+        default: 'dev'
+        type: choice
+        options: ['dev', 'staging', 'prod']
+
+permissions:
+  # OIDC token for cross-account IAM if you migrate off long-lived
+  # access keys later. Today's secrets-based auth uses the user
+  # credentials below; the OIDC permission is harmless to keep on.
+  id-token: write
+  contents: read
+
+jobs:
+  build_and_deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so the git SHA can be embedded into the image
+          # tag + the /health/build_info field.
+          fetch-depth: 0
+
+      - name: Resolve deployment env
+        id: env_resolver
+        # Push to a tag → prod. Push to main → dev. Manual dispatch
+        # uses the input value. Computed here once so subsequent
+        # steps reference it via ${{ steps.env_resolver.outputs.env }}.
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            ENV="${{ inputs.env }}"
+          elif [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            ENV="prod"
+          else
+            ENV="dev"
+          fi
+          GIT_SHA="$(git rev-parse --short=12 HEAD)"
+          BUILD_TS="$(date -u +%Y%m%d-%H%M%S)"
+          echo "env=${ENV}" >> "$GITHUB_OUTPUT"
+          echo "git_sha=${GIT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build_timestamp=${BUILD_TS}" >> "$GITHUB_OUTPUT"
+          echo "image_tag=${GIT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Resolved env=${ENV} sha=${GIT_SHA} build=${BUILD_TS}"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION || 'us-east-1' }}
+
+      - name: Log in to Amazon ECR
+        id: ecr_login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build + push image
+        env:
+          ECR_REGISTRY: ${{ steps.ecr_login.outputs.registry }}
+          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
+          IMAGE_TAG: ${{ steps.env_resolver.outputs.image_tag }}
+          GIT_SHA: ${{ steps.env_resolver.outputs.git_sha }}
+          BUILD_TIMESTAMP: ${{ steps.env_resolver.outputs.build_timestamp }}
+        run: |
+          IMAGE_URI="${ECR_REGISTRY}/${ECR_REPOSITORY}:${IMAGE_TAG}"
+          docker build \
+            --build-arg GIT_SHA="${GIT_SHA}" \
+            --build-arg BUILD_TIMESTAMP="${BUILD_TIMESTAMP}" \
+            -t "${IMAGE_URI}" \
+            -f backend/Dockerfile .
+          docker push "${IMAGE_URI}"
+          # Also push the floating env tag (e.g. ``:dev``) so a
+          # rollback can re-deploy the previous SHA without manual
+          # tag lookup. The SHA-tagged manifest is what we record.
+          docker tag "${IMAGE_URI}" "${ECR_REGISTRY}/${ECR_REPOSITORY}:${{ steps.env_resolver.outputs.env }}"
+          docker push "${ECR_REGISTRY}/${ECR_REPOSITORY}:${{ steps.env_resolver.outputs.env }}"
+
+      - name: Trigger ECS rolling deploy — API
+        env:
+          IMAGE_TAG: ${{ steps.env_resolver.outputs.image_tag }}
+        run: |
+          # Force a new deployment by updating the service. ECS picks
+          # up the latest task-definition revision automatically when
+          # Terraform was the source of truth for the task def; we
+          # just need to kick the rollout.
+          #
+          # If you prefer pinning the task def to the SHA, run
+          # ``terraform apply`` first, then this step is a no-op.
+          aws ecs update-service \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --service "${{ vars.ECS_SERVICE_API }}" \
+            --force-new-deployment
+
+      - name: Trigger ECS rolling deploy — Report Worker
+        run: |
+          aws ecs update-service \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --service "${{ vars.ECS_SERVICE_WORKER }}" \
+            --force-new-deployment
+
+      - name: Trigger ECS rolling deploy — Ingest Worker
+        # Same image, different service. The Phase 5 split (report
+        # worker vs ingest worker) means we ship one image but
+        # update two ECS services per deploy.
+        if: ${{ vars.ECS_SERVICE_INGEST_WORKER != '' }}
+        run: |
+          aws ecs update-service \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --service "${{ vars.ECS_SERVICE_INGEST_WORKER }}" \
+            --force-new-deployment
+
+      - name: Wait for deployments to stabilise
+        run: |
+          # ``ecs wait services-stable`` polls every 15 s, up to 10 min.
+          # Fails the workflow if rollout doesn't reach steady state —
+          # combined with the ECS deployment-circuit-breaker (Phase 3
+          # Terraform) this means a bad deploy auto-rolls-back AND the
+          # CI step turns red.
+          #
+          # Service list is built conditionally so a deployment that
+          # predates the ingest_worker rollout still passes the wait.
+          services=( "${{ vars.ECS_SERVICE_API }}" "${{ vars.ECS_SERVICE_WORKER }}" )
+          if [[ -n "${{ vars.ECS_SERVICE_INGEST_WORKER }}" ]]; then
+            services+=( "${{ vars.ECS_SERVICE_INGEST_WORKER }}" )
+          fi
+          aws ecs wait services-stable \
+            --cluster "${{ vars.ECS_CLUSTER }}" \
+            --services "${services[@]}"
+
+      - name: Post-deploy smoke
+        run: |
+          # Hit /health/live through the ALB to confirm the new
+          # container responds. The ALB DNS is pulled from Terraform
+          # outputs at workflow setup time and stored in repo vars.
+          if [[ -n "${{ vars.PUBLIC_BASE_URL }}" ]]; then
+            curl --fail --show-error --max-time 10 \
+              "${{ vars.PUBLIC_BASE_URL }}/health/live"
+          else
+            echo "PUBLIC_BASE_URL not set — skipping smoke test"
+          fi

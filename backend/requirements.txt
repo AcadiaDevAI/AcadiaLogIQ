@@ -77,3 +77,18 @@ PyJWT[crypto]>=2.8.0
 cryptography>=42.0.0
 pytest>=8.2.0
 
+# Error monitoring + performance tracing.
+# DSN-empty → SDK initialises to a no-op, so this dependency is safe
+# to ship before Sentry is provisioned. The ``[fastapi]`` extra pulls
+# in the framework integration that auto-captures unhandled
+# exceptions and tags every event with the FastAPI route name.
+sentry-sdk[fastapi]>=2.0.0
+
+# Production WSGI/ASGI process manager. We run gunicorn with the
+# UvicornWorker class so the runtime stays ASGI (async-friendly) but
+# we get gunicorn's process supervision, graceful reload, and
+# request-cap recycling. Two workers minimum, sized in the entrypoint
+# script based on CPU + RDS pool budget. Single uvicorn was fine for
+# dev; gunicorn is the production posture.
+gunicorn>=22.0.0
+

@@ -867,7 +867,19 @@ def retrieve(
         
      
     def _run_bm25():
-        """Channel 2: in-memory BM25 term frequency search."""
+        """Channel 2: in-memory BM25 term frequency search.
+
+        Phase 0.1 migration: the BM25 channel is gated on the
+        ``RETRIEVAL_BM25_ENABLED`` settings flag. While the flag is
+        true (default during the 2-week shadow window), this runs as
+        the authoritative keyword path and the FTS channel runs in
+        parallel for diff measurement. After the flag flips to false
+        the function returns an empty list — BM25 stops contributing
+        but the call site stays intact so the codebase change is
+        surgical when we finally delete the module.
+        """
+        if not getattr(settings, "RETRIEVAL_BM25_ENABLED", True):
+            return []
         if bm25_search_fn is None:
             return []
         try:
@@ -955,6 +967,36 @@ def retrieve(
                 logger.warning("Search channel '%s' timed out or failed: %s", name, exc)
 
     t_search = time.perf_counter()
+
+    # =====================================================================
+    # Phase 0.1 — Shadow-mode diff logger.
+    #
+    # While the BM25 → FTS migration is in flight, log every per-query
+    # top-K from each channel to ``retrieval_eval`` so we can compute
+    # the migration verdict ("FTS recall ≥ 0.85 of BM25 recall over
+    # the last 14 days?") with one SQL query. The shadow logger is
+    # fail-open — a DB hiccup here cannot break the request that
+    # triggered it.
+    #
+    # When the verdict is in and the cutover happens
+    # (RETRIEVAL_BM25_ENABLED=false), we flip
+    # RETRIEVAL_SHADOW_LOG_ENABLED=false to stop the writes too.
+    # =====================================================================
+    if getattr(settings, "RETRIEVAL_SHADOW_LOG_ENABLED", False):
+        try:
+            from backend.retrieval.shadow_log import log_diff as _shadow_log_diff
+            _shadow_log_diff(
+                query=query,
+                bm25_results=bm25_results,
+                fts_results=keyword_results,
+                file_set_size=len(allowed_file_ids) if allowed_file_ids else 0,
+                top_k=10,
+            )
+        except Exception as _shadow_exc:
+            # Defense in depth — log_diff itself is fail-open, but if
+            # even the import or call site explodes we must still
+            # finish the request.
+            logger.warning("[retrieval_eval] shadow log skipped: %s", _shadow_exc)
 
     # =====================================================================
     # Step 3: Fuse results from all channels

@@ -28,6 +28,15 @@ ARG BUILD_TIMESTAMP=unknown
 ENV REACT_APP_BUILD_TIMESTAMP=$BUILD_TIMESTAMP
 ENV VITE_BUILD_TIMESTAMP=$BUILD_TIMESTAMP
 
+# Sentry — frontend error monitoring. DSN is the only required value;
+# when empty the SDK init becomes a no-op so the bundle still ships.
+# The DSN is a *public* identifier (designed for browser embedding)
+# but rate-limited at Sentry's edge, so embedding it is safe.
+ARG REACT_APP_SENTRY_DSN=
+ENV REACT_APP_SENTRY_DSN=$REACT_APP_SENTRY_DSN
+ARG REACT_APP_SENTRY_ENV=dev
+ENV REACT_APP_SENTRY_ENV=$REACT_APP_SENTRY_ENV
+
 # Inject timestamp into index.html as meta tag (replaces placeholder)
 RUN sed -i "s|<!--BUILD_TIMESTAMP-->|<meta name=\"build-timestamp\" content=\"$BUILD_TIMESTAMP\">|g" public/index.html || true
 

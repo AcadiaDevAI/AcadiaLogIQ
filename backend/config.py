@@ -501,6 +501,118 @@ class Settings(BaseSettings):
     HOST: str = "0.0.0.0"
     PORT: int = 8000
     LOG_LEVEL: str = "INFO"
+    # Observability output format. ``json`` emits newline-delimited
+    # JSON for CloudWatch Logs Insights ingestion; ``text`` emits a
+    # compact human-readable line that's friendlier to ``docker logs``
+    # tailing on a laptop. Both formats carry the same fields
+    # (request_id, user_id, route, status, duration_ms) so swapping
+    # is purely a deployment knob — application code never branches.
+    LOG_FORMAT: str = "json"
+
+    # ----------------------------------------------------------------
+    # Sentry — error monitoring + performance tracing
+    # ----------------------------------------------------------------
+    # ``SENTRY_DSN`` is the only required value; when empty,
+    # ``init_sentry()`` is a no-op so the app boots normally without
+    # Sentry. The other three are advisory:
+    #   * SENTRY_ENV       — labels events (``dev``, ``staging``, ``prod``)
+    #   * SENTRY_RELEASE   — usually ``BUILD_TIMESTAMP`` from the deploy
+    #                         pipeline so each release is tagged.
+    #   * SENTRY_TRACES_SAMPLE_RATE — 0.0–1.0 fraction of requests that
+    #                         get a performance trace; 0.1 = 10%.
+    SENTRY_DSN: Optional[str] = None
+    SENTRY_ENV: str = "dev"
+    SENTRY_RELEASE: Optional[str] = None
+    SENTRY_TRACES_SAMPLE_RATE: float = 0.1
+
+    # ----------------------------------------------------------------
+    # DB connection pool — sized per worker process.
+    # ----------------------------------------------------------------
+    # The total DB connections consumed by the deployment is
+    # ``(pool_size + max_overflow) × workers × containers + worker_pool``.
+    # This MUST stay below the RDS instance's ``max_connections``
+    # (minus a small reservation for admin sessions). Currently:
+    #   RDS max_connections = 80  (db.t3.small / db.t4g.micro class)
+    #   Reservation         = 10  (psql sessions + future SQS worker)
+    #   Available           = 70
+    #
+    # Defaults below assume a single-worker, single-container laptop /
+    # dev configuration. Production overrides via env vars (see
+    # docker-compose.ec2.yml / Terraform task definitions):
+    #   DB_POOL_SIZE=3, DB_MAX_OVERFLOW=5  → 8 conns/worker
+    #   At 4 workers × 2 containers = 64 conns + 6 admin = fits in 80.
+    #
+    # When the RDS class is upgraded (Phase 3 prereq → db.t3.medium with
+    # max_connections ~150) these can return to the looser laptop
+    # values without touching code.
+    DB_POOL_SIZE: int = 10
+    DB_MAX_OVERFLOW: int = 20
+    # Recycle stale connections after this many seconds. 1800 = 30 min,
+    # comfortably below the RDS server-side idle disconnect (~8 h)
+    # while still letting connections live long enough to amortise
+    # TLS handshake cost.
+    DB_POOL_RECYCLE: int = 1800
+    # Ping a connection before checking it out of the pool — costs a
+    # microsecond per checkout, pays for itself the first time the
+    # network blip happens.
+    DB_POOL_PRE_PING: bool = True
+
+    # ----------------------------------------------------------------
+    # Glossary store — per-process in-memory cache refreshed from
+    # ``document_metadata`` + ``chunks`` every N seconds. Postgres is
+    # the source of truth; this knob controls how stale the cache can
+    # be. Bounded drift across replicas is acceptable for acronym
+    # expansion (no one expects a new acronym to propagate in <60 s).
+    # Set to 0 to disable the refresher (tests, single-shot tooling).
+    # ----------------------------------------------------------------
+    GLOSSARY_REFRESH_SECONDS: int = 300
+
+    # ----------------------------------------------------------------
+    # Retrieval — BM25 → FTS migration (Phase 0.1).
+    # ----------------------------------------------------------------
+    # The in-process BM25 index is per-replica state that doesn't
+    # survive horizontal scaling cleanly. Postgres FTS (migration 045
+    # added a STORED tsvector column + GIN index on chunks) replaces
+    # it. During the 2-week shadow window we run BOTH channels and
+    # log the diff to ``retrieval_eval``; once the eval set confirms
+    # FTS is within tolerance, flip RETRIEVAL_BM25_ENABLED to false.
+    #
+    # 30 days after the flip the BM25 module is deleted from the
+    # codebase entirely — no fallback flag, no dead code.
+    RETRIEVAL_BM25_ENABLED: bool = True
+    # Shadow-mode diff logging — separate flag so we can stop the
+    # writes after the verdict is in, without removing the FTS path.
+    RETRIEVAL_SHADOW_LOG_ENABLED: bool = True
+
+    # ----------------------------------------------------------------
+    # Ingestion routing — Phase 5 worker migration safety net.
+    # ----------------------------------------------------------------
+    # ``true``  (production posture, set explicitly in Fargate task
+    #            definitions): /upload + /upload/finalize enqueue an
+    #            ``ingest_document`` job; the worker container's
+    #            ingest service claims and processes it. No in-process
+    #            work on the API tier.
+    #
+    # ``false`` (default — local dev, single-uvicorn deployments):
+    #            Routes use the legacy
+    #            ``background_tasks.add_task(index_file_job, ...)``
+    #            path. Heavy work runs in the API process. This is
+    #            the only safe default for local dev because running
+    #            a worker process is an EXPLICIT opt-in — without it,
+    #            queued jobs would sit pending forever and the
+    #            frontend would poll indefinitely.
+    INGESTION_VIA_WORKER: bool = False
+
+    # ----------------------------------------------------------------
+    # Report routing — same pattern as ingestion. RCA + Gap Analysis
+    # generations are heavy LLM calls (30 s – 4 min). When
+    # ``REPORTS_VIA_WORKER=true`` the API enqueues a job and returns
+    # 202 + job_id; a worker container claims and runs the LLM.
+    # When ``false`` (the local-dev default), the LLM runs in-process
+    # via ``asyncio.to_thread`` — identical to the pre-Phase-1
+    # behaviour the local stack expects.
+    # ----------------------------------------------------------------
+    REPORTS_VIA_WORKER: bool = False
 
     REQUEST_TIMEOUT: int = 30
     API_KEY: Optional[str] = None
