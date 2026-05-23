@@ -14,6 +14,7 @@ import {
   SettingOutlined,
   UserOutlined,
   FileSearchOutlined,
+  ApiOutlined,
 } from "@ant-design/icons";
 import { useChat } from "../hooks/ChatContext";
 import { useTheme } from "../hooks/ThemeContext";
@@ -91,7 +92,7 @@ function groupByVersionFamily(files) {
   return result;
 }
 
-export default function Sidebar({ onOpenRca, onOpenGapAnalysis }) {
+export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilter, onOpenServiceNow }) {
   // Sprint 13.32 — `onOpenRca` is passed in from AppLayout. When the
   // RCA button below History is clicked, we call it to flip the
   // right pane over to the RCAFlow surface. Sidebar itself stays
@@ -507,6 +508,55 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis }) {
               }}
             >
               Gap Analysis
+            </Button>
+          </Tooltip>
+        </div>
+      ) : null}
+
+      {/* Ticket Filter — sibling button below Gap Analysis. Same
+          colour / typography / size as the RCA and Gap buttons so
+          the three read as a peer trio. Wired via AppLayout's
+          ``onOpenTicketFilter``. Hidden when no handler is passed
+          (backwards-compatible). */}
+      {typeof onOpenTicketFilter === "function" ? (
+        <div className="px-3 pt-2">
+          <Tooltip title="Filter historical tickets by SLA outcome and resolution quality score">
+            <Button
+              icon={<FileSearchOutlined />}
+              onClick={onOpenTicketFilter}
+              block
+              className="rounded-lg h-9 font-medium text-sm"
+              style={{
+                backgroundColor: "var(--acadia-primary)",
+                borderColor: "var(--acadia-primary)",
+                color: "#fff"
+              }}
+            >
+              Ticket Filter
+            </Button>
+          </Tooltip>
+        </div>
+      ) : null}
+
+      {/* Connect to ServiceNow — placed directly below Ticket Filter
+          as a sibling. Optional external integration; hidden until
+          AppLayout passes ``onOpenServiceNow``. Different icon to
+          set it apart visually from the local-DB filter above. */}
+      {typeof onOpenServiceNow === "function" ? (
+        <div className="px-3 pt-2">
+          <Tooltip title="Fetch priority-1 incidents from the configured ServiceNow instance">
+            <Button
+              icon={<ApiOutlined />}
+              onClick={onOpenServiceNow}
+              block
+              className="rounded-lg h-9 font-medium text-sm"
+              style={{
+                backgroundColor: "var(--acadia-primary)",
+                borderColor: "var(--acadia-primary)",
+                color: "#fff"
+              }}
+            >
+              Connect to ServiceNow
             </Button>
           </Tooltip>
         </div>

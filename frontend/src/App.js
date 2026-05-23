@@ -11,6 +11,8 @@ import RCAFlow from "./components/RCA/RCAFlow";
 import RCAEntryModal from "./components/RCA/RCAEntryModal";
 import GapAnalysisFlow from "./components/GapAnalysis/GapAnalysisFlow";
 import GapAnalysisEntryModal from "./components/GapAnalysis/GapAnalysisEntryModal";
+import TicketFilterFlow from "./components/TicketFilter/TicketFilterFlow";
+import ServiceNowFlow from "./components/ServiceNow/ServiceNowFlow";
 
 function BuildStamp() {
   return (
@@ -51,13 +53,13 @@ function AppLayout() {
   const [rcaPayload, setRcaPayload] = useState(null);
 
   const handleRcaModalSubmit = useCallback((payload) => {
-    // Close the Gap Analysis flow if it's open — the render chain
-    // checks rcaOpen FIRST, so without this the new RCA submit would
-    // still work but a stale gapOpen=true would render Gap Analysis
-    // again the moment RCA returns. Symmetric with handleGapModalSubmit
-    // below.
+    // Close every other right-pane flow so the render chain
+    // shows the freshly-opened RCA pane (and so a stale gapOpen /
+    // ticketFilterOpen / serviceNowOpen doesn't reappear when RCA returns).
     setGapOpen(false);
     setGapPayload(null);
+    setTicketFilterOpen(false);
+    setServiceNowOpen(false);
     setRcaPayload(payload);
     setRcaOpen(true);
     setRcaModalOpen(false);
@@ -77,17 +79,65 @@ function AppLayout() {
   const [gapOpen, setGapOpen] = useState(false);
   const [gapPayload, setGapPayload] = useState(null);
 
+  // Ticket Filter — independent right-pane feature, same mount
+  // mechanics as RCA / Gap but with no modal (the dropdowns live
+  // inside the flow component itself).
+  const [ticketFilterOpen, setTicketFilterOpen] = useState(false);
+
+  // ServiceNow — independent optional integration. Same mount
+  // mechanics as Ticket Filter. The flow auto-fetches on mount,
+  // so no modal / payload state is needed at this layer.
+  const [serviceNowOpen, setServiceNowOpen] = useState(false);
+
   const handleGapModalSubmit = useCallback((payload) => {
-    // Close the RCA flow if it's open — the render chain checks
-    // rcaOpen BEFORE gapOpen, so without this Gap Analysis would
-    // never appear when the user navigates from RCA → Gap. This was
-    // the exact bug: "click Gap Analysis from RCA does nothing".
+    // Close every other right-pane flow so the render chain shows
+    // the freshly-opened Gap Analysis pane.
     setRcaOpen(false);
     setRcaPayload(null);
+    setTicketFilterOpen(false);
+    setServiceNowOpen(false);
     setGapPayload(payload);
     setGapOpen(true);
     setGapModalOpen(false);
   }, []);
+
+  // Sidebar's "Ticket Filter" button — no modal, so this is the
+  // only handler the feature needs. Closes RCA + Gap on open
+  // (symmetric with their handlers above).
+  const handleOpenTicketFilter = useCallback(() => {
+    setRcaOpen(false);
+    setRcaPayload(null);
+    setGapOpen(false);
+    setGapPayload(null);
+    setServiceNowOpen(false);
+    setTicketFilterOpen(true);
+  }, []);
+
+  // "Return to Stages" from Ticket Filter — mirrors RCA / Gap.
+  const handleReturnFromTicketFilter = useCallback(() => {
+    dispatch({ type: "RESET_MODE_STATE" });
+    dispatch({ type: "CLEAR_JOURNEY_RESUME" });
+    setTicketFilterOpen(false);
+  }, [dispatch]);
+
+  // Sidebar's "Connect to ServiceNow" button — no modal needed since
+  // the flow auto-fetches on mount. Closes every other right-pane
+  // takeover, identical pattern to handleOpenTicketFilter above.
+  const handleOpenServiceNow = useCallback(() => {
+    setRcaOpen(false);
+    setRcaPayload(null);
+    setGapOpen(false);
+    setGapPayload(null);
+    setTicketFilterOpen(false);
+    setServiceNowOpen(true);
+  }, []);
+
+  // "Return to Stages" from ServiceNow — mirrors RCA / Gap / Filter.
+  const handleReturnFromServiceNow = useCallback(() => {
+    dispatch({ type: "RESET_MODE_STATE" });
+    dispatch({ type: "CLEAR_JOURNEY_RESUME" });
+    setServiceNowOpen(false);
+  }, [dispatch]);
 
   const handleReturnFromGapAnalysis = useCallback(() => {
     // Mirror RCA's "Return to Stages" — drop the user on the
@@ -123,6 +173,8 @@ function AppLayout() {
         <Sidebar
           onOpenRca={() => setRcaModalOpen(true)}
           onOpenGapAnalysis={() => setGapModalOpen(true)}
+          onOpenTicketFilter={handleOpenTicketFilter}
+          onOpenServiceNow={handleOpenServiceNow}
         />
       </div>
 
@@ -133,6 +185,8 @@ function AppLayout() {
             <Sidebar
               onOpenRca={() => setRcaModalOpen(true)}
               onOpenGapAnalysis={() => setGapModalOpen(true)}
+              onOpenTicketFilter={handleOpenTicketFilter}
+              onOpenServiceNow={handleOpenServiceNow}
             />
           </div>
           <div
@@ -177,6 +231,23 @@ function AppLayout() {
           <GapAnalysisFlow
             initialPayload={gapPayload}
             onReturnToStages={handleReturnFromGapAnalysis}
+          />
+        ) : ticketFilterOpen ? (
+          /* Ticket Filter right-pane takeover — independent of RCA
+             and Gap. The setters above ensure rcaOpen / gapOpen are
+             cleared whenever this opens, so the if/else priority
+             ordering above this branch can't shadow it. */
+          <TicketFilterFlow
+            onReturnToStages={handleReturnFromTicketFilter}
+          />
+        ) : serviceNowOpen ? (
+          /* ServiceNow right-pane takeover — independent optional
+             integration. Mutual-exclusion with the other flows is
+             enforced by handleOpenServiceNow + the symmetric closures
+             added to handleRcaModalSubmit / handleGapModalSubmit /
+             handleOpenTicketFilter above. */
+          <ServiceNowFlow
+            onReturnToStages={handleReturnFromServiceNow}
           />
         ) : showLanding ? (
           <LandingRouter />

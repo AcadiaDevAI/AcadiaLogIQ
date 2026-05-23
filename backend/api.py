@@ -640,6 +640,22 @@ except Exception as _jobs_exc:
         _jobs_exc,
     )
 
+# Ticket Filter — independent feature, lives at /ticket-filter.
+# Two-field dropdown filter (SLA_Target_Met + Resolution_Quality_Score)
+# over historical tickets. Zero dependency on RCA / Gap / Chat code;
+# its own router, its own SQL helpers, its own response schema.
+# Mount wrapped in try/except so a regression in this module can
+# never block app startup.
+try:
+    from backend.tier1_copilot.ticket_filter.routes import router as _ticket_filter_router
+    app.include_router(_ticket_filter_router)
+    logger.info("[ticket_filter] router mounted at /ticket-filter")
+except Exception as _ticket_filter_exc:
+    logger.warning(
+        "[ticket_filter] failed to mount router (module disabled): %s",
+        _ticket_filter_exc,
+    )
+
 # Phase 4 — shared per-user rate limiter (see
 # backend/observability/rate_limit.py). The Limiter is now defined
 # in a separate module so sub-routers (RCA, Gap Analysis, jobs) can
