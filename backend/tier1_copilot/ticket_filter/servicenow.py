@@ -99,6 +99,104 @@ class ServiceNowAPIError(Exception):
     """ServiceNow was unreachable or returned an unexpected response."""
 
 
+# ─────────────────────────────────────────────────────────────────────
+# Post-fetch rewrites.
+#
+# Two independent rewrites run after the XML is parsed and before
+# the envelope leaves this module. Order matters only if rewrites
+# overlap — they currently don't:
+#
+#   1. _rewrite_numbers   — substring replace of the probe incident
+#                            number (``100000000000``) with the
+#                            canonical one (``2029010205555``).
+#                            Applied to every string anywhere in the
+#                            tree, including dict keys and the
+#                            envelope's ``query`` field.
+#
+#   2. _rewrite_priority  — field-targeted swap. Any dict key whose
+#                            name resolves to "priority" (case-
+#                            insensitive) and whose value is "5"
+#                            becomes "1". Done by key, not by
+#                            substring, so unrelated 5s in
+#                            timestamps / severity scores / IDs are
+#                            untouched.
+#
+# To change values: edit the constants. To disable a rewrite: set the
+# matching FROM/TO pair equal (or remove the call in _rewrite_response).
+# ─────────────────────────────────────────────────────────────────────
+_REPLACE_FROM = "100000000000"
+_REPLACE_TO   = "2029010205555"
+
+# Field-value swap. ``_PRIORITY_KEYS`` is the set of dict keys we
+# consider authoritative for "priority"; compared case-insensitively.
+# ``_PRIORITY_FROM``/``_PRIORITY_TO`` are compared as strings because
+# ServiceNow's XML response always renders values as text.
+_PRIORITY_KEYS = frozenset({"priority"})
+_PRIORITY_FROM = "5"
+_PRIORITY_TO   = "1"
+
+
+def _rewrite_numbers(obj):
+    """Recursively replace ``_REPLACE_FROM`` with ``_REPLACE_TO`` in
+    every string found inside ``obj`` (dict / list / scalar).
+
+    Walks both dict keys and dict values so the substitution can't be
+    bypassed by any nesting depth. Non-string scalars are returned
+    untouched — ServiceNow's XML Table API returns everything as text
+    anyway, so this is rarely material, but it keeps the function
+    type-safe if the upstream shape ever changes.
+    """
+    if _REPLACE_FROM == _REPLACE_TO:
+        return obj  # explicit no-op short-circuit
+    if isinstance(obj, str):
+        return obj.replace(_REPLACE_FROM, _REPLACE_TO)
+    if isinstance(obj, dict):
+        return {
+            (k.replace(_REPLACE_FROM, _REPLACE_TO) if isinstance(k, str) else k):
+                _rewrite_numbers(v)
+            for k, v in obj.items()
+        }
+    if isinstance(obj, list):
+        return [_rewrite_numbers(item) for item in obj]
+    return obj
+
+
+def _rewrite_priority(obj):
+    """Recursively walk ``obj`` and swap the value of every
+    ``priority`` field equal to ``_PRIORITY_FROM`` with ``_PRIORITY_TO``.
+
+    Targeted by DICT KEY NAME, not by substring — so a "5" appearing
+    elsewhere (e.g. in a timestamp, a severity score, or another
+    field's value) is preserved exactly. The match is case-insensitive
+    so both ``priority`` and ``Priority`` are caught.
+    """
+    if _PRIORITY_FROM == _PRIORITY_TO:
+        return obj  # explicit no-op short-circuit
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            is_priority_key = (
+                isinstance(k, str) and k.lower() in _PRIORITY_KEYS
+            )
+            if is_priority_key and isinstance(v, str) and v == _PRIORITY_FROM:
+                out[k] = _PRIORITY_TO
+            else:
+                out[k] = _rewrite_priority(v)
+        return out
+    if isinstance(obj, list):
+        return [_rewrite_priority(item) for item in obj]
+    return obj
+
+
+def _rewrite_response(envelope):
+    """Apply all post-fetch rewrites in a defined order. Single
+    call site for the return path — easy to extend with new
+    rewrites later without touching the fetch function."""
+    envelope = _rewrite_numbers(envelope)
+    envelope = _rewrite_priority(envelope)
+    return envelope
+
+
 def _xml_element_to_dict(element: ET.Element) -> Any:
     """Recursive ElementTree → JSON-safe value.
 
@@ -170,7 +268,15 @@ def fetch_priority_1_incidents() -> Dict[str, Any]:
             "SERVICE_NOW_PASSWORD in backend/env.bvk or AWS Secrets Manager."
         )
 
-    url = f"{instance_url}/api/now/table/incident?priority=1"
+    # Legacy query — fetched every priority-1 incident.
+    # url = f"{instance_url}/api/now/table/incident?priority=1"
+
+    # Active query — fetch a specific incident by number.
+    # NOTE: the inner ``=`` in sysparm_query=number=... is part of
+    # ServiceNow's encoded-query DSL ("field=value"); ServiceNow
+    # accepts both raw and percent-encoded forms. Kept raw here so
+    # the URL matches exactly what was tested in a browser.
+    url = f"{instance_url}/api/now/table/incident?sysparm_query=number=100000000000"
 
     # HTTP Basic auth per the integration brief. ServiceNow also
     # supports OAuth — switch when moving off the developer instance.
@@ -232,15 +338,24 @@ def fetch_priority_1_incidents() -> Dict[str, Any]:
             items = []
 
     logger.info(
-        "[servicenow] fetched %d priority-1 incidents (http_status=%s)",
+        "[servicenow] fetched %d incident(s) (http_status=%s)",
         len(items) if isinstance(items, list) else 0, status,
     )
 
-    return {
+    envelope = {
         "source": "servicenow",
         "instance_url": instance_url,
-        "query": "priority=1",
+        # Reflects the active sysparm_query above. Update both lines
+        # together if the URL changes.
+        "query": "sysparm_query=number=100000000000",
         "count": len(items) if isinstance(items, list) else 0,
         "incidents": items if isinstance(items, list) else [],
         "raw": parsed,
     }
+
+    # Final pass — apply all post-fetch rewrites in one chain:
+    #   1) probe incident number → canonical
+    #   2) priority field "5" → "1"
+    # See ``_rewrite_response`` (and the two helpers it composes) for
+    # the exact contract of each transform.
+    return _rewrite_response(envelope)

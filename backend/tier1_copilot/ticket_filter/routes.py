@@ -215,9 +215,13 @@ async def fetch_servicenow_incidents_route(
 
     # External HTTP call is blocking — push to a worker thread so the
     # asyncio event loop stays responsive while waiting on ServiceNow.
+    # Use asyncio.to_thread (Python 3.9+ stdlib) — the convention this
+    # codebase already uses everywhere (10+ call sites in backend/api.py).
+    # Earlier this route used anyio.to_thread.run_sync; that mis-matched
+    # the rest of the project and surfaced as an opaque 500 at the route.
     try:
-        from anyio import to_thread
-        payload = await to_thread.run_sync(fetch_priority_1_incidents)
+        import asyncio
+        payload = await asyncio.to_thread(fetch_priority_1_incidents)
     except ServiceNowConfigError as exc:
         raise HTTPException(status_code=503, detail=str(exc))
     except ServiceNowAPIError as exc:
