@@ -62,4 +62,3 @@ yarn-error.log*
 *.bak
 
 .claude/settings.local.json
-backend/uploads/
