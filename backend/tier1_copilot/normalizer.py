@@ -31,8 +31,15 @@ def normalize_alert(req: Tier1AnalyzeRequest, alias_dict: Any) -> Dict[str, Any]
       search_terms     : alias-expanded keyword list (sorted, unique)
       search_text      : space-joined free text for embedding + BM25
     """
+    # Severity became optional at the API boundary — the landing form
+    # no longer gates submit on it. Fall back to an empty string in the
+    # signature so the cache key + hash stay deterministic without
+    # dereferencing None.
+    #
+    # Previous (severity-mandatory) line preserved for reference:
+    # sig_parts = [req.severity.lower(), _clean(req.asset_name), _clean(req.alert_type)]
     sig_parts = [
-        req.severity.lower(),
+        (req.severity or "").lower(),
         _clean(req.asset_name),
         _clean(req.alert_type),
     ]
@@ -67,8 +74,11 @@ def normalize_alert(req: Tier1AnalyzeRequest, alias_dict: Any) -> Dict[str, Any]
                 if alias:
                     expanded.add(alias)
 
+    # `req.severity` may be None now (optional at the API boundary);
+    # coerce to "" so the `if p` filter below drops it cleanly instead
+    # of trying to join NoneType into the search text.
     search_text_parts: List[str] = [
-        req.severity,
+        req.severity or "",
         req.asset_name,
         req.alert_type,
         req.technology or "",

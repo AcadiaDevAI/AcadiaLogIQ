@@ -15,8 +15,16 @@ from pydantic import BaseModel, Field
 # /tier1/analyze
 # ─────────────────────────────────────────────────────────────
 class Tier1AnalyzeRequest(BaseModel):
-    # Mandatory (3)
-    severity: Literal["P1", "P2", "P3", "P4"]
+    # Mandatory (2) — severity moved to optional. The landing-page
+    # intake form no longer gates submit on severity; it lives inside
+    # the "Add more context" expander and is sent as null when the
+    # engineer skips it. Downstream analyze logic already tolerates a
+    # missing severity (it only feeds prompt context + filtering), so
+    # the field stays on the contract — only its required-ness changed.
+    #
+    # Previous (severity-mandatory) definition kept for reference:
+    # severity: Literal["P1", "P2", "P3", "P4"]
+    severity: Optional[Literal["P1", "P2", "P3", "P4"]] = None
     asset_name: str = Field(..., min_length=1, max_length=200)
     alert_type: str = Field(..., min_length=1, max_length=200)
     # Optional (6)

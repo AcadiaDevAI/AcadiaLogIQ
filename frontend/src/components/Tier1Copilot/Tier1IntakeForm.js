@@ -407,9 +407,18 @@ function ProgressiveIntakeForm({
   }, [prefill && prefill._stamp]);
   const [expanded, setExpanded] = useState(false);
 
+  // Severity is no longer a mandatory gate — the engineer can submit
+  // with just Asset + Alert. Severity moved into the "Add more context"
+  // optional block; if picked there it still rides on the payload below
+  // (the backend contract is unchanged — severity is allowed to be null).
+  //
+  // Previous (three-field) gate kept here for reference:
+  // const canSubmit =
+  //   !!severity
+  //   && !!assetName.trim()
+  //   && !!alertType.trim();
   const canSubmit =
-    !!severity
-    && !!assetName.trim()
+    !!assetName.trim()
     && !!alertType.trim();
 
   const handleFinish = (values) => {
@@ -516,16 +525,26 @@ function ProgressiveIntakeForm({
             layout="vertical"
             onFinish={handleFinish}
           >
-            <Form.Item
-              label={<span style={{ fontWeight: 600 }}>Severity</span>}
-              required
-            >
-              <SeverityChipSelector
-                value={severity}
-                onChange={setSeverity}
-                disabled={busy}
-              />
-            </Form.Item>
+            {/* Severity removed from the mandatory top section. It now
+                lives inside the "Add more context" expander below and is
+                fully optional. The engineer can search with just the two
+                remaining required fields (Asset + Alert). The submit
+                payload still carries `severity` (state value below) — it
+                just defaults to null when the engineer skips it.
+
+                Previous (mandatory-at-top) markup preserved for reference:
+
+                <Form.Item
+                  label={<span style={{ fontWeight: 600 }}>Severity</span>}
+                  required
+                >
+                  <SeverityChipSelector
+                    value={severity}
+                    onChange={setSeverity}
+                    disabled={busy}
+                  />
+                </Form.Item>
+            */}
 
             <Form.Item
               label={<span style={{ fontWeight: 600 }}>Asset or system</span>}
@@ -572,6 +591,23 @@ function ProgressiveIntakeForm({
                 className="grid grid-cols-1 md:grid-cols-2 gap-x-4"
                 style={{ transition: tokens.transitionMed }}
               >
+                {/* Severity — relocated here as an optional field. The
+                    chip selector + state binding (`severity` /
+                    `setSeverity`) are unchanged; only its position in
+                    the form moved (and the field is no longer required
+                    on the canSubmit gate above). The md:col-span-2 keeps
+                    the chip row full-width so the chips have room to
+                    breathe inside the grid. */}
+                <Form.Item
+                  label="Severity"
+                  className="md:col-span-2"
+                >
+                  <SeverityChipSelector
+                    value={severity}
+                    onChange={setSeverity}
+                    disabled={busy}
+                  />
+                </Form.Item>
                 <Form.Item label="Customer" name="customer">
                   <Input size="large" maxLength={200} allowClear />
                 </Form.Item>
