@@ -5,6 +5,11 @@ import { ThemeProvider, useTheme } from "./hooks/ThemeContext";
 // so it has zero effect under the legacy theme. Imported once at app
 // root so the cascade is available when ACTIVE_THEME = "premium".
 import "./theme/premium.css";
+// Premium DARK companion — selectors are scoped to
+// `.theme-premium.theme-premium-dark`, so it only paints when the
+// premium theme is active AND the user has toggled to dark. Light
+// premium is untouched.
+import "./theme/premium-dark.css";
 import { resolveAntdTheme } from "./theme/theme-config";
 import { ChatProvider, useChat } from "./hooks/ChatContext";
 import Sidebar from "./components/Sidebar";

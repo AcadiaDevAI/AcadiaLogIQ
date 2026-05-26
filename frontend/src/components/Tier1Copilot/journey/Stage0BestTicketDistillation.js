@@ -11,7 +11,7 @@
 
 import React from "react";
 import { Button, Card, List, Tag, Tooltip, Typography } from "antd";
-import { MessageOutlined } from "@ant-design/icons";
+import { MessageOutlined, ExportOutlined } from "@ant-design/icons";
 
 import CardWatermark from "./CardWatermark";
 import CorpusStatsTail from "./CorpusStatsTail";
@@ -28,6 +28,120 @@ import { stripLeadingNumber } from "./stepText";
 import useChatHandoff from "./useChatHandoff";
 
 const { Title, Text, Paragraph } = Typography;
+
+
+// ─────────────────────────────────────────────────────────────
+// Block 01 — Best Historical Match & Recommended Resolution
+// Scoped 7-step blue scale + 8 type roles.
+// Class names are `.b01-*` so this stylesheet cannot bleed into
+// any other panel (Stage 2 / Stage 3 / RCA / Gap Analysis all
+// remain visually untouched). Injected once per session via the
+// module guard below.
+// Roles:
+//   eyebrow  — small uppercase mono label above the headline
+//   display  — large headline ("We found N similar matches.")
+//   accent   — gradient-painted word inside the headline ("match")
+//   subhead  — secondary line beneath the headline (carries cohort)
+//   rowIndex — 01 / 02 / 03 … left-side row counter (tabular nums)
+//   rowBody  — main descriptive text inside the row
+//   rowId    — inline ticket id (e.g. INC-PHOENIX-402)
+//   rowLink  — "Discuss →" right-aligned per-row action
+// ─────────────────────────────────────────────────────────────
+const B01_BLUE = {
+  50:  "#EFF6FF",
+  100: "#DBEAFE",
+  200: "#BFDBFE",
+  400: "#60A5FA",
+  500: "#3B82F6",
+  600: "#2563EB",
+  700: "#1D4ED8",
+};
+const B01_CSS = `
+.b01-root { color: #0F172A; }
+.b01-eyebrow {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 4px 12px; border-radius: 9999px;
+  background: ${B01_BLUE[50]};
+  border: 1px solid ${B01_BLUE[200]};
+  color: ${B01_BLUE[700]};
+  font-family: var(--font-mono, 'Geist Mono', 'JetBrains Mono', Consolas, monospace);
+  font-size: 10.5px; font-weight: 500; letter-spacing: 0.14em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+.b01-eyebrow__dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: ${B01_BLUE[500]};
+  box-shadow: 0 0 8px ${B01_BLUE[400]};
+}
+.b01-display {
+  font-family: var(--font-display, 'Instrument Serif', Georgia, serif);
+  font-size: clamp(26px, 3.2vw, 36px);
+  font-weight: 400; line-height: 1.12; letter-spacing: -0.018em;
+  margin: 0 0 6px 0; color: #0F172A;
+}
+.b01-accent {
+  font-style: italic; font-weight: 400;
+  background: linear-gradient(135deg, ${B01_BLUE[400]} 0%, ${B01_BLUE[600]} 60%, ${B01_BLUE[700]} 100%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+}
+.b01-subhead {
+  font-family: var(--font-body, 'Geist', system-ui, sans-serif);
+  font-size: 13px; line-height: 1.5; color: #475569;
+  margin: 0 0 18px 0;
+}
+.b01-rows { list-style: none; padding: 0; margin: 0 0 4px 0; }
+.b01-row {
+  display: grid;
+  grid-template-columns: 40px 1fr auto;
+  gap: 14px;
+  align-items: start;
+  padding: 10px 0;
+  border-top: 1px solid ${B01_BLUE[100]};
+}
+.b01-row:first-child { border-top: none; padding-top: 4px; }
+.b01-rowIndex {
+  font-family: var(--font-mono, 'Geist Mono', monospace);
+  font-feature-settings: 'tnum' 1;
+  font-size: 13px; font-weight: 600; color: ${B01_BLUE[600]};
+  line-height: 1.55; padding-top: 1px;
+}
+.b01-rowBody {
+  font-family: var(--font-body, 'Geist', system-ui, sans-serif);
+  font-size: 14px; line-height: 1.55; color: #0F172A;
+}
+.b01-rowId {
+  display: inline-block;
+  font-family: var(--font-mono, 'Geist Mono', monospace);
+  font-feature-settings: 'tnum' 1;
+  font-size: 12.5px; font-weight: 600;
+  color: ${B01_BLUE[700]};
+  background: ${B01_BLUE[50]};
+  border: 1px solid ${B01_BLUE[200]};
+  padding: 1px 8px; border-radius: 6px;
+  margin-right: 8px;
+}
+.b01-rowLink {
+  font-family: var(--font-body, 'Geist', system-ui, sans-serif);
+  font-size: 12.5px; font-weight: 600;
+  color: ${B01_BLUE[600]};
+  background: transparent; border: none; padding: 4px 0; cursor: pointer;
+  white-space: nowrap;
+  transition: color 160ms ease, transform 160ms ease;
+}
+.b01-rowLink:hover:not(:disabled) { color: ${B01_BLUE[700]}; transform: translateX(2px); }
+.b01-rowLink:disabled { color: ${B01_BLUE[400]}; cursor: not-allowed; }
+`;
+let _b01StylesInjected = false;
+function _ensureB01Styles() {
+  if (typeof document === "undefined" || _b01StylesInjected) return;
+  const style = document.createElement("style");
+  style.setAttribute("data-acadia-block01", "1");
+  style.textContent = B01_CSS;
+  document.head.appendChild(style);
+  _b01StylesInjected = true;
+}
 
 
 function formatMinutes(mins) {
@@ -110,6 +224,10 @@ export default function Stage0BestTicketDistillation({
   // Sprint 11 — per-step "Ask in chat" links. Hook is a no-op when
   // sessionId is missing (defensive — Stage 0 should always have one).
   const { busy: handoffBusy, askInChat } = useChatHandoff(sessionId);
+
+  // Block 01 — inject scoped CSS once on first mount. Idempotent.
+  React.useEffect(() => { _ensureB01Styles(); }, []);
+
   if (!data) return null;
 
   // ── Sparse case (cohort empty) ──
@@ -159,99 +277,149 @@ export default function Stage0BestTicketDistillation({
       }}
     >
       <CardWatermark />
-      {/* Sprint 13.8 — marginBottom bumped 4 → 16 so there is one
-          line of breathing room between the title and the headline.
-          The original 4px was set when `profile_match` rendered as a
-          tag directly below the title (now commented out); without
-          that intermediate element the title and headline collide
-          visually. */}
-      <Title level={5} style={{ marginTop: 0, marginBottom: 16, position: "relative", zIndex: 1 }}>
-        Best Historical Match & Recommended Resolution
-      </Title>
+      {/* ─── Block 01 — Best Historical Match (premium typography) ─────
+          The Card wrapper, <CardWatermark/>, footer (Helpful/Dislike/
+          Escalate/NextStage) all remain UNCHANGED. Only the title +
+          headline + bullet-list region below has been re-typeset
+          against the 8-role scale defined in B01_CSS above.
 
-      {/* Sprint 13.8 — profile_match tag suppressed at the user's
-          request. The line read e.g.
-          "BGP Flap (BFD Down). · Network / Fast Convergence · ny4-core-rtr"
-          and surfaced ticket-internal taxonomy that the engineer
-          shouldn't see at the Stage 0 level. Backend still computes
-          `data.profile_match`; only the render is commented.
-          Reinstate by un-commenting the JSX block. */}
-      {/*
-      {data.profile_match ? (
-        <Tag style={{ marginBottom: 8 }}>{data.profile_match}</Tag>
-      ) : null}
-      */}
+          The OLD render is preserved in the comment block immediately
+          below so it can be reinstated by uncommenting and removing
+          the new block:
 
-      <Paragraph style={{ marginBottom: 12 }}>
-        <Text strong>{buildHeadline(data)}</Text>
-      </Paragraph>
+          ── OLD (Sprint 13.7 / 13.8) ──
+          <Title level={5} style={{ marginTop: 0, marginBottom: 16, position: "relative", zIndex: 1 }}>
+            Best Historical Match & Recommended Resolution
+          </Title>
+          <Paragraph style={{ marginBottom: 12 }}>
+            <Text strong>{buildHeadline(data)}</Text>
+          </Paragraph>
+          {data.top5_incident_summaries && data.top5_incident_summaries.length > 0 ? (
+            <div style={{ marginBottom: 8 }}>
+              <Text strong>Possible details are:</Text>
+              <List
+                size="small"
+                dataSource={data.top5_incident_summaries}
+                renderItem={(s, i) => {
+                  const cleaned = stripLeadingNumber(s);
+                  const bulletIncident =
+                    extractTrailingIncidentId(cleaned) || data.best_incident || null;
+                  return (
+                    <List.Item key={i} style={{ paddingLeft: 8, display: "flex", alignItems: "flex-start", gap: 8 }}>
+                      <span style={{ flex: 1 }}>{i + 1}. {cleaned}</span>
+                      {sessionId && cleaned ? (
+                        <Tooltip title={bulletIncident ? `Discuss this with Logic — the chat will be scoped to ${bulletIncident}` : "Discuss this with Logic"}>
+                          <Button type="link" size="small" icon={<MessageOutlined />}
+                            loading={handoffBusy} onClick={() => askInChat(cleaned, bulletIncident)}
+                            style={{ paddingLeft: 0, paddingRight: 0 }}>
+                            Discuss with LogIQ
+                          </Button>
+                        </Tooltip>
+                      ) : null}
+                    </List.Item>
+                  );
+                }}
+              />
+            </div>
+          ) : null}
+          ── /OLD ── */}
+      <div className="b01-root" style={{ position: "relative", zIndex: 1 }}>
+        {/* Role: eyebrow — small uppercase mono chip */}
+        <div className="b01-eyebrow">
+          <span aria-hidden className="b01-eyebrow__dot" />
+          Best Historical Match
+        </div>
 
-      {/* {data.what_worked ? (
-        <Paragraph style={{ marginBottom: 8 }}>
-          <Text strong>What worked: </Text>
-          {data.what_worked}
-        </Paragraph>
-      ) : null} */}
+        {/* Role: display + accent word "match" (must literally be the
+            accent per spec). Cohort count is computed off the live
+            visible-rows count exactly as `buildHeadline` did, so no
+            data-shape change. */}
+        {(() => {
+          const visibleCount = Array.isArray(data.top5_incident_summaries)
+            ? data.top5_incident_summaries.length
+            : 0;
+          const n = visibleCount || data.cohort_size || 0;
+          const noun = n === 1 ? "match" : "matches";
+          return (
+            <h2 className="b01-display">
+              We found {n} similar{" "}
+              <em className="b01-accent">{noun}</em> for this issue.
+            </h2>
+          );
+        })()}
 
-      {/* Sprint 13.7 — bullet source switched from `how_they_did_it`
-          (Resolution_Steps) to `top5_incident_summaries`
-          (Incident_Summary.INCIDENT). Heading renamed "How they did
-          it" → "Possible details are". Per-bullet button label
-          renamed "Ask in chat" → "Discuss with LogIQ". The
-          ` - INC-XXX` suffix shape is preserved on the new field so
-          `extractTrailingIncidentId` keeps scoping the per-bullet
-          chat handoff to the right source ticket. The legacy
-          `how_they_did_it` field stays on the schema for any other
-          consumer; only the render source changed. */}
-      {data.top5_incident_summaries && data.top5_incident_summaries.length > 0 ? (
-        <div style={{ marginBottom: 8 }}>
-          <Text strong>Possible details are:</Text>
-          <List
-            size="small"
-            dataSource={data.top5_incident_summaries}
-            renderItem={(s, i) => {
+        {/* Role: subhead — carries cohort size (formatted with
+            thousands separators, e.g. "14,847" when the corpus is
+            that large). `data.corpus_size` is the upstream library
+            count; falls back to cohort_size when the larger figure
+            isn't shipped, and is omitted entirely when neither is
+            available so we never show a dishonest "0 resolved" line. */}
+        {(() => {
+          const corpus = (
+            typeof data.corpus_size === "number" ? data.corpus_size
+              : (typeof data.total_resolved === "number" ? data.total_resolved
+                : (typeof data.cohort_size === "number" ? data.cohort_size : null))
+          );
+          if (corpus == null) return null;
+          return (
+            <p className="b01-subhead">
+              Drawn from {corpus.toLocaleString("en-US")} resolved tickets in
+              the Acadia knowledge base.
+            </p>
+          );
+        })()}
+
+        {/* Numbered rows — rowIndex (01/02…), rowBody w/ inline rowId
+            chip, rowLink ("Discuss →"). Rendered when top5 exists. */}
+        {data.top5_incident_summaries && data.top5_incident_summaries.length > 0 ? (
+          <ul className="b01-rows">
+            {data.top5_incident_summaries.map((s, i) => {
               const cleaned = stripLeadingNumber(s);
               const bulletIncident =
                 extractTrailingIncidentId(cleaned) || data.best_incident || null;
+              // Strip the trailing " - INC-XXX" suffix from the body
+              // so the id renders ONCE (as the inline chip) instead of
+              // being duplicated at the end of the sentence.
+              const bodyText = bulletIncident
+                ? cleaned.replace(/\s*-\s*[A-Z][A-Z0-9-]+\s*$/, "")
+                : cleaned;
+              const idx = String(i + 1).padStart(2, "0");
               return (
-                <List.Item
-                  key={i}
-                  style={{
-                    paddingLeft: 8,
-                    display: "flex",
-                    alignItems: "flex-start",
-                    gap: 8,
-                  }}
-                >
-                  <span style={{ flex: 1 }}>
-                    {i + 1}. {cleaned}
+                <li className="b01-row" key={i}>
+                  <span className="b01-rowIndex">{idx}</span>
+                  <span className="b01-rowBody">
+                    {bulletIncident ? (
+                      <span className="b01-rowId">{bulletIncident}</span>
+                    ) : null}
+                    {bodyText}
                   </span>
                   {sessionId && cleaned ? (
                     <Tooltip
                       title={
                         bulletIncident
-                          ? `Discuss this with Logic — the chat will be scoped to ${bulletIncident}`
-                          : "Discuss this with Logic"
+                          ? `Discuss this with LogIQ — chat scoped to ${bulletIncident}`
+                          : "Discuss this with LogIQ"
                       }
                     >
-                      <Button
-                        type="link"
-                        size="small"
-                        icon={<MessageOutlined />}
-                        loading={handoffBusy}
+                      <button
+                        type="button"
+                        className="b01-rowLink"
+                        disabled={handoffBusy}
                         onClick={() => askInChat(cleaned, bulletIncident)}
-                        style={{ paddingLeft: 0, paddingRight: 0 }}
+                        aria-label={`Discuss ${bulletIncident || "this match"} with LogIQ`}
+                        style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
                       >
                         Discuss with LogIQ
-                      </Button>
+                        <ExportOutlined aria-hidden="true" style={{ fontSize: 12 }} />
+                      </button>
                     </Tooltip>
                   ) : null}
-                </List.Item>
+                </li>
               );
-            }}
-          />
-        </div>
-      ) : null}
+            })}
+          </ul>
+        ) : null}
+      </div>
 
       {data.critical_intervention ? (
         <Paragraph style={{ marginBottom: 8 }}>

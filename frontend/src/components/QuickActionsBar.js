@@ -56,30 +56,33 @@ const QUICK_ACTIONS = [
     },
     handlerProp: "onOpenGapAnalysis",
   },
-  {
-    key: "filter",
-    label: "Ticket Filter",
-    icon: <FileSearchOutlined />,
-    accent: {
-      c: "#0BA89F",
-      soft: "rgba(124, 237, 229, 0.18)",
-      hoverFill: "rgba(124, 237, 229, 0.34)",
-      ring: "rgba(11, 168, 159, 0.45)",
-    },
-    handlerProp: "onOpenTicketFilter",
-  },
-  {
-    key: "snow",
-    label: "Connect to ServiceNow",
-    icon: <ApiOutlined />,
-    accent: {
-      c: "#D88A1A",
-      soft: "rgba(255, 179, 71, 0.18)",
-      hoverFill: "rgba(255, 179, 71, 0.34)",
-      ring: "rgba(216, 138, 26, 0.45)",
-    },
-    handlerProp: "onOpenServiceNow",
-  },
+  // Sprint 13.36 — Ticket Filter and Connect to ServiceNow pills
+  // suppressed at the user's request. Code preserved so the entries
+  // can be reinstated by un-commenting this block.
+  // {
+  //   key: "filter",
+  //   label: "Ticket Filter",
+  //   icon: <FileSearchOutlined />,
+  //   accent: {
+  //     c: "#0BA89F",
+  //     soft: "rgba(124, 237, 229, 0.18)",
+  //     hoverFill: "rgba(124, 237, 229, 0.34)",
+  //     ring: "rgba(11, 168, 159, 0.45)",
+  //   },
+  //   handlerProp: "onOpenTicketFilter",
+  // },
+  // {
+  //   key: "snow",
+  //   label: "Connect to ServiceNow",
+  //   icon: <ApiOutlined />,
+  //   accent: {
+  //     c: "#D88A1A",
+  //     soft: "rgba(255, 179, 71, 0.18)",
+  //     hoverFill: "rgba(255, 179, 71, 0.34)",
+  //     ring: "rgba(216, 138, 26, 0.45)",
+  //   },
+  //   handlerProp: "onOpenServiceNow",
+  // },
 ];
 
 

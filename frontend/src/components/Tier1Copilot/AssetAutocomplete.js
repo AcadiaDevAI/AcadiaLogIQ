@@ -18,6 +18,12 @@ export default function AssetAutocomplete({
   maxLength = 200,
   suggestions = [],
   size = "large",
+  // Optional style override forwarded to the inner <Input>. Used by the
+  // Tier-1 Proactive panel to give the field pill-rounded corners
+  // matching the surrounding spherical-bordered Card. When omitted the
+  // component renders with the AntD default Input chrome — no regression
+  // for any other caller.
+  inputStyle,
 }) {
   const options = (suggestions || []).map((s) => ({ value: s, label: s }));
 
@@ -43,6 +49,7 @@ export default function AssetAutocomplete({
         placeholder={placeholder}
         maxLength={maxLength}
         allowClear
+        style={inputStyle}
       />
     </AutoComplete>
   );

@@ -29,6 +29,62 @@ import { postJourneyEvent, searchKbHandoff } from "./journeyApi";
 const { Title, Paragraph, Text } = Typography;
 
 
+// ─────────────────────────────────────────────────────────────
+// Block 03 — Knowledge Base & SOP Reference (heading only).
+// Mirrors the Block 02 (Guided Workflow) eyebrow + display +
+// gradient italic accent treatment so all four cohort/journey
+// panels read as a consistent visual family.
+// Scope: `.b03-*` so nothing bleeds into any other panel.
+// ─────────────────────────────────────────────────────────────
+const B03_BLUE = {
+  50:  "#EFF6FF",
+  200: "#BFDBFE",
+  400: "#60A5FA",
+  500: "#3B82F6",
+  600: "#2563EB",
+  700: "#1D4ED8",
+};
+const B03_CSS = `
+.b03-eyebrow {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 4px 12px; border-radius: 9999px;
+  background: ${B03_BLUE[50]};
+  border: 1px solid ${B03_BLUE[200]};
+  color: ${B03_BLUE[700]};
+  font-family: var(--font-mono, 'Geist Mono', 'JetBrains Mono', Consolas, monospace);
+  font-size: 10.5px; font-weight: 500; letter-spacing: 0.14em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+.b03-eyebrow__dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: ${B03_BLUE[500]};
+  box-shadow: 0 0 8px ${B03_BLUE[400]};
+}
+.b03-display {
+  font-family: var(--font-display, 'Instrument Serif', Georgia, serif);
+  font-size: clamp(24px, 2.8vw, 32px);
+  font-weight: 400; line-height: 1.12; letter-spacing: -0.018em;
+  margin: 0 0 6px 0; color: #0F172A;
+}
+.b03-accent {
+  font-style: italic; font-weight: 400;
+  background: linear-gradient(135deg, ${B03_BLUE[400]} 0%, ${B03_BLUE[600]} 60%, ${B03_BLUE[700]} 100%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+}
+`;
+let _b03StylesInjected = false;
+function _ensureB03Styles() {
+  if (typeof document === "undefined" || _b03StylesInjected) return;
+  const style = document.createElement("style");
+  style.setAttribute("data-acadia-block03", "1");
+  style.textContent = B03_CSS;
+  document.head.appendChild(style);
+  _b03StylesInjected = true;
+}
+
+
 export default function Stage4SearchKBHandoff({
   data,
   sessionId,
@@ -39,6 +95,9 @@ export default function Stage4SearchKBHandoff({
 }) {
   const { dispatch } = useChat();
   const [busy, setBusy] = useState(false);
+
+  // Block 03 — inject scoped CSS once on first mount. Idempotent.
+  React.useEffect(() => { _ensureB03Styles(); }, []);
 
   if (!data) return null;
 
@@ -146,9 +205,26 @@ export default function Stage4SearchKBHandoff({
       }}
     >
       <CardWatermark />
-      <Title level={5} style={{ marginTop: 0, position: "relative", zIndex: 1 }}>
-        {STAGE_LABELS.stage_4}
-      </Title>
+      {/* ─── Block 03 — premium heading replacement (heading only) ───
+          OLD heading preserved below for reference. Card wrapper +
+          <CardWatermark/> + footer (Helpful/Dislike/Escalate) all
+          UNCHANGED — only the title block is re-typeset to match the
+          Best Historical Match / Guided Workflow header treatment.
+
+          ── OLD ──
+          <Title level={5} style={{ marginTop: 0, position: "relative", zIndex: 1 }}>
+            {STAGE_LABELS.stage_4}
+          </Title>
+          ── /OLD ── */}
+      <div style={{ position: "relative", zIndex: 1, marginTop: 0, marginBottom: 8 }}>
+        <div className="b03-eyebrow">
+          <span aria-hidden className="b03-eyebrow__dot" />
+          Knowledge Base
+        </div>
+        <h2 className="b03-display">
+          Knowledge base &amp; SOP <em className="b03-accent">reference</em>
+        </h2>
+      </div>
       <Paragraph type="secondary">
         Click below to ask follow-up questions in the chat — your alert is pre-loaded.
       </Paragraph>

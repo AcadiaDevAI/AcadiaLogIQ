@@ -512,6 +512,28 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
         // button click still works in parallel (handleManualToggle).
         onMouseEnter={handleHoverExpand}
       >
+        {/* Acadia mark — shown only while collapsed, sits above the
+            expand-sidebar button so the brand stays present even when
+            the rail is at its 56 px width. The full logo scales down
+            to ~36 px tall; on this width the "A" reads clearly. */}
+        <div
+          className="flex items-center justify-center"
+          style={{ width: 40, height: 36, marginBottom: 8 }}
+        >
+          <img
+            src="/logo.png"
+            alt="Acadia"
+            style={{
+              maxWidth: "100%",
+              maxHeight: "100%",
+              objectFit: "contain",
+              userSelect: "none",
+              display: "block",
+            }}
+            draggable={false}
+          />
+        </div>
+
         <Tooltip title="Expand sidebar" placement="right">
           <Button
             type="text"

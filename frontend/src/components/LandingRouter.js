@@ -34,8 +34,12 @@ export default function LandingRouter({
   onOpenServiceNow,
 } = {}) {
   const { state, dispatch } = useChat();
-  // Default landing is now Tier-1 Copilot (was "fingerprint").
-  const [screen, setScreen] = useState("tier1");
+  // Default landing is the LandingPage entry-tile view ("Resolve
+  // incidents like your best engineer on her best day."). Picking
+  // Proactive / Reactive + Continue advances to "tier1"
+  // (Tier1IntakeForm); RCA / Gap / Filter / SNOW open their popups
+  // without leaving this screen.
+  const [screen, setScreen] = useState("modes");
   const [lastFingerprint, setLastFingerprint] = useState(null);
 
   // Sprint 6 — Tier-1 local flow state (form → analyze → answer → feedback).
@@ -268,6 +272,11 @@ export default function LandingRouter({
       onOpenGapAnalysis={onOpenGapAnalysis}
       onOpenTicketFilter={onOpenTicketFilter}
       onOpenServiceNow={onOpenServiceNow}
+      // Picking "Proactive / Reactive" on the entry-tile view +
+      // clicking Continue switches this router to its Tier1IntakeForm
+      // screen, where the engineer chooses proactive alert vs.
+      // reactive channel intake.
+      onProactiveReactive={goToTier1}
     />
   );
 }

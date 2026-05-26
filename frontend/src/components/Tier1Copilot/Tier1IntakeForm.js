@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Button, Card, Form, Input, Select } from "antd";
+import { Button, Card, Form, Input, Segmented, Select } from "antd";
 import { DownOutlined, UpOutlined } from "@ant-design/icons";
 import {
   SEVERITY_OPTIONS,
@@ -43,113 +43,203 @@ export default function Tier1IntakeForm(props) {
 
 
 function SourceAwareIntake(props) {
-  // Sprint 11 — Side-by-side layout. Replaces the earlier toggle UX
-  // (ModeToggle Proactive/Reactive) with a 2-column grid:
-  //   left  = Proactive — the structured Alert form
-  //   right = Reactive — paste-message box; extraction pre-fills the
-  //           Alert form on the left
-  // On viewports < md the two columns stack. Picking a Reactive card
-  // pre-fills the Proactive form so the engineer sees their edited
-  // intake without needing to switch panes.
+  // New layout (replaces the Sprint 11 side-by-side split):
+  //   * Title "LogIQ – Operational Intelligence Platform" sits a little
+  //     above the vertical center of the right pane.
+  //   * Beneath the title, a Proactive / Reactive segmented toggle.
+  //   * Below the toggle, ONE active panel at a time:
+  //       Proactive (default) — the structured ProgressiveIntakeForm
+  //                              wrapped in a spherical-bordered box.
+  //       Reactive            — the UniversalIntakePanel paste area.
+  //   * On the Reactive side, clicking "Extract & Suggest" auto-applies
+  //     the top extracted candidate to the Proactive form's prefill,
+  //     and flips the active tab back to "proactive" so the engineer
+  //     sees the pre-filled form immediately (no manual tab switch).
+  //
+  // Previous Sprint 11 two-column grid implementation is preserved in
+  // git history; not inlined here because it would dwarf the new layout.
   const [prefill, setPrefill] = useState(null);
+  const [activeTab, setActiveTab] = useState("proactive");
 
+  // Card-pick handler — invoked from UniversalIntakePanel after the
+  // user hits Extract & Suggest. Stamps the payload (so React re-runs
+  // the prefill effect even if the same card is picked twice) and
+  // flips the visible tab back to Proactive so the engineer lands on
+  // the pre-filled form.
   const handleCardPicked = (filled) => {
     setPrefill({ ...filled, _stamp: Date.now() });
+    setActiveTab("proactive");
   };
 
   const InnerForm = TIER1_UX_FIXES_ON ? ProgressiveIntakeForm : ClassicIntakeForm;
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 py-6 t-bg-primary">
-      <div className="w-full" style={{ maxWidth: 1280, margin: "0 auto" }}>
+    // px-2 (was px-4) trims the side gutters so the rounded box uses
+    // more of the right-pane width.
+    <div className="flex-1 overflow-y-auto px-2 py-4 t-bg-primary">
+      {/* Outer wrapper widened: 960 → 1400 so the Proactive / Reactive
+          box stretches across the right pane instead of leaving large
+          empty gutters on either side. Cap at 1400 to avoid the form
+          becoming uncomfortably wide on very large monitors. */}
+      <div className="w-full" style={{ maxWidth: 1400, margin: "0 auto" }}>
         {/* Premium revamp — horizontal pill bar pinned to the very top
-            of the intake landing, above the LogIQ headline. Each pill
-            opens the corresponding right-pane flow (RCA / Gap / Filter
-            / ServiceNow) via handlers passed in from AppLayout. Pills
-            render only when the matching handler prop is supplied. */}
+            of the intake landing. Same as before — handlers come in
+            from AppLayout. Pills render only when the matching handler
+            prop is supplied. */}
         <QuickActionsBar
           onOpenRca={props.onOpenRca}
           onOpenGapAnalysis={props.onOpenGapAnalysis}
           onOpenTicketFilter={props.onOpenTicketFilter}
           onOpenServiceNow={props.onOpenServiceNow}
-          marginBottom={20}
+          marginBottom={16}
         />
 
-        {/* Sprint 13.30 — page-level title above the Proactive | Reactive
-            split. Sized noticeably larger than the per-column headers
-            (Proactive / Reactive at 18px) so it reads as the section
-            title for the whole intake landing. The bottom margin pushes
-            the two columns down a little so the title has breathing
-            room. */}
-        <div style={{ textAlign: "center", marginBottom: 28 }}>
-          <h1
-            className="t-text"
+        {/* Vertical spacer — pushes the title down so it sits a touch
+            ABOVE the screen center. Trimmed 14vh → 6vh so the form box
+            doesn't push below the fold once the wider layout reduces
+            the form's overall height. */}
+        <div style={{ height: "6vh" }} />
+
+        {/* ─── Page title — premium wordmark treatment ──────────────────
+            Replaces the bold black sans-serif H1 with the same visual
+            language the LandingPage already uses (Instrument Serif
+            display font + aurora-gradient italic + eyebrow chip), so
+            this intake screen reads as part of the same brand family
+            as the Acadia landing instead of a generic admin form.
+
+            Composition:
+              1. Eyebrow chip   — small uppercase mono label
+                                  "OPERATIONAL INTELLIGENCE PLATFORM"
+                                  in iris-aurora tint, pill border,
+                                  green status dot. Matches the
+                                  LandingPage eyebrowStyle.
+              2. Wordmark       — "Welcome to LogIQ" in Instrument
+                                  Serif. "LogIQ" is set italic and
+                                  painted with the aurora gradient via
+                                  background-clip:text so it pops as
+                                  the focal element. Inline gradient
+                                  styles (not the `.aurora-text` class)
+                                  so it works regardless of which
+                                  theme wrapper is active.
+
+            Previous (heavy black bold) heading preserved for reference:
+
+            <h1
+              className="t-text"
+              style={{
+                fontSize: 28,
+                fontWeight: 700,
+                letterSpacing: "-0.02em",
+                margin: 0,
+                lineHeight: 1.25,
+              }}
+            >
+              LogIQ – Operational Intelligence Platform
+            </h1>
+        */}
+        <div style={{ textAlign: "center", marginBottom: 16 }}>
+          {/* Eyebrow chip */}
+          <div
             style={{
-              fontSize: 28,
-              fontWeight: 700,
-              letterSpacing: "-0.02em",
-              margin: 0,
-              lineHeight: 1.25,
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "5px 13px",
+              borderRadius: 9999,
+              background: "rgba(91, 141, 239, 0.08)",
+              border: "1px solid rgba(91, 141, 239, 0.22)",
+              color: "var(--aurora-2, #5B8DEF)",
+              fontFamily:
+                "var(--font-mono, 'Geist Mono', 'JetBrains Mono', Consolas, monospace)",
+              fontSize: 10.5,
+              fontWeight: 500,
+              letterSpacing: "0.14em",
+              textTransform: "uppercase",
+              marginBottom: 10,
             }}
           >
-            LogIQ – Operational Intelligence Platform
+            <span
+              aria-hidden
+              style={{
+                width: 6,
+                height: 6,
+                borderRadius: "50%",
+                background: "#10b981",
+                boxShadow: "0 0 8px rgba(16, 185, 129, 0.7)",
+              }}
+            />
+            Operational Intelligence Platform
+          </div>
+
+          {/* Wordmark — "Welcome to Log" stays bold + black so it
+              reads as a single phrase; only the trailing "IQ" is
+              italic + Acadia blue, painting it as the focal accent. */}
+          <h1
+            style={{
+              fontFamily:
+                "var(--font-display, 'Instrument Serif', Georgia, 'Times New Roman', serif)",
+              fontSize: "clamp(34px, 4.6vw, 52px)",
+              fontWeight: 700,
+              lineHeight: 1.05,
+              letterSpacing: "-0.018em",
+              margin: 0,
+              color: "var(--text, #0f172a)",
+            }}
+          >
+            <span>Welcome to Log</span>
+            <em
+              style={{
+                fontStyle: "italic",
+                fontWeight: 400,
+                color: "var(--acadia-primary, #1E4FAF)",
+              }}
+            >
+              IQ
+            </em>
           </h1>
         </div>
 
-        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          {/* Proactive — structured alert form */}
-          <div>
-            <div className="text-center mb-3">
-              <h2
-                className="t-text"
-                style={{ fontSize: 18, fontWeight: 600, margin: 0 }}
-              >
-                Proactive
-              </h2>
-              <p
-                className="t-text-muted"
-                style={{ fontSize: 12, margin: "2px 0 0" }}
-              >
-                Monitoring or alert-triggered intake
-              </p>
-            </div>
-            <InnerForm {...props} prefill={prefill} embedded />
-          </div>
-
-          {/* Reactive — paste box; output pre-fills Proactive on the left */}
-          <div>
-            <div className="text-center mb-3">
-              <h2
-                className="t-text"
-                style={{ fontSize: 18, fontWeight: 600, margin: 0 }}
-              >
-                Reactive
-              </h2>
-              <p
-                className="t-text-muted"
-                style={{ fontSize: 12, margin: "2px 0 0" }}
-              >
-                Customer-reported via email, phone, portal, chat or note
-              </p>
-            </div>
-            <UniversalIntakePanel
-              source="note"
-              sessionId={props.sessionId}
-              onCardPicked={handleCardPicked}
-              header="Tell us what's happening"
-              helperText={
-                "Provide device type, alert type, and a brief summary so we"
-                + " can auto-fill the Proactive form on the left. Pick an"
-                + " interpretation card and the form populates instantly."
-              }
-              placeholder={
-                "e.g., V-Desktop Environment is reporting Desktop Slowness"
-                + " for customer Acme since 9:30 AM. Users see lag opening"
-                + " applications; ping to gateway is normal."
-              }
-            />
-          </div>
+        {/* Proactive / Reactive toggle — segmented control reads as a
+            single horizontal pill with two options. Centered under the
+            title so it visually anchors the form box below. */}
+        <div
+          style={{ display: "flex", justifyContent: "center", marginBottom: 12 }}
+        >
+          <Segmented
+            value={activeTab}
+            onChange={(v) => setActiveTab(v)}
+            options={[
+              { label: "Proactive", value: "proactive" },
+              { label: "Reactive",  value: "reactive"  },
+            ]}
+            size="large"
+          />
         </div>
+
+        {/* Active panel — only ONE renders at a time. Both panels are
+            wrapped by the spherical-bordered box styling in their own
+            components (ProgressiveIntakeForm Card + UniversalIntakePanel
+            Card both lift the radius for this view). */}
+        {activeTab === "proactive" ? (
+          <InnerForm {...props} prefill={prefill} embedded />
+        ) : (
+          <UniversalIntakePanel
+            source="note"
+            sessionId={props.sessionId}
+            onCardPicked={handleCardPicked}
+            header="Tell us what's happening"
+            helperText={
+              "Describe the issue in your own words. The system extracts"
+              + " the most likely interpretation and pre-fills the"
+              + " Proactive form for you."
+            }
+            placeholder={
+              "e.g., V-Desktop Environment is reporting Desktop Slowness"
+              + " for customer Acme since 9:30 AM. Users see lag opening"
+              + " applications; ping to gateway is normal."
+            }
+          />
+        )}
       </div>
     </div>
   );
@@ -437,13 +527,29 @@ function ProgressiveIntakeForm({
     if (onSubmit) onSubmit(payload);
   };
 
-  // Sprint 11 — match the Reactive UniversalIntakePanel Card exactly so
-  // both columns of the split intake screen read as sibling cards.
+  // Premium single-panel layout — the form is now the ONLY thing the
+  // engineer sees in Proactive mode (no more side-by-side split), so
+  // it gets a more deliberate "card" look: spherical corners, soft
+  // ambient shadow, generous padding. The radius value (28px) is the
+  // upper end of "rounded rectangle" before it starts to look like a
+  // pill — chosen to match the Segmented toggle above and the chips
+  // inside the form so the whole panel reads as one rounded family.
+  //
+  // Previous Sprint-11 Card style preserved for reference:
+  // const cardStyle = {
+  //   backgroundColor: "var(--bg-secondary)",
+  //   borderColor: "var(--border-color)",
+  //   borderRadius: 12,
+  // };
   const cardStyle = {
     backgroundColor: "var(--bg-secondary)",
     borderColor: "var(--border-color)",
-    borderRadius: 12,
+    borderRadius: 28,
+    boxShadow: "0 6px 24px -8px rgba(15, 23, 42, 0.10), 0 2px 6px -2px rgba(15, 23, 42, 0.06)",
   };
+  // Input style — pill-rounded so each row reads as its own rounded
+  // capsule inside the outer rectangular box.
+  const inputStyle = { borderRadius: 9999 };
 
   const submitStyle = {
     minWidth: 180,
@@ -486,36 +592,33 @@ function ProgressiveIntakeForm({
           </div>
         )}
 
-        <Card bodyStyle={{ padding: 18 }} style={cardStyle}>
-          {/* Sprint 12 — when this form is embedded inside the
-              SourceAwareIntake split layout, render the
-              "What's happening?" title + description INSIDE the Card
-              (instead of as a page-level header above it). This
-              preserves the triage-engineer guidance that lived on the
-              old single-column landing page, and keeps the Card aligned
-              with the Reactive column (UniversalIntakePanel uses the
-              same pattern: header + helper text inside its Card body). */}
+        {/* Tightened body padding (18 → 14, 28 wide) and inner header
+            gap so the rounded box reads shorter without losing the
+            spherical-border feel. The form sits in a wider rectangle
+            now (parent maxWidth 1400), so vertical padding can shrink
+            without the content feeling cramped. */}
+        <Card bodyStyle={{ padding: "14px 28px" }} style={cardStyle}>
           {embedded && (
-            <div style={{ marginBottom: 18, textAlign: "center" }}>
+            <div style={{ marginBottom: 10, textAlign: "center" }}>
               <h2
                 className="t-text"
                 style={{
-                  fontSize: 20,
+                  fontSize: 18,
                   fontWeight: 600,
                   letterSpacing: "-0.01em",
                   margin: 0,
-                  marginBottom: 6,
+                  marginBottom: 2,
                 }}
               >
                 What&apos;s happening?
               </h2>
               <p
                 className="t-text-muted"
-                style={{ fontSize: 13, margin: 0, lineHeight: 1.5 }}
+                style={{ fontSize: 12, margin: 0, lineHeight: 1.45 }}
               >
-                Describe the incident below. We&apos;ll match it to the
-                closest historical ticket and return an 8-section
-                troubleshooting answer.
+                Describe the incident below — we&apos;ll match it to the
+                closest historical ticket and return a troubleshooting
+                answer.
               </p>
             </div>
           )}
@@ -556,6 +659,7 @@ function ProgressiveIntakeForm({
                 placeholder="Start typing — e.g., V-Desktop Environment"
                 suggestions={recentAssets}
                 size="large"
+                inputStyle={inputStyle}
               />
             </Form.Item>
 
@@ -571,6 +675,7 @@ function ProgressiveIntakeForm({
                 placeholder="e.g., Desktop Slowness, BGP flap, Circuit down"
                 suggestions={recentAlertTypes}
                 size="large"
+                inputStyle={inputStyle}
               />
             </Form.Item>
 

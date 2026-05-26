@@ -1,3 +1,145 @@
+// ─────────────────────────────────────────────────────────────
+// Block 02 — Guided Troubleshooting Workflow
+// Scoped 7-step blue scale + 9 type roles for the consolidated
+// step ledger ONLY. All other panels in this file (TicketDetailBody,
+// GuidedWorkflows, PerTicketDetails) remain visually unchanged.
+// Roles:
+//   eyebrow  — uppercase mono chip above the heading
+//   display  — large headline ("Guided troubleshooting workflow")
+//   accent   — gradient-painted accent word inside the display
+//   subhead  — instruction line (when/why to tick boxes)
+//   rowIndex — 01 / 02 / 03 … tabular-num counter on the left
+//   rowBody  — main action text inside the row
+//   rowSource— bare ticket id (e.g. INC-PHOENIX-402) — NO "From:" prefix
+//   rowLink  — secondary text actions like "Why:" / "Outcome:" labels
+//   codeChip — command pill (tabular nums, no mid-command wrap)
+// Behaviour rules baked into CSS:
+//   * Checked rows do NOT get strikethrough or dimming — Tier-2 must
+//     still be able to read the action text after the engineer ticks
+//     it. Only the checkbox itself reflects the state.
+//   * codeChip uses font-feature-settings:'tnum' 1 and white-space:
+//     nowrap so a long CLI never breaks mid-command.
+// ─────────────────────────────────────────────────────────────
+const B02_BLUE = {
+  50:  "#EFF6FF",
+  100: "#DBEAFE",
+  200: "#BFDBFE",
+  400: "#60A5FA",
+  500: "#3B82F6",
+  600: "#2563EB",
+  700: "#1D4ED8",
+};
+const B02_CSS = `
+.b02-root { color: #0F172A; }
+.b02-eyebrow {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 4px 12px; border-radius: 9999px;
+  background: ${B02_BLUE[50]};
+  border: 1px solid ${B02_BLUE[200]};
+  color: ${B02_BLUE[700]};
+  font-family: var(--font-mono, 'Geist Mono', 'JetBrains Mono', Consolas, monospace);
+  font-size: 10.5px; font-weight: 500; letter-spacing: 0.14em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+.b02-eyebrow__dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: ${B02_BLUE[500]};
+  box-shadow: 0 0 8px ${B02_BLUE[400]};
+}
+.b02-display {
+  font-family: var(--font-display, 'Instrument Serif', Georgia, serif);
+  font-size: clamp(24px, 2.8vw, 32px);
+  font-weight: 400; line-height: 1.12; letter-spacing: -0.018em;
+  margin: 0 0 6px 0; color: #0F172A;
+}
+.b02-accent {
+  font-style: italic; font-weight: 400;
+  background: linear-gradient(135deg, ${B02_BLUE[400]} 0%, ${B02_BLUE[600]} 60%, ${B02_BLUE[700]} 100%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+}
+.b02-subhead {
+  font-family: var(--font-body, 'Geist', system-ui, sans-serif);
+  font-size: 12.5px; line-height: 1.5; color: #475569;
+  margin: 0 0 14px 0;
+}
+.b02-rows { list-style: none; padding: 0; margin: 0; }
+.b02-row {
+  display: grid;
+  grid-template-columns: 28px 36px 1fr;
+  column-gap: 12px;
+  row-gap: 4px;
+  align-items: start;
+  padding: 12px 0;
+  border-top: 1px solid ${B02_BLUE[100]};
+}
+.b02-row:first-child { border-top: none; padding-top: 4px; }
+/* Checkbox cell — Ant Design checkbox renders inside this column;
+   no extra rules needed because the existing .acadia-attempted-
+   checkbox class still controls its appearance. */
+.b02-row__check { padding-top: 2px; }
+.b02-rowIndex {
+  font-family: var(--font-mono, 'Geist Mono', monospace);
+  font-feature-settings: 'tnum' 1;
+  font-size: 13px; font-weight: 600; color: ${B02_BLUE[600]};
+  line-height: 1.55; padding-top: 2px;
+}
+.b02-rowBody {
+  font-family: var(--font-body, 'Geist', system-ui, sans-serif);
+  font-size: 14px; line-height: 1.55; color: #0F172A;
+}
+/* Completed rows: NO strikethrough, NO opacity dim. Tier-2 still
+   needs to read everything an engineer ticked. The checked state is
+   communicated solely through the checkbox glyph. */
+.b02-row--checked .b02-rowBody,
+.b02-row--checked .b02-rowSource,
+.b02-row--checked .b02-codeChip { text-decoration: none; opacity: 1; }
+
+.b02-rowSource {
+  display: inline-block;
+  font-family: var(--font-mono, 'Geist Mono', monospace);
+  font-feature-settings: 'tnum' 1;
+  font-size: 12.5px; font-weight: 600;
+  color: ${B02_BLUE[700]};
+  background: ${B02_BLUE[50]};
+  border: 1px solid ${B02_BLUE[200]};
+  padding: 1px 8px; border-radius: 6px;
+  margin-right: 8px;
+}
+.b02-rowLink {
+  font-family: var(--font-body, 'Geist', system-ui, sans-serif);
+  font-size: 12.5px; line-height: 1.55; color: #475569;
+  margin-top: 4px;
+}
+.b02-rowLink__label {
+  font-weight: 600; color: ${B02_BLUE[700]}; margin-right: 4px;
+}
+.b02-codeChip {
+  display: inline-block; margin-top: 6px;
+  font-family: var(--font-mono, 'Geist Mono', 'JetBrains Mono', Consolas, monospace);
+  font-feature-settings: 'tnum' 1;
+  white-space: nowrap;
+  font-size: 12.5px; color: #0F172A;
+  background: ${B02_BLUE[50]};
+  border: 1px solid ${B02_BLUE[200]};
+  border-radius: 8px;
+  padding: 4px 10px;
+  max-width: 100%;
+  overflow-x: auto;
+}
+`;
+let _b02StylesInjected = false;
+function _ensureB02Styles() {
+  if (typeof document === "undefined" || _b02StylesInjected) return;
+  const style = document.createElement("style");
+  style.setAttribute("data-acadia-block02", "1");
+  style.textContent = B02_CSS;
+  document.head.appendChild(style);
+  _b02StylesInjected = true;
+}
+
+
 // Sprint 10 Stage 3 — The Troubleshooting Approach.
 //
 // Sprint 13 — replaces the merged-ledger flat list with one Collapse
@@ -104,13 +246,11 @@ const ATTEMPTED_CHECKBOX_CSS = `
 
 
 function ConsolidatedSteps({ steps, attemptedSteps, onToggleAttempt }) {
-  // Sprint 13.14 — per-step "attempted" tracking.
-  // Sprint 13.19 — state LIFTED to ResolutionJourney. The lifted
-  // state is what the Stage 5 handoff note reads via POST body so
-  // the Tier-2 report only references checks the engineer actually
-  // ticked. ConsolidatedSteps is now a controlled component:
-  // `attemptedSteps` map + `onToggleAttempt` callback come in via
-  // props.
+  // Sprint 13.14 — per-step "attempted" tracking. State + checkbox
+  // toggle logic is UNCHANGED. Block 02 redesign only re-typesets
+  // the rendered markup; the props, the controlled-state contract,
+  // and the gray-tone .acadia-attempted-checkbox styles are all
+  // preserved.
   const safeMap = attemptedSteps || {};
   const handleToggle = (stepNumber) => {
     if (typeof onToggleAttempt === "function") {
@@ -118,89 +258,137 @@ function ConsolidatedSteps({ steps, attemptedSteps, onToggleAttempt }) {
     }
   };
 
+  // Block 02 — inject scoped CSS once on first mount. Idempotent.
+  React.useEffect(() => { _ensureB02Styles(); }, []);
+
   if (!steps || steps.length === 0) return null;
   return (
     <>
       {/* Sprint 13.14.1 — scoped gray-tone styles for the attempted
-          checkboxes. Rendered once per component mount; the class
-          name is unique enough to avoid colliding with any global
-          AntD overrides. */}
+          checkboxes. Kept exactly as before so the checkbox glyph
+          itself doesn't change appearance. */}
       <style>{ATTEMPTED_CHECKBOX_CSS}</style>
-      {/* Sprint 13.14.2 — instruction line so the engineer knows
-          why the checkboxes are there. The Tier-2 wiring is queued
-          for a follow-up sprint, but the copy already references
-          escalation so engineers form the right habit now. */}
-      <Paragraph
-        type="secondary"
-        style={{ fontSize: 12, marginTop: 4, marginBottom: 8 }}
-      >
-        Each activity below is consolidated from one matching historical
-        ticket — the source incident number is shown next to each label.
-        Tick any activity you have already tried that did not resolve
-        the issue; your selections flow into the Tier-2 handoff note
-        when the ticket is escalated.
-      </Paragraph>
-      <ol
-        style={{
-          paddingLeft: 20,
-          marginBottom: 16,
-          marginTop: 8,
-          listStyleType: "none",
-        }}
-      >
-        {steps.map((s) => {
-          const checked = !!safeMap[s.step_number];
-          return (
-            <li key={s.step_number} style={{ marginBottom: 14 }}>
-              <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
-                <Tooltip
-                  title={
-                    checked
-                      ? "Marked attempted — will be included in the Tier-2 escalation handoff."
-                      : "Mark this activity as attempted"
-                  }
-                >
-                  <Checkbox
-                    checked={checked}
-                    onChange={() => handleToggle(s.step_number)}
-                    className="acadia-attempted-checkbox"
-                    style={{ marginTop: 4 }}
-                    aria-label={`Mark activity from ${s.incident_number || `row ${s.step_number}`} as attempted`}
-                  />
-                </Tooltip>
-                <div style={{ flex: 1 }}>
-                  <div>
-                    {s.incident_number ? (
-                      <Text strong>{s.incident_number}: </Text>
-                    ) : null}
-                    {/* Sprint 13.14.1 — strikethrough on checked rows
-                        removed at the user's request; action text
-                        stays full-strength regardless of state. */}
-                    <Text>{s.action}</Text>
+
+      {/* ─── Block 02 — Guided Troubleshooting Workflow (new render) ─
+          OLD markup (Sprint 13.14.x) preserved for reference below.
+          Reinstate by uncommenting the OLD block and removing the
+          new b02-* block.
+
+          ── OLD ──
+          <Paragraph type="secondary" style={{ fontSize: 12, marginTop: 4, marginBottom: 8 }}>
+            Each activity below is consolidated from one matching historical
+            ticket — the source incident number is shown next to each label.
+            Tick any activity you have already tried that did not resolve
+            the issue; your selections flow into the Tier-2 handoff note
+            when the ticket is escalated.
+          </Paragraph>
+          <ol style={{ paddingLeft: 20, marginBottom: 16, marginTop: 8, listStyleType: "none" }}>
+            {steps.map((s) => {
+              const checked = !!safeMap[s.step_number];
+              return (
+                <li key={s.step_number} style={{ marginBottom: 14 }}>
+                  <div style={{ display: "flex", alignItems: "flex-start", gap: 8 }}>
+                    <Tooltip title={checked ? "Marked attempted …" : "Mark this activity as attempted"}>
+                      <Checkbox
+                        checked={checked}
+                        onChange={() => handleToggle(s.step_number)}
+                        className="acadia-attempted-checkbox"
+                        style={{ marginTop: 4 }}
+                      />
+                    </Tooltip>
+                    <div style={{ flex: 1 }}>
+                      <div>
+                        {s.incident_number ? <Text strong>{s.incident_number}: </Text> : null}
+                        <Text>{s.action}</Text>
+                      </div>
+                      {s.command ? <div style={{ marginTop: 4 }}><Text code>{s.command}</Text></div> : null}
+                      {s.intent ? <Paragraph><Text type="secondary">Why: </Text>{s.intent}</Paragraph> : null}
+                      {s.pivot ? <Paragraph><Text type="secondary">Outcome: </Text>{s.pivot}</Paragraph> : null}
+                    </div>
                   </div>
+                </li>
+              );
+            })}
+          </ol>
+          ── /OLD ── */}
+      <div className="b02-root">
+        {/* Role: subhead — engineer guidance, kept as plain copy
+            because the panel's own card-level heading
+            "Guided Troubleshooting Workflow" already carries the
+            display+accent treatment (added below in the wrapper). */}
+        <p className="b02-subhead">
+          Each activity below is consolidated from one matching historical
+          ticket. Tick the activities you have already tried — your
+          selections flow into the Tier-2 handoff note when the ticket
+          is escalated.
+        </p>
+
+        <ol className="b02-rows">
+          {steps.map((s) => {
+            const checked = !!safeMap[s.step_number];
+            const idx = String(s.step_number).padStart(2, "0");
+            return (
+              <li
+                key={s.step_number}
+                className={`b02-row${checked ? " b02-row--checked" : ""}`}
+              >
+                {/* Column 1 — checkbox (uses existing gray-tone class) */}
+                <span className="b02-row__check">
+                  <Tooltip
+                    title={
+                      checked
+                        ? "Marked attempted — will be included in the Tier-2 escalation handoff."
+                        : "Mark this activity as attempted"
+                    }
+                  >
+                    <Checkbox
+                      checked={checked}
+                      onChange={() => handleToggle(s.step_number)}
+                      className="acadia-attempted-checkbox"
+                      aria-label={`Mark activity from ${s.incident_number || `row ${s.step_number}`} as attempted`}
+                    />
+                  </Tooltip>
+                </span>
+
+                {/* Column 2 — rowIndex (01 / 02 / 03 …) */}
+                <span className="b02-rowIndex">{idx}</span>
+
+                {/* Column 3 — body + bare-id source + codeChip + Why/Outcome */}
+                <div>
+                  <div className="b02-rowBody">
+                    {/* rowSource = bare ticket id, NO "From:" prefix */}
+                    {s.incident_number ? (
+                      <span className="b02-rowSource">{s.incident_number}</span>
+                    ) : null}
+                    {s.action}
+                  </div>
+
+                  {/* codeChip — tabular numerals + nowrap so a long
+                      CLI never wraps mid-command. */}
                   {s.command ? (
-                    <div style={{ marginTop: 4 }}>
-                      <Text code>{s.command}</Text>
+                    <div>
+                      <span className="b02-codeChip">{s.command}</span>
                     </div>
                   ) : null}
+
                   {s.intent ? (
-                    <Paragraph style={{ marginTop: 4, marginBottom: 2 }}>
-                      <Text type="secondary">Why: </Text>
+                    <div className="b02-rowLink">
+                      <span className="b02-rowLink__label">Why:</span>
                       {s.intent}
-                    </Paragraph>
+                    </div>
                   ) : null}
                   {s.pivot ? (
-                    <Paragraph style={{ marginTop: 0, marginBottom: 0 }}>
-                      <Text type="secondary">Outcome: </Text>
+                    <div className="b02-rowLink">
+                      <span className="b02-rowLink__label">Outcome:</span>
                       {s.pivot}
-                    </Paragraph>
+                    </div>
                   ) : null}
                 </div>
-              </div>
-            </li>
-          );
-        })}
-      </ol>
+              </li>
+            );
+          })}
+        </ol>
+      </div>
     </>
   );
 }
@@ -584,9 +772,25 @@ export default function Stage3TroubleshootingApproach({
       }}
     >
       <CardWatermark />
-      <Title level={5} style={{ marginTop: 0, position: "relative", zIndex: 1 }}>
-        Guided Troubleshooting Workflow
-      </Title>
+      {/* ─── Block 02 — premium heading replacement (heading only) ───
+          OLD heading preserved for reference; the new b02-display +
+          accent treatment lives below. Watermark + Card wrapper +
+          footer (Helpful/Dislike/Escalate/NextStage) UNCHANGED.
+
+          ── OLD ──
+          <Title level={5} style={{ marginTop: 0, position: "relative", zIndex: 1 }}>
+            Guided Troubleshooting Workflow
+          </Title>
+          ── /OLD ── */}
+      <div className="b02-root" style={{ position: "relative", zIndex: 1, marginTop: 0, marginBottom: 8 }}>
+        <div className="b02-eyebrow">
+          <span aria-hidden className="b02-eyebrow__dot" />
+          Guided Workflow
+        </div>
+        <h2 className="b02-display">
+          Guided troubleshooting <em className="b02-accent">workflow</em>
+        </h2>
+      </div>
 
       {/* Sprint 13.12 — single 5-step read-only ledger replaces the
           per-ticket Guided Workflows render. LLM-synthesised; safe

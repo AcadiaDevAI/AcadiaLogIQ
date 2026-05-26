@@ -17,7 +17,7 @@
 //   - Primary CTA "Continue" inherits the global aurora button
 //   - Footer ticker strip (4 stats — visual filler, no live data)
 
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Button, message } from "antd";
 import {
   ToolOutlined,
@@ -25,6 +25,10 @@ import {
   RiseOutlined,
   ApiOutlined,
   ArrowRightOutlined,
+  ExperimentOutlined,
+  ProfileOutlined,
+  FileSearchOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
 import { useChat } from "../hooks/ChatContext";
 import { setSessionMode } from "../services/api";
@@ -69,6 +73,59 @@ const TROUBLESHOOTING_SUB_OPTIONS = [
 ];
 
 
+// Entry-selector tiles for the pre-landing view. RCA / Gap / Filter /
+// SNOW reuse the same handlers the QuickActionsBar pills fire (so
+// picking RCA and clicking Continue opens the same popup the top-pill
+// RCA button opens). "Proactive / Reactive" is the lone entry that
+// advances to the existing Troubleshoot / Ticket-handling / Escalate /
+// Vendor-OEM mode-picker view.
+const ENTRY_OPTIONS = [
+  {
+    value: "rca",
+    label: "Root Cause Analysis",
+    sub: "Walk through the post-incident RCA workflow",
+    icon: <ExperimentOutlined />,
+    accent: "var(--aurora-2)",
+    handlerProp: "onOpenRca",
+  },
+  {
+    value: "gap",
+    label: "Gap Analysis",
+    sub: "Compare against best-practice runbooks",
+    icon: <ProfileOutlined />,
+    accent: "var(--aurora-3)",
+    handlerProp: "onOpenGapAnalysis",
+  },
+  // Sprint 13.36 — Ticket Filter and Connect to ServiceNow tiles
+  // suppressed at the user's request. Code preserved here so the
+  // entries can be reinstated by un-commenting this block.
+  // {
+  //   value: "ticket_filter",
+  //   label: "Ticket Filter",
+  //   sub: "Search the historical ticket corpus",
+  //   icon: <FileSearchOutlined />,
+  //   accent: "var(--aurora-1)",
+  //   handlerProp: "onOpenTicketFilter",
+  // },
+  // {
+  //   value: "snow",
+  //   label: "Connect to ServiceNow",
+  //   sub: "Pull a ticket directly from ServiceNow",
+  //   icon: <ApiOutlined />,
+  //   accent: "var(--p2)",
+  //   handlerProp: "onOpenServiceNow",
+  // },
+  {
+    value: "proactive_reactive",
+    label: "Proactive / Reactive",
+    sub: "Begin a Tier-1 triage with the mode picker",
+    icon: <ThunderboltOutlined />,
+    accent: "var(--aurora-2)",
+    handlerProp: null,   // null → advances to the mode-picker view
+  },
+];
+
+
 // ─── Style fragments (declared once, reused) ─────────────────────────
 const eyebrowStyle = {
   display: "inline-flex",
@@ -76,9 +133,9 @@ const eyebrowStyle = {
   gap: 8,
   padding: "6px 14px",
   borderRadius: 999,
-  background: "rgba(124, 237, 229, 0.08)",
-  border: "1px solid rgba(124, 237, 229, 0.25)",
-  color: "var(--aurora-1)",
+  background: "rgba(30, 79, 175, 0.10)",
+  border: "1px solid rgba(30, 79, 175, 0.32)",
+  color: "var(--acadia-primary)",
   fontFamily: "var(--font-mono)",
   fontSize: 11,
   fontWeight: 500,
@@ -88,8 +145,8 @@ const eyebrowStyle = {
 
 const dotStyle = {
   width: 6, height: 6, borderRadius: "50%",
-  background: "var(--good)",
-  boxShadow: "0 0 8px var(--good)",
+  background: "var(--acadia-primary)",
+  boxShadow: "0 0 8px var(--acadia-primary)",
 };
 
 const headlineStyle = {
@@ -138,7 +195,10 @@ const haloStyle = {
 
 
 // ─── Mode pill component ─────────────────────────────────────────────
-function ModePill({ option, active, onClick }) {
+// `large` boosts the font + padding for the entry-view tiles (RCA /
+// Gap / Proactive · Reactive) so they read as primary CTAs. Default
+// sizing is preserved for the mode-picker view pills.
+function ModePill({ option, active, onClick, large = false }) {
   return (
     <button
       type="button"
@@ -146,8 +206,8 @@ function ModePill({ option, active, onClick }) {
       style={{
         display: "inline-flex",
         alignItems: "center",
-        gap: 8,
-        padding: "10px 16px",
+        gap: large ? 10 : 8,
+        padding: large ? "14px 26px" : "10px 16px",
         borderRadius: 999,
         background: active
           ? `linear-gradient(180deg, ${option.accent}1A, ${option.accent}08)`
@@ -155,8 +215,8 @@ function ModePill({ option, active, onClick }) {
         border: `1px solid ${active ? `${option.accent}55` : "rgba(255,255,255,0.10)"}`,
         color: active ? option.accent : "var(--text-muted)",
         fontFamily: "var(--font-body)",
-        fontSize: 13,
-        fontWeight: 500,
+        fontSize: large ? 16 : 13,
+        fontWeight: large ? 600 : 500,
         cursor: "pointer",
         transition: "all 150ms var(--ease-out)",
       }}
@@ -173,7 +233,13 @@ function ModePill({ option, active, onClick }) {
         }
       }}
     >
-      <span style={{ display: "inline-flex", alignItems: "center" }}>
+      <span
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          fontSize: large ? 18 : "inherit",
+        }}
+      >
         {option.icon}
       </span>
       <span>{option.label}</span>
@@ -287,9 +353,36 @@ export default function LandingPage({
   onOpenGapAnalysis,
   onOpenTicketFilter,
   onOpenServiceNow,
+  // Wired from LandingRouter — fires when the user picks the
+  // "Proactive / Reactive" entry tile and clicks Continue. The
+  // router switches to its Tier1IntakeForm screen (the intake form
+  // where the engineer chooses proactive alert vs. reactive channel).
+  // Optional: when missing, the entry falls back to the in-page
+  // mode-picker view as a safety net.
+  onProactiveReactive,
 } = {}) {
   // LOGIC PRESERVED BYTE-FOR-BYTE
   const { state, dispatch } = useChat();
+
+  // Collapse the left sidebar on mount so the landing page renders
+  // with the 56-px rail instead of the full 280-px panel. Fires once
+  // per landing-page mount; the engineer can still hover-peek or
+  // click to expand. Cleanup is intentionally omitted — expanding
+  // the sidebar is the user's explicit action and should persist
+  // after this component unmounts.
+  useEffect(() => {
+    dispatch({ type: "SET_SIDEBAR", payload: false });
+  }, [dispatch]);
+
+  // Two-step landing. The new "entry" view is the pre-landing tile
+  // grid (RCA / Gap / Ticket Filter / Connect to ServiceNow /
+  // Proactive-Reactive). Picking Proactive-Reactive + Continue
+  // advances to the existing "mode" view (Troubleshoot / Ticket
+  // handling / Escalate / Vendor-OEM); the other four entries fire
+  // their corresponding popup handler — the same handler the top
+  // QuickActionsBar pill would have fired.
+  const [view, setView] = useState("entry");
+  const [entryChoice, setEntryChoice] = useState(null);
 
   const [mode, setMode] = useState(null);
   const [subMode, setSubMode] = useState(null);
@@ -297,6 +390,36 @@ export default function LandingPage({
 
   const needsSubMode = mode === "troubleshooting";
   const canContinue = !!mode && (!needsSubMode || !!subMode);
+
+  const entryCanContinue = !!entryChoice;
+  const entryHandlers = {
+    onOpenRca,
+    onOpenGapAnalysis,
+    onOpenTicketFilter,
+    onOpenServiceNow,
+  };
+  const handleEntryContinue = () => {
+    if (!entryCanContinue) return;
+    if (entryChoice === "proactive_reactive") {
+      // Hand off to the router so it can swap to the Tier-1 intake
+      // form (the Proactive / Reactive screen). Fall back to the
+      // in-page mode-picker view only when the router didn't wire
+      // the callback — keeps the panel functional in legacy mounts.
+      if (typeof onProactiveReactive === "function") {
+        onProactiveReactive();
+      } else {
+        setView("mode");
+      }
+      return;
+    }
+    const opt = ENTRY_OPTIONS.find((o) => o.value === entryChoice);
+    const fn = opt && opt.handlerProp ? entryHandlers[opt.handlerProp] : null;
+    if (typeof fn === "function") {
+      fn();
+    } else {
+      message.warning("This action is not available right now.");
+    }
+  };
 
   const handleContinue = async () => {
     if (!canContinue) return;
@@ -320,6 +443,178 @@ export default function LandingPage({
     setSubmitting(false);
   };
 
+  // ─── Pre-landing entry view ─────────────────────────────────────────
+  // Shown first. Five selectable tiles + Continue. The QuickActionsBar
+  // is intentionally OMITTED here — the same four actions are in the
+  // tile grid below, so showing them at the top too would be
+  // duplicate. All other screens still get the QuickActionsBar.
+  if (view === "entry") {
+    const selectedOpt = ENTRY_OPTIONS.find((o) => o.value === entryChoice);
+    return (
+      <div
+        style={{
+          position: "relative",
+          flex: 1,
+          display: "flex",
+          flexDirection: "column",
+          alignItems: "center",
+          justifyContent: "center",
+          padding: "48px 8px 120px",
+          minHeight: 0,
+          overflow: "auto",
+        }}
+      >
+        <div style={{ width: "100%", maxWidth: 1200, position: "relative" }}>
+          {/* Acadia watermark — sits above the eyebrow as the brand
+              mark for this landing surface. */}
+          <div style={{ display: "flex", justifyContent: "center", marginBottom: 18 }}>
+            <img
+              src="/logo.png"
+              alt="Acadia"
+              style={{
+                width: 110,
+                height: "auto",
+                opacity: 0.92,
+                userSelect: "none",
+                display: "block",
+              }}
+              draggable={false}
+            />
+          </div>
+
+          {/* Eyebrow */}
+          <div style={{ display: "flex", justifyContent: "center" }}>
+            <div style={eyebrowStyle}>
+              <span style={dotStyle} />
+              Operational Intelligence Platform
+            </div>
+          </div>
+
+          {/* Headline */}
+          <h1 style={headlineStyle}>
+            Resolve incidents like{" "}
+            <em
+              className="aurora-text"
+              style={{ fontStyle: "italic", fontWeight: 400 }}
+            >
+              your best engineer
+            </em>{" "}
+            on best day.
+          </h1>
+
+          {/* Sub-line */}
+          <p style={subStyle}>
+            Pick an entry point. RCA, and Gap Analysis open as focused popups.
+            <br />
+            Proactive / Reactive advances to the full Tier-1 mode picker.
+          </p>
+
+          {/* Glass command card — same chrome as the mode-picker view */}
+          <div style={{ position: "relative" }}>
+            <div style={haloStyle} aria-hidden />
+
+            <div style={commandCardStyle}>
+              {/* Entry tiles — centred and large so the three CTAs
+                  read as the primary affordance on the page. */}
+              <div
+                style={{
+                  display: "flex",
+                  gap: 12,
+                  flexWrap: "wrap",
+                  justifyContent: "center",
+                  marginBottom: 24,
+                }}
+              >
+                {ENTRY_OPTIONS.map((opt) => (
+                  <ModePill
+                    key={opt.value}
+                    option={opt}
+                    active={entryChoice === opt.value}
+                    onClick={() => setEntryChoice(opt.value)}
+                    large
+                  />
+                ))}
+              </div>
+
+              {/* Description of the currently selected entry */}
+              {entryChoice && (
+                <p
+                  style={{
+                    fontFamily: "var(--font-body)",
+                    fontSize: 13.5,
+                    color: "var(--text-muted)",
+                    margin: "0 0 18px",
+                    lineHeight: 1.5,
+                  }}
+                >
+                  {selectedOpt?.sub}
+                </p>
+              )}
+
+              {/* CTA row */}
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                  gap: 12,
+                  paddingTop: 4,
+                  borderTop: "1px solid var(--border)",
+                  marginTop: 12,
+                }}
+              >
+                <div
+                  style={{
+                    fontFamily: "var(--font-mono)",
+                    fontSize: 11,
+                    color: "var(--text-dim)",
+                    textTransform: "uppercase",
+                    letterSpacing: "0.1em",
+                    paddingTop: 16,
+                  }}
+                >
+                  {entryCanContinue ? "Ready" : "Pick an entry to continue"}
+                </div>
+                <div style={{ paddingTop: 12 }}>
+                  <Button
+                    type="primary"
+                    size="large"
+                    onClick={handleEntryContinue}
+                    disabled={!entryCanContinue}
+                    icon={<ArrowRightOutlined />}
+                    iconPosition="end"
+                  >
+                    Continue
+                  </Button>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Footer hint */}
+          <p
+            style={{
+              fontFamily: "var(--font-mono)",
+              fontSize: 10.5,
+              color: "var(--text-dim)",
+              textAlign: "center",
+              marginTop: 24,
+              textTransform: "uppercase",
+              letterSpacing: "0.1em",
+            }}
+          >
+            Your selection sets the working context for this session.
+          </p>
+        </div>
+
+        {/* Ticker strip suppressed at the user's request.
+            Reinstate by un-commenting the line below.
+            <TickerStrip /> */}
+      </div>
+    );
+  }
+
+  // ─── Existing mode-picker view (reached only via Proactive/Reactive) ─
   return (
     <div
       style={{
@@ -329,12 +624,12 @@ export default function LandingPage({
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        padding: "48px 24px 120px",
+        padding: "48px 8px 120px",
         minHeight: 0,
         overflow: "auto",
       }}
     >
-      <div style={{ width: "100%", maxWidth: 920, position: "relative" }}>
+      <div style={{ width: "100%", maxWidth: 1200, position: "relative" }}>
         {/* Horizontal quick-action pills — RCA / Gap / Filter /
             ServiceNow. Lives above the eyebrow, tinted to match the
             atmospheric watercolor blobs (iris / violet / teal / amber). */}
@@ -344,6 +639,23 @@ export default function LandingPage({
           onOpenTicketFilter={onOpenTicketFilter}
           onOpenServiceNow={onOpenServiceNow}
         />
+
+        {/* Acadia watermark — sits above the eyebrow as the brand mark
+            for this landing surface. */}
+        <div style={{ display: "flex", justifyContent: "center", marginBottom: 18 }}>
+          <img
+            src="/logo.png"
+            alt="Acadia"
+            style={{
+              width: 110,
+              height: "auto",
+              opacity: 0.92,
+              userSelect: "none",
+              display: "block",
+            }}
+            draggable={false}
+          />
+        </div>
 
         {/* Eyebrow */}
         <div style={{ display: "flex", justifyContent: "center" }}>
@@ -362,13 +674,13 @@ export default function LandingPage({
           >
             your best engineer
           </em>{" "}
-          on her best day.
+          on best day.
         </h1>
 
         {/* Sub-line */}
         <p style={subStyle}>
-          LogIQ pairs structured incident memory with an AI co-pilot that
-          watches every Tier-1 step. Pick how you want to work — the rest is
+          LogIQ pairs structured incident memory with an AI that
+          watches every Tier-1 step. Pick how you want to work. The rest is
           decided in seconds, not minutes.
         </p>
 
@@ -518,8 +830,9 @@ export default function LandingPage({
         </p>
       </div>
 
-      {/* Ticker strip pinned to the bottom of the landing pane */}
-      <TickerStrip />
+      {/* Ticker strip suppressed at the user's request.
+          Reinstate by un-commenting the line below.
+          <TickerStrip /> */}
     </div>
   );
 }

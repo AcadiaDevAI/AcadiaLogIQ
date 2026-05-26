@@ -60,16 +60,21 @@ export const isPremiumTheme = () => ACTIVE_THEME === "premium";
 
 
 /**
- * Returns the CSS class to apply on the root <div>.
- * Premium overrides the legacy light/dark toggle entirely — premium
- * IS dark, the toggle is ignored visually but remains intact so
- * downstream code doesn't crash.
+ * Returns the CSS class(es) to apply on the root <div>.
+ *
+ * Premium light = `theme-premium`
+ * Premium dark  = `theme-premium theme-premium-dark`
+ *   (companion class layers Acadia-navy variable rebinds on top of
+ *    the base premium rules — see src/theme/premium-dark.css)
+ * Legacy       = `theme-light` or `theme-dark`
  *
  * @param {boolean} isDark — current legacy light/dark toggle value
- * @returns {"theme-premium" | "theme-light" | "theme-dark"}
+ * @returns {string}
  */
 export function resolveThemeClass(isDark) {
-  if (ACTIVE_THEME === "premium") return "theme-premium";
+  if (ACTIVE_THEME === "premium") {
+    return isDark ? "theme-premium theme-premium-dark" : "theme-premium";
+  }
   return isDark ? "theme-dark" : "theme-light";
 }
 
@@ -86,6 +91,114 @@ export function resolveThemeClass(isDark) {
  * @returns {object} AntD theme config
  */
 export function resolveAntdTheme(isDark, algorithms) {
+  if (ACTIVE_THEME === "premium" && isDark) {
+    // Aurora Operations — premium DARK. Acadia-navy backdrop with
+    // the same iris/sky-blue accents. CSS-level overrides in
+    // premium-dark.css do the heavy lifting; these tokens keep
+    // AntD's internal calculations (focus rings, hover algorithms,
+    // contrast hints) consistent with the dark surface.
+    return {
+      algorithm: algorithms.darkAlgorithm,
+      token: {
+        // Acadia sky-blue from the logo reads as primary on navy.
+        colorPrimary:       "#3DA2E0",
+        colorPrimaryHover:  "#5BB8ED",
+        colorPrimaryActive: "#2B8FCC",
+
+        colorBgContainer:   "#0F2240",
+        colorBgElevated:    "#142D52",
+        colorBgLayout:      "transparent",
+        colorBorder:        "rgba(91, 141, 239, 0.22)",
+        colorBorderSecondary: "rgba(91, 141, 239, 0.14)",
+
+        colorText:          "#E8F1FB",
+        colorTextSecondary: "#9EB2CC",
+        colorTextTertiary:  "#6B7E9C",
+
+        colorSuccess:       "#46D69A",
+        colorWarning:       "#FFB347",
+        colorError:         "#FF5E7A",
+        colorInfo:          "#5B8DEF",
+
+        borderRadius:       10,
+        borderRadiusLG:     16,
+        borderRadiusSM:     8,
+
+        fontFamily:
+          "'Geist', 'Inter', 'Poppins', system-ui, -apple-system, sans-serif",
+        fontSize: 14,
+        controlHeight: 38,
+        controlHeightLG: 46,
+        controlHeightSM: 30,
+
+        wireframe: false,
+      },
+      components: {
+        Button: {
+          primaryShadow: "none",
+          defaultBg: "#0F2240",
+          defaultBorderColor: "rgba(91, 141, 239, 0.36)",
+          defaultColor: "#E8F1FB",
+          defaultHoverBg: "#142D52",
+          defaultHoverBorderColor: "rgba(91, 141, 239, 0.55)",
+          defaultHoverColor: "#5B8DEF",
+          dangerShadow: "none",
+        },
+        Card: {
+          colorBgContainer: "#0F2240",
+          colorBorderSecondary: "rgba(91, 141, 239, 0.22)",
+          headerBg: "transparent",
+          actionsBg: "transparent",
+        },
+        Modal: {
+          contentBg: "rgba(15, 34, 64, 0.92)",
+          headerBg: "transparent",
+          colorBgMask: "rgba(0, 8, 20, 0.62)",
+        },
+        Collapse: {
+          headerBg: "transparent",
+          contentBg: "transparent",
+          colorBorder: "rgba(91, 141, 239, 0.22)",
+        },
+        Tabs: {
+          colorBgContainer: "transparent",
+          itemColor: "#9EB2CC",
+          itemSelectedColor: "#5B8DEF",
+          itemHoverColor: "#E8F1FB",
+          inkBarColor: "#5B8DEF",
+        },
+        Select: {
+          colorBgContainer: "#0F2240",
+          colorBgElevated: "#142D52",
+          optionSelectedBg: "rgba(91, 141, 239, 0.22)",
+          optionActiveBg: "rgba(91, 141, 239, 0.12)",
+        },
+        Input: {
+          colorBgContainer: "#0F2240",
+          activeBorderColor: "#5B8DEF",
+          hoverBorderColor: "rgba(91, 141, 239, 0.55)",
+        },
+        Tag: {
+          defaultBg: "rgba(91, 141, 239, 0.12)",
+          defaultColor: "#E8F1FB",
+        },
+        Alert: {
+          colorInfoBg:    "rgba(91, 141, 239, 0.14)",
+          colorInfoBorder:"rgba(91, 141, 239, 0.36)",
+          colorWarningBg: "rgba(255, 179, 71, 0.14)",
+          colorWarningBorder: "rgba(232, 154, 42, 0.40)",
+          colorErrorBg:   "rgba(255, 94, 122, 0.14)",
+          colorErrorBorder: "rgba(224, 69, 95, 0.40)",
+          colorSuccessBg: "rgba(70, 214, 154, 0.14)",
+          colorSuccessBorder: "rgba(31, 176, 127, 0.40)",
+        },
+        Empty:   { colorTextDisabled: "#6B7E9C" },
+        Spin:    { colorPrimary: "#5B8DEF" },
+        Tooltip: { colorBgSpotlight: "#15294A" },
+      },
+    };
+  }
+
   if (ACTIVE_THEME === "premium") {
     // Aurora Operations — premium LIGHT. Aurora identity preserved
     // (teal → iris → violet accents) on a white-and-black surface.

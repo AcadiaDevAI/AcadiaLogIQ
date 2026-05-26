@@ -1,0 +1,582 @@
+/* ═══════════════════════════════════════════════════════════════════
+   Acadia LogIQ — Premium DARK Theme (Acadia Navy)
+   ═══════════════════════════════════════════════════════════════════
+   Companion to premium.css. Activated when the legacy toggle is set
+   to dark under the premium active-theme. The base `.theme-premium`
+   class still applies (button system, glass primitives, AntD
+   overrides). This file scopes its overrides to
+   `.theme-premium.theme-premium-dark` and ONLY rebinds CSS variables
+   plus the handful of selectors that hardcoded light-only colors in
+   premium.css or in injected component-level <style> blocks.
+
+   The light premium theme (`.theme-premium` alone) is NOT modified
+   by this file.
+
+   Palette rationale:
+     • Background is a deep Acadia navy (#0A1628) — never pure black.
+       Mixes navy and a touch of indigo so the surface reads as a
+       branded dark, not a generic OLED gray.
+     • Raised panels lift to #0F2240 and tertiary lifts to #142D52 —
+       enough separation for AntD Cards and Modals to register
+       against the base without washing out the blue cast.
+     • Text is a cool off-white (#E8F1FB) to keep contrast high while
+       avoiding the harshness of pure white on navy.
+     • Primary accent uses the Acadia sky-blue (#3DA2E0) from the logo
+       so CTAs feel on-brand the moment a user switches.
+   ═══════════════════════════════════════════════════════════════════ */
+
+
+/* ─── 1.  Variable rebind (the core of the dark theme) ───────────── */
+
+.theme-premium.theme-premium-dark {
+  /* Acadia brand — brighten the primary for a dark surface. The
+     logo's sky blue reads as the primary CTA accent here. */
+  --acadia-primary:        #3DA2E0;
+  --acadia-primary-hover:  #5BB8ED;
+  --acadia-primary-light:  #7CCBFA;
+
+  /* Background surfaces — deep Acadia navy, never pure black. */
+  --bg:           #0A1628;
+  --bg-raised:    #0F2240;
+  --bg-primary:   #0A1628;
+  --bg-secondary: #0F2240;
+  --bg-tertiary:  #142D52;
+  --bg-hover:     rgba(91, 141, 239, 0.10);
+
+  /* Borders — iris-tinted at low alpha so panel edges remain visible
+     without competing with content. */
+  --border:        rgba(91, 141, 239, 0.22);
+  --border-strong: rgba(91, 141, 239, 0.36);
+  --border-color:  rgba(91, 141, 239, 0.22);
+
+  /* Text — cool off-white on navy for legibility. */
+  --text:           #E8F1FB;
+  --text-muted:     #9EB2CC;
+  --text-dim:       #6B7E9C;
+  --text-primary:   #E8F1FB;
+  --text-secondary: #9EB2CC;
+  --text-faint:     #6B7E9C;
+
+  /* Brand accent alias — iris blue stays prominent on navy. */
+  --brand-accent: #5B8DEF;
+  --brand-light:  rgba(91, 141, 239, 0.18);
+
+  /* Chat / code surfaces. */
+  --msg-assistant-bg: rgba(15, 34, 64, 0.65);
+  --code-bg:     rgba(91, 141, 239, 0.10);
+  --code-border: rgba(91, 141, 239, 0.28);
+  --code-text:   #7CBEEC;
+
+  /* Scrollbar — iris on navy. */
+  --scrollbar-thumb: rgba(91, 141, 239, 0.24);
+  --scrollbar-hover: rgba(91, 141, 239, 0.55);
+
+  /* Glass surfaces — navy frosted. */
+  --glass-1: rgba(15, 34, 64, 0.50);
+  --glass-2: rgba(15, 34, 64, 0.65);
+  --glass-3: rgba(15, 34, 64, 0.85);
+
+  /* Shadows — deeper for a dark base; aurora glow stays iris-tinted. */
+  --shadow-sm:
+    0 1px 2px rgba(0, 8, 20, 0.45),
+    0 1px 4px rgba(0, 8, 20, 0.30);
+  --shadow-md:
+    0 4px 12px rgba(0, 8, 20, 0.55),
+    0 2px 4px rgba(0, 8, 20, 0.35);
+  --shadow-lg:
+    0 14px 32px -8px rgba(91, 141, 239, 0.30),
+    0 4px 12px rgba(0, 8, 20, 0.50);
+  --shadow-xl:
+    0 24px 64px rgba(0, 8, 20, 0.65),
+    0 8px 24px rgba(0, 8, 20, 0.45);
+  --aurora-glow:
+    0 14px 32px -8px rgba(91, 141, 239, 0.55),
+    0 0 0 1px rgba(124, 237, 229, 0.30) inset;
+
+  /* Atmospheric backdrop — same aurora hues, slightly higher alpha so
+     the wash registers against the navy base. */
+  --bg-aurora-mesh:
+    radial-gradient(circle at 15% 8%,  rgba(124, 237, 229, 0.12) 0%, transparent 50%),
+    radial-gradient(circle at 85% 22%, rgba(167, 139, 250, 0.16) 0%, transparent 48%),
+    radial-gradient(circle at 60% 88%, rgba(91, 141, 239, 0.16) 0%, transparent 55%);
+}
+
+
+/* ─── 2.  App shell — base background + native chrome ────────────── */
+
+.theme-premium.theme-premium-dark {
+  background: var(--bg);
+  color: var(--text);
+  color-scheme: dark;
+}
+
+.theme-premium.theme-premium-dark ::selection {
+  background: rgba(91, 141, 239, 0.32);
+  color: var(--text);
+}
+
+
+/* ─── 3.  Tailwind utility shims (premium.css used near-black) ───── */
+/* Under light, `.bg-gray-50` was `rgba(10, 16, 24, 0.02)` — near-
+   invisible on navy. Rebind to iris-tints. */
+
+.theme-premium.theme-premium-dark .bg-white    { background-color: var(--bg-raised) !important; }
+.theme-premium.theme-premium-dark .bg-gray-50  { background-color: rgba(91, 141, 239, 0.06) !important; }
+.theme-premium.theme-premium-dark .bg-gray-100 { background-color: rgba(91, 141, 239, 0.10) !important; }
+
+
+/* ─── 4.  AntD component overrides ───────────────────────────────── */
+
+/* Tag — premium.css used rgba(10,16,24,...) which disappears on navy. */
+.theme-premium.theme-premium-dark .ant-tag {
+  background: rgba(91, 141, 239, 0.12);
+  border: 1px solid rgba(91, 141, 239, 0.28);
+  color: var(--text);
+}
+
+/* Primary button disabled — premium.css used rgba(10,16,24,0.06). */
+.theme-premium.theme-premium-dark .ant-btn-primary:disabled,
+.theme-premium.theme-premium-dark .pb-primary:disabled {
+  background: rgba(91, 141, 239, 0.10) !important;
+  color: var(--text-dim) !important;
+}
+
+/* Ghost-button hover background. */
+.theme-premium.theme-premium-dark .ant-btn-text:hover:not(:disabled),
+.theme-premium.theme-premium-dark .pb-ghost:hover:not(:disabled) {
+  background: rgba(91, 141, 239, 0.10) !important;
+  color: var(--text) !important;
+}
+
+/* Secondary button hover — slightly stronger iris alpha so it
+   registers on navy. */
+.theme-premium.theme-premium-dark .ant-btn-default:hover:not(:disabled),
+.theme-premium.theme-premium-dark .pb-secondary:hover:not(:disabled) {
+  background: rgba(91, 141, 239, 0.14) !important;
+  border-color: rgba(91, 141, 239, 0.55) !important;
+  color: var(--brand-accent) !important;
+  box-shadow: 0 4px 12px rgba(91, 141, 239, 0.18);
+}
+
+/* Typography — AntD defaultAlgorithm under premium emits near-black
+   text. Force the off-white token. */
+.theme-premium.theme-premium-dark .ant-typography,
+.theme-premium.theme-premium-dark .ant-typography h1,
+.theme-premium.theme-premium-dark .ant-typography h2,
+.theme-premium.theme-premium-dark .ant-typography h3,
+.theme-premium.theme-premium-dark .ant-typography h4,
+.theme-premium.theme-premium-dark .ant-typography h5,
+.theme-premium.theme-premium-dark h1.ant-typography,
+.theme-premium.theme-premium-dark h2.ant-typography,
+.theme-premium.theme-premium-dark h3.ant-typography,
+.theme-premium.theme-premium-dark h4.ant-typography,
+.theme-premium.theme-premium-dark h5.ant-typography {
+  color: var(--text);
+}
+.theme-premium.theme-premium-dark .ant-typography.ant-typography-secondary,
+.theme-premium.theme-premium-dark .ant-typography-caption {
+  color: var(--text-muted);
+}
+
+/* Card head + body text */
+.theme-premium.theme-premium-dark .ant-card-head,
+.theme-premium.theme-premium-dark .ant-card-head-title,
+.theme-premium.theme-premium-dark .ant-card-body,
+.theme-premium.theme-premium-dark .ant-card-meta-title,
+.theme-premium.theme-premium-dark .ant-card-meta-description {
+  color: var(--text);
+}
+
+/* Modal */
+.theme-premium.theme-premium-dark .ant-modal-content {
+  background: var(--glass-3) !important;
+  color: var(--text);
+}
+.theme-premium.theme-premium-dark .ant-modal-title {
+  color: var(--text);
+}
+.theme-premium.theme-premium-dark .ant-modal-close-x {
+  color: var(--text-muted);
+}
+
+/* Inputs / Select — variables already swap; explicit text colors keep
+   AntD's internal rules from re-painting near-black on the value. */
+.theme-premium.theme-premium-dark .ant-input,
+.theme-premium.theme-premium-dark .ant-input-affix-wrapper,
+.theme-premium.theme-premium-dark .ant-input-affix-wrapper input,
+.theme-premium.theme-premium-dark .ant-input-textarea textarea,
+.theme-premium.theme-premium-dark .ant-select:not(.ant-select-customize-input) .ant-select-selector,
+.theme-premium.theme-premium-dark .ant-select-selection-item,
+.theme-premium.theme-premium-dark .ant-picker .ant-picker-input > input {
+  color: var(--text);
+}
+.theme-premium.theme-premium-dark .ant-input::placeholder,
+.theme-premium.theme-premium-dark .ant-input-affix-wrapper input::placeholder,
+.theme-premium.theme-premium-dark .ant-select-selection-placeholder,
+.theme-premium.theme-premium-dark .ant-picker-input > input::placeholder {
+  color: var(--text-dim);
+}
+
+/* Select dropdown + Dropdown menu surfaces */
+.theme-premium.theme-premium-dark .ant-select-dropdown,
+.theme-premium.theme-premium-dark .ant-dropdown-menu,
+.theme-premium.theme-premium-dark .ant-picker-dropdown .ant-picker-panel-container {
+  background: var(--bg-raised) !important;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+}
+.theme-premium.theme-premium-dark .ant-select-item,
+.theme-premium.theme-premium-dark .ant-dropdown-menu-item {
+  color: var(--text);
+}
+.theme-premium.theme-premium-dark .ant-select-item-option-active:not(.ant-select-item-option-disabled),
+.theme-premium.theme-premium-dark .ant-dropdown-menu-item:hover {
+  background: rgba(91, 141, 239, 0.14);
+}
+.theme-premium.theme-premium-dark .ant-select-item-option-selected {
+  background: rgba(91, 141, 239, 0.22) !important;
+  color: var(--brand-accent) !important;
+}
+
+/* Tooltip — premium.css used near-black spotlight; lift to a navy
+   that is visible against the dark body. */
+.theme-premium.theme-premium-dark .ant-tooltip-inner {
+  background: #15294A !important;
+  color: var(--text) !important;
+  border: 1px solid var(--border);
+}
+.theme-premium.theme-premium-dark .ant-tooltip-arrow::before {
+  background: #15294A !important;
+}
+
+/* Message + Notification toasts */
+.theme-premium.theme-premium-dark .ant-message-notice-content,
+.theme-premium.theme-premium-dark .ant-notification-notice {
+  background: var(--bg-raised) !important;
+  border: 1px solid var(--border);
+  color: var(--text);
+}
+
+/* Alerts — nudge the alphas up so they register on navy. */
+.theme-premium.theme-premium-dark .ant-alert {
+  color: var(--text);
+}
+.theme-premium.theme-premium-dark .ant-alert-info {
+  background: rgba(91, 141, 239, 0.14) !important;
+  border-color: rgba(91, 141, 239, 0.36) !important;
+}
+.theme-premium.theme-premium-dark .ant-alert-warning {
+  background: rgba(255, 179, 71, 0.14) !important;
+  border-color: rgba(232, 154, 42, 0.40) !important;
+}
+.theme-premium.theme-premium-dark .ant-alert-error {
+  background: rgba(255, 94, 122, 0.14) !important;
+  border-color: rgba(224, 69, 95, 0.40) !important;
+}
+.theme-premium.theme-premium-dark .ant-alert-success {
+  background: rgba(70, 214, 154, 0.14) !important;
+  border-color: rgba(31, 176, 127, 0.40) !important;
+}
+.theme-premium.theme-premium-dark .ant-alert-message,
+.theme-premium.theme-premium-dark .ant-alert-description {
+  color: var(--text);
+}
+
+/* Tabs */
+.theme-premium.theme-premium-dark .ant-tabs-tab .ant-tabs-tab-btn {
+  color: var(--text-muted);
+}
+.theme-premium.theme-premium-dark .ant-tabs-tab:hover .ant-tabs-tab-btn {
+  color: var(--text);
+}
+.theme-premium.theme-premium-dark .ant-tabs-tab-active .ant-tabs-tab-btn,
+.theme-premium.theme-premium-dark .ant-tabs-tab.ant-tabs-tab-active .ant-tabs-tab-btn {
+  color: var(--brand-accent) !important;
+}
+
+/* Form / label / divider */
+.theme-premium.theme-premium-dark .ant-form-item-label > label {
+  color: var(--text);
+}
+.theme-premium.theme-premium-dark .ant-divider {
+  border-color: var(--border);
+}
+.theme-premium.theme-premium-dark .ant-divider-inner-text {
+  color: var(--text-muted);
+}
+
+/* Collapse + Tree */
+.theme-premium.theme-premium-dark .ant-collapse,
+.theme-premium.theme-premium-dark .ant-collapse > .ant-collapse-item,
+.theme-premium.theme-premium-dark .ant-collapse-content {
+  background: transparent;
+  color: var(--text);
+  border-color: var(--border);
+}
+.theme-premium.theme-premium-dark .ant-collapse-header,
+.theme-premium.theme-premium-dark .ant-collapse-header-text {
+  color: var(--text) !important;
+}
+
+/* Table */
+.theme-premium.theme-premium-dark .ant-table {
+  background: transparent;
+  color: var(--text);
+}
+.theme-premium.theme-premium-dark .ant-table-thead > tr > th {
+  background: rgba(91, 141, 239, 0.10) !important;
+  color: var(--text) !important;
+  border-bottom: 1px solid var(--border) !important;
+}
+.theme-premium.theme-premium-dark .ant-table-tbody > tr > td {
+  border-bottom: 1px solid var(--border);
+  color: var(--text);
+}
+.theme-premium.theme-premium-dark .ant-table-tbody > tr.ant-table-row:hover > td {
+  background: rgba(91, 141, 239, 0.08) !important;
+}
+
+
+/* ─── 5.  Component-injected <style> overrides ───────────────────── */
+/* Some panels inject inline <style> tags with hardcoded light-theme
+   colors (Stage5EscalationPackage's `.b04-*` and `.hr-*` selectors).
+   Those rules don't reference CSS variables, so they need explicit
+   dark-mode counterparts here. */
+
+/* Block 04 — Operational Handoff heading */
+.theme-premium.theme-premium-dark .b04-display {
+  color: var(--text);
+}
+.theme-premium.theme-premium-dark .b04-eyebrow {
+  background: rgba(91, 141, 239, 0.14);
+  border-color: rgba(91, 141, 239, 0.32);
+  color: #93C5FD;
+}
+
+/* Handoff Report — section heads, title, subhead, reason strip */
+.theme-premium.theme-premium-dark .hr-root {
+  color: var(--text);
+}
+.theme-premium.theme-premium-dark .hr-title {
+  color: var(--text);
+}
+.theme-premium.theme-premium-dark .hr-subhead {
+  color: var(--text-muted);
+}
+.theme-premium.theme-premium-dark .hr-sectionHead {
+  color: #93C5FD;
+}
+.theme-premium.theme-premium-dark .hr-sectionHead::before {
+  background: rgba(91, 141, 239, 0.36);
+}
+.theme-premium.theme-premium-dark .hr-eyebrow {
+  background: rgba(91, 141, 239, 0.14);
+  border-color: rgba(91, 141, 239, 0.32);
+  color: #BFDBFE;
+}
+
+/* TimeCard grid — cards, labels, durations, tags, tickets, chips */
+.theme-premium.theme-premium-dark .hr-card {
+  background: var(--bg-raised);
+  border-color: var(--border);
+}
+.theme-premium.theme-premium-dark .hr-card:hover {
+  border-color: rgba(91, 141, 239, 0.45);
+  box-shadow: 0 4px 16px -8px rgba(91, 141, 239, 0.35);
+}
+.theme-premium.theme-premium-dark .hr-card--major {
+  background: linear-gradient(135deg, rgba(91, 141, 239, 0.10) 0%, var(--bg-raised) 70%);
+  border-color: rgba(91, 141, 239, 0.32);
+}
+/* Full (Total) card — keep the iris-to-navy gradient but anchor it on
+   the dark base so it doesn't burn against the surrounding panel. */
+.theme-premium.theme-premium-dark .hr-card--full {
+  background: linear-gradient(135deg, #1E4FAF 0%, #0F2240 100%);
+  border-color: rgba(91, 141, 239, 0.55);
+  color: #FFFFFF;
+}
+.theme-premium.theme-premium-dark .hr-cardK {
+  color: #93C5FD;
+}
+.theme-premium.theme-premium-dark .hr-cardLabel {
+  color: var(--text);
+}
+.theme-premium.theme-premium-dark .hr-cardNum {
+  color: #BFDBFE;
+}
+.theme-premium.theme-premium-dark .hr-cardTag {
+  background: rgba(91, 141, 239, 0.14);
+  border-color: rgba(91, 141, 239, 0.32);
+  color: #BFDBFE;
+}
+.theme-premium.theme-premium-dark .hr-ticket,
+.theme-premium.theme-premium-dark .hr-codeChip {
+  background: rgba(91, 141, 239, 0.14);
+  border-color: rgba(91, 141, 239, 0.32);
+  color: #DBEAFE;
+}
+
+/* Diagnostic rows */
+.theme-premium.theme-premium-dark .hr-diagRow {
+  background: var(--bg-raised);
+  border-color: var(--border);
+}
+.theme-premium.theme-premium-dark .hr-diagIdx {
+  color: #93C5FD;
+}
+.theme-premium.theme-premium-dark .hr-diagText {
+  color: var(--text);
+}
+
+/* Reason strip */
+.theme-premium.theme-premium-dark .hr-reason {
+  background: rgba(91, 141, 239, 0.10);
+  border-left-color: rgba(91, 141, 239, 0.55);
+  color: var(--text);
+}
+.theme-premium.theme-premium-dark .hr-reason__label {
+  color: #93C5FD;
+}
+
+
+/* ─── 6.  Journey-stage injected CSS overrides ───────────────────── */
+/* Stage0 / Stage3 / Stage4 / Stage5 each inject a <style> block at
+   mount time (Stage0: .b01-*, Stage3: .b02-*, Stage4: .b03-*,
+   Stage5: .b04-* + .hr-* — the .b04-* / .hr-* are already handled
+   above). Those rules hardcode `color: #0F172A` (near-black slate)
+   for the primary text and `color: #475569` (slate-600) for the
+   subhead / muted text. On a navy background they're unreadable, so
+   we rebind to the dark tokens here. */
+
+/* Root + primary text on each journey block. */
+.theme-premium.theme-premium-dark .b01-root,
+.theme-premium.theme-premium-dark .b02-root,
+.theme-premium.theme-premium-dark .b03-root,
+.theme-premium.theme-premium-dark .b04-root {
+  color: var(--text);
+}
+
+/* Display titles — large serif headings on each stage. */
+.theme-premium.theme-premium-dark .b01-display,
+.theme-premium.theme-premium-dark .b02-display,
+.theme-premium.theme-premium-dark .b03-display {
+  color: var(--text);
+}
+
+/* Subheads — secondary descriptive line below the title. */
+.theme-premium.theme-premium-dark .b01-subhead,
+.theme-premium.theme-premium-dark .b02-subhead,
+.theme-premium.theme-premium-dark .b03-subhead {
+  color: var(--text-muted);
+}
+
+/* Eyebrow chips — light-blue pill with dark-blue text on light
+   theme. On navy we need a brighter blue tone on a tinted background
+   so the eyebrow still reads as a labeled pill. */
+.theme-premium.theme-premium-dark .b01-eyebrow,
+.theme-premium.theme-premium-dark .b02-eyebrow,
+.theme-premium.theme-premium-dark .b03-eyebrow {
+  background: rgba(91, 141, 239, 0.14);
+  border-color: rgba(91, 141, 239, 0.32);
+  color: #BFDBFE;
+}
+
+/* Row bodies — the actual content text inside each list row. */
+.theme-premium.theme-premium-dark .b01-rowBody,
+.theme-premium.theme-premium-dark .b02-rowBody {
+  color: var(--text);
+}
+
+/* Row indices (1, 2, 3…) and the "step" prefix. */
+.theme-premium.theme-premium-dark .b01-rowIndex,
+.theme-premium.theme-premium-dark .b02-rowIndex {
+  color: #93C5FD;
+}
+
+/* Row borders — slate-100 on light, iris on dark. */
+.theme-premium.theme-premium-dark .b01-row,
+.theme-premium.theme-premium-dark .b02-row {
+  border-top-color: var(--border);
+}
+
+/* Source / incident ID chip on each row. */
+.theme-premium.theme-premium-dark .b01-rowId,
+.theme-premium.theme-premium-dark .b02-rowSource {
+  background: rgba(91, 141, 239, 0.14);
+  border-color: rgba(91, 141, 239, 0.32);
+  color: #BFDBFE;
+}
+
+/* Action links inside each row (Ask in chat / KB lookup). */
+.theme-premium.theme-premium-dark .b01-rowLink,
+.theme-premium.theme-premium-dark .b02-rowLink {
+  color: var(--text-muted);
+}
+.theme-premium.theme-premium-dark .b01-rowLink:hover:not(:disabled) {
+  color: #93C5FD;
+}
+.theme-premium.theme-premium-dark .b02-rowLink__label {
+  color: #93C5FD;
+}
+
+/* Code chip — light-blue pill with code text. */
+.theme-premium.theme-premium-dark .b02-codeChip {
+  background: rgba(91, 141, 239, 0.14);
+  border-color: rgba(91, 141, 239, 0.32);
+  color: #DBEAFE;
+}
+
+
+/* ─── 7.  Other markdown / export-style blocks ───────────────────── */
+/* GapAnalysisFlow / rcaExport / gapAnalysisExport inject a markdown
+   stylesheet with `color: #1f2937` (gray-800) for everything inside
+   `.gap-markdown` / `.rca-markdown`. Override to the dark text token
+   so in-app preview is legible. The exported HTML files still embed
+   their own light-theme stylesheet, so PDF/print outputs are
+   unaffected. */
+.theme-premium.theme-premium-dark .gap-markdown,
+.theme-premium.theme-premium-dark .gap-markdown h1,
+.theme-premium.theme-premium-dark .gap-markdown h2,
+.theme-premium.theme-premium-dark .gap-markdown h3,
+.theme-premium.theme-premium-dark .gap-markdown p,
+.theme-premium.theme-premium-dark .gap-markdown li,
+.theme-premium.theme-premium-dark .gap-markdown strong,
+.theme-premium.theme-premium-dark .gap-markdown em,
+.theme-premium.theme-premium-dark .rca-markdown,
+.theme-premium.theme-premium-dark .rca-markdown h1,
+.theme-premium.theme-premium-dark .rca-markdown h2,
+.theme-premium.theme-premium-dark .rca-markdown h3,
+.theme-premium.theme-premium-dark .rca-markdown p,
+.theme-premium.theme-premium-dark .rca-markdown li,
+.theme-premium.theme-premium-dark .rca-markdown strong,
+.theme-premium.theme-premium-dark .rca-markdown em {
+  color: var(--text);
+}
+
+
+/* ─── 8.  Last-resort catch-all for inline-styled black text ──────── */
+/* CSS attribute selectors target inline `style="color: ..."` values.
+   Inline styles normally win over CSS, but a class+attribute selector
+   plus `!important` pins it down. This catches the common dark text
+   colors that components hardcode as inline styles without us having
+   to find every callsite. */
+.theme-premium.theme-premium-dark [style*="color: #000"],
+.theme-premium.theme-premium-dark [style*="color:#000"],
+.theme-premium.theme-premium-dark [style*="color: #111"],
+.theme-premium.theme-premium-dark [style*="color: #1a1a2e"],
+.theme-premium.theme-premium-dark [style*="color: #1A1A2E"],
+.theme-premium.theme-premium-dark [style*="color: #0F172A"],
+.theme-premium.theme-premium-dark [style*="color: #0f172a"],
+.theme-premium.theme-premium-dark [style*="color: #0A1018"],
+.theme-premium.theme-premium-dark [style*="color: #0a1018"],
+.theme-premium.theme-premium-dark [style*="color: #1f2937"],
+.theme-premium.theme-premium-dark [style*="color: #1F2937"],
+.theme-premium.theme-premium-dark [style*="color: #111827"],
+.theme-premium.theme-premium-dark [style*="color: #374151"],
+.theme-premium.theme-premium-dark [style*="color: rgb(0, 0, 0)"],
+.theme-premium.theme-premium-dark [style*="color: rgba(0, 0, 0"] {
+  color: var(--text) !important;
+}
+
+
+/* ─── 9.  Print + reduced motion already inherited from premium.css */

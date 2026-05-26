@@ -2,7 +2,11 @@ import React, { useCallback, useState } from "react";
 import { Alert, Button, Card, Input, message } from "antd";
 import { ThunderboltOutlined } from "@ant-design/icons";
 import { INTAKE_MAX_RAW_CHARS } from "../tier1Constants";
-import SuggestionCarousel from "./SuggestionCarousel";
+// SuggestionCarousel intentionally NOT imported here — the cards UI is
+// commented out in the render below per the new tab UX (top candidate
+// auto-applies to the Proactive form). Re-add the import if you revive
+// the cards block.
+// import SuggestionCarousel from "./SuggestionCarousel";
 import { extractIntake, sendExtractionFeedback } from "./intakeApi";
 
 const SOURCE_LABEL = {
@@ -59,6 +63,15 @@ export default function UniversalIntakePanel({
             data.error
               || "Extraction returned no candidates. Fill the form manually below.",
           );
+        } else {
+          // Auto-pick the top candidate (the one the diversifier ranked
+          // first) instead of waiting for the engineer to click one of
+          // the suggestion cards. The cards UI is commented out below;
+          // the top match's extracted fields flow straight into the
+          // Proactive form via the shared onCardPicked callback, and
+          // the parent (SourceAwareIntake) switches the tab back to
+          // Proactive so the engineer sees the pre-filled form.
+          handleUse(data.candidates[0], data.extraction_id || null);
         }
       } else {
         setError("Extraction failed. Fill the form manually below.");
@@ -72,10 +85,15 @@ export default function UniversalIntakePanel({
     } finally {
       setBusy(false);
     }
+    // handleUse intentionally NOT in the dep list — its own deps
+    // (extractionId, candidates, onCardPicked) don't affect what
+    // `handleExtract` does; we just need the latest reference at
+    // call time, which closing over it captures fine. Adding handleUse
+    // would re-create handleExtract on every candidates change.
   }, [text, source, sessionId]);
 
   const handleUse = useCallback(
-    async (card) => {
+    async (card, freshExtractionId) => {
       if (!card) return;
       // Map the validated candidate back into the Sprint 6 form shape.
       const prefill = {
@@ -86,13 +104,18 @@ export default function UniversalIntakePanel({
         location: card.location || "",
       };
       if (onCardPicked) onCardPicked(prefill);
-      message.success("Form pre-filled. Edit fields if needed and click Analyze.");
+      message.success("Form pre-filled from your text. Edit if needed and click Analyze.");
 
-      if (extractionId) {
+      // `freshExtractionId` is the id returned by the just-completed
+      // extract call — passed in by `handleExtract` so we don't have to
+      // wait for the state set to flush. Falls back to the state value
+      // for any future caller that picks a card without the latest id.
+      const effectiveId = freshExtractionId || extractionId;
+      if (effectiveId) {
         const idx = candidates.findIndex((c) => c === card);
         try {
-          await sendExtractionFeedback(extractionId, {
-            picked_index: idx >= 0 ? idx : null,
+          await sendExtractionFeedback(effectiveId, {
+            picked_index: idx >= 0 ? idx : 0,
             was_rejected: false,
           });
         } catch {
@@ -108,11 +131,20 @@ export default function UniversalIntakePanel({
 
   return (
     <Card
-      bodyStyle={{ padding: 18 }}
+      // Body padding matches the Proactive Card (14px vertical / 28px
+      // horizontal) so the two tabs are visually identical in chrome.
+      bodyStyle={{ padding: "14px 28px" }}
       style={{
         backgroundColor: "var(--bg-secondary)",
         borderColor: "var(--border-color)",
-        borderRadius: 12,
+        // Spherical (heavily rounded) border to match the Proactive
+        // form's outer Card so the two tabs feel like the same vessel
+        // with different inner content. Soft ambient shadow lifts the
+        // panel off the page background the same way the Proactive
+        // Card does — keeps the two views visually identical in
+        // weight even though only one is mounted at a time.
+        borderRadius: 28,
+        boxShadow: "0 6px 24px -8px rgba(15, 23, 42, 0.10), 0 2px 6px -2px rgba(15, 23, 42, 0.06)",
         marginBottom: 16,
       }}
     >
@@ -122,32 +154,36 @@ export default function UniversalIntakePanel({
           symmetric. UniversalIntakePanel has only one usage today
           (Reactive column inside SourceAwareIntake), so this style
           bump is local to that surface. */}
-      <div style={{ marginBottom: 14, textAlign: "center" }}>
+      {/* Header trimmed (20/13px → 18/12px, smaller gap) so the
+          Reactive panel matches the Proactive box's shorter height. */}
+      <div style={{ marginBottom: 10, textAlign: "center" }}>
         <h2
           className="t-text"
           style={{
-            fontSize: 20,
+            fontSize: 18,
             fontWeight: 600,
             letterSpacing: "-0.01em",
             margin: 0,
-            marginBottom: 6,
+            marginBottom: 2,
           }}
         >
           {headerOverride || `Paste content from ${SOURCE_LABEL[source] || source}`}
         </h2>
         <p
           className="t-text-muted"
-          style={{ fontSize: 13, margin: 0, lineHeight: 1.5 }}
+          style={{ fontSize: 12, margin: 0, lineHeight: 1.45 }}
         >
           {helperTextOverride
-            || ("The system will extract up to 4 structured interpretations and"
-                + " validate them against the ingested ticket corpus. Pick one to"
-                + " pre-fill the form below.")}
+            || ("The system extracts the most likely interpretation from your"
+                + " text and applies it to the Proactive form automatically.")}
         </p>
       </div>
 
+      {/* rows lowered 6 → 4 so the Reactive panel is shorter — with
+          the wider parent (maxWidth 1400) each row now holds more
+          characters, so 4 rows still offers a comfortable paste area. */}
       <Input.TextArea
-        rows={6}
+        rows={4}
         value={text}
         onChange={(e) => setText(e.target.value)}
         placeholder={
@@ -160,6 +196,11 @@ export default function UniversalIntakePanel({
         // gap before the Extract & Suggest CTA. Keeping AntD's built-in
         // showCount would render the same number twice (duplicate UX).
         disabled={busy}
+        // Pill-rounded corners to match the Proactive box's spherical
+        // border language. Stops short of full pill on a multi-line
+        // textarea (would look odd) — 18px reads as clearly rounded
+        // without distorting the corner glyphs.
+        style={{ borderRadius: 18 }}
       />
       {overLimit && (
         <Alert
@@ -170,11 +211,10 @@ export default function UniversalIntakePanel({
         />
       )}
 
-      {/* Premium revamp — stack the char counter and the
-          Extract & Suggest CTA vertically with a line of breathing
-          room. The counter sits on its own row right under the
-          textarea; the CTA gets a clean line below it. */}
-      <div style={{ marginTop: 12 }}>
+      {/* Counter + CTA stack — gaps tightened so the panel fits in
+          the new shorter height. The vertical rhythm (textarea →
+          counter → CTA) is preserved, just compressed. */}
+      <div style={{ marginTop: 8 }}>
         <div
           style={{
             display: "flex",
@@ -188,7 +228,7 @@ export default function UniversalIntakePanel({
         </div>
         <div
           style={{
-            marginTop: 16,             // ← the "one line space" the user asked for
+            marginTop: 8,
             display: "flex",
             justifyContent: "flex-end",
           }}
@@ -223,17 +263,26 @@ export default function UniversalIntakePanel({
         />
       )}
 
-      {candidates.length > 0 && (
-        <div style={{ marginTop: 16 }}>
-          <SuggestionCarousel
-            candidates={candidates}
-            onUse={handleUse}
-          />
-          <div className="t-text-muted text-xs mt-2">
-            Edit the form fields below if the AI got it wrong.
-          </div>
-        </div>
-      )}
+      {/* Suggestion cards intentionally commented out per the new tab
+          UX. The engineer pastes text → clicks Extract & Suggest → the
+          top candidate is auto-applied to the Proactive form and the
+          parent flips the active tab back to Proactive (see
+          `handleExtract` above and SourceAwareIntake's onCardPicked).
+
+          Preserved here for reference / easy revert:
+
+          {candidates.length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <SuggestionCarousel
+                candidates={candidates}
+                onUse={handleUse}
+              />
+              <div className="t-text-muted text-xs mt-2">
+                Edit the form fields below if the AI got it wrong.
+              </div>
+            </div>
+          )}
+      */}
     </Card>
   );
 }

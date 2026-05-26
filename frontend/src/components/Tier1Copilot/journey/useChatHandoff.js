@@ -33,6 +33,48 @@ import { askQuestion, getSession } from "../../../services/api";
 import { searchKbHandoff } from "./journeyApi";
 
 
+// Sprint 13.36 — per (journey, scope) chat-session cache. Survives
+// component remounts within the same page load so a "Discuss with
+// LogIQ" repeat-click on the same ticket reuses its existing chat
+// session instead of forking a fresh one. Module-scoped on purpose:
+// the cache is keyed by (journeySessionId, scopeIncidentId), so two
+// different journeys (or the same journey at different scopes) still
+// each get their own chat. A full page reload clears the cache,
+// which is fine — the backend persists the chats and a fresh click
+// will create a fresh one if the cache is cold.
+const _handoffCache = new Map();
+const _cacheKey = (journeySessionId, scope) =>
+  `${journeySessionId}::${scope || "_global"}`;
+
+
+// Sprint 13.36 — server-side dedupe of consecutive identical user
+// turns. The initial click path persists the prefilled question
+// TWICE on the backend (once by searchKbHandoff when the chat
+// session is created, once by askQuestion when the answer is
+// generated). On the first visit only one of those is visible
+// because SET_SESSION runs between the two writes; on a reuse-rehydrate
+// both are visible. This helper collapses any user turn that exactly
+// duplicates the immediately preceding user turn (same role + same
+// content, no assistant turn between them) before dispatching the
+// session into the reducer.
+function _dedupeConsecutiveUserTurns(sessionData) {
+  if (!sessionData || !Array.isArray(sessionData.messages)) return sessionData;
+  const out = [];
+  for (const m of sessionData.messages) {
+    const prev = out[out.length - 1];
+    const isDuplicateUserEcho =
+      prev
+      && m
+      && prev.role === "user"
+      && m.role === "user"
+      && (prev.content || "") === (m.content || "");
+    if (isDuplicateUserEcho) continue;
+    out.push(m);
+  }
+  return { ...sessionData, messages: out };
+}
+
+
 export default function useChatHandoff(journeySessionId) {
   const { dispatch } = useChat();
   const [busy, setBusy] = useState(false);
@@ -53,6 +95,37 @@ export default function useChatHandoff(journeySessionId) {
       }
       setBusy(true);
       try {
+        // Sprint 13.36 — reuse path: if we've already opened a chat
+        // for this (journey, ticket) tuple in this page-load, jump
+        // back to that chat instead of forking a new one. The cache
+        // is invalidated lazily when the cached session no longer
+        // resolves server-side (e.g. deleted between visits) — we
+        // drop the stale entry and fall through to the create-fresh
+        // path so the engineer always lands on a working chat.
+        const cacheKey = _cacheKey(journeySessionId, scopeIncidentId);
+        const cachedId = _handoffCache.get(cacheKey);
+        if (cachedId) {
+          try {
+            const sessRes = await getSession(cachedId);
+            dispatch({
+              type: "SET_MODE",
+              payload: { selectedMode: "troubleshooting", subMode: null },
+            });
+            dispatch({
+              type: "SET_SESSION",
+              payload: _dedupeConsecutiveUserTurns(sessRes.data),
+            });
+            return;
+          } catch (reuseErr) {
+            // eslint-disable-next-line no-console
+            console.warn(
+              "[useChatHandoff] cached chat session no longer reachable; creating a fresh one",
+              reuseErr,
+            );
+            _handoffCache.delete(cacheKey);
+          }
+        }
+
         const { chat_session_id } = await searchKbHandoff(
           journeySessionId,
           text,
@@ -98,6 +171,10 @@ export default function useChatHandoff(journeySessionId) {
         } finally {
           dispatch({ type: "SET_LOADING", payload: false });
         }
+
+        // Cache the freshly-created chat session so the next click
+        // on the same (journey, ticket) tuple reuses it.
+        _handoffCache.set(cacheKey, chat_session_id);
       } catch (err) {
         // eslint-disable-next-line no-console
         console.error("[useChatHandoff] handoff failed", err);

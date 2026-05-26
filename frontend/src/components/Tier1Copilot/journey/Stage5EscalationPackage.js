@@ -68,6 +68,64 @@ function _ensurePulseStyles() {
 const { Title, Paragraph, Text } = Typography;
 
 
+// ─────────────────────────────────────────────────────────────
+// Block 04 — Operational Handoff (heading only).
+// Mirrors the Block 02 / Block 03 eyebrow + display + gradient
+// italic accent treatment so the four cohort/journey panels
+// (Best Historical Match, Guided Workflow, Knowledge Base &
+// SOP Reference, Operational Handoff) form a consistent visual
+// family. Scope: `.b04-*` so nothing bleeds into the inner
+// Escalation Routing / Handoff Note sub-sections.
+// ─────────────────────────────────────────────────────────────
+const B04_BLUE = {
+  50:  "#EFF6FF",
+  200: "#BFDBFE",
+  400: "#60A5FA",
+  500: "#3B82F6",
+  600: "#2563EB",
+  700: "#1D4ED8",
+};
+const B04_CSS = `
+.b04-eyebrow {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 4px 12px; border-radius: 9999px;
+  background: ${B04_BLUE[50]};
+  border: 1px solid ${B04_BLUE[200]};
+  color: ${B04_BLUE[700]};
+  font-family: var(--font-mono, 'Geist Mono', 'JetBrains Mono', Consolas, monospace);
+  font-size: 10.5px; font-weight: 500; letter-spacing: 0.14em;
+  text-transform: uppercase;
+  margin-bottom: 10px;
+}
+.b04-eyebrow__dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: ${B04_BLUE[500]};
+  box-shadow: 0 0 8px ${B04_BLUE[400]};
+}
+.b04-display {
+  font-family: var(--font-display, 'Instrument Serif', Georgia, serif);
+  font-size: clamp(24px, 2.8vw, 32px);
+  font-weight: 400; line-height: 1.12; letter-spacing: -0.018em;
+  margin: 0 0 6px 0; color: #0F172A;
+}
+.b04-accent {
+  font-style: italic; font-weight: 400;
+  background: linear-gradient(135deg, ${B04_BLUE[400]} 0%, ${B04_BLUE[600]} 60%, ${B04_BLUE[700]} 100%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+}
+`;
+let _b04StylesInjected = false;
+function _ensureB04Styles() {
+  if (typeof document === "undefined" || _b04StylesInjected) return;
+  const style = document.createElement("style");
+  style.setAttribute("data-acadia-block04", "1");
+  style.textContent = B04_CSS;
+  document.head.appendChild(style);
+  _b04StylesInjected = true;
+}
+
+
 // ────────────────────────────────────────────────────────────
 // Routing section — deduped groups, paths, and Tier-2 candidates.
 // Hidden when the cohort carries no routing data at all so the
@@ -165,6 +223,734 @@ function EscalationRoutingSection({ routing }) {
           </Text>
         </Paragraph>
       ) : null}
+    </div>
+  );
+}
+
+
+// ─────────────────────────────────────────────────────────────
+// Handoff Report — 10-step blue scale + 9 type roles + TimeCard grid
+//
+// Replaces the previous monospace <pre> render with a structured
+// card grid. Parses the LLM/template-generated handoff `note` into
+// {eyebrow, title, subhead, activities[], diagnostics[], reason}
+// and renders TimeCards (default / major / full / diag) inside a
+// CardsGrid, with a ReasonStrip below.
+//
+// Scope: `.hr-*` so this stylesheet cannot bleed into any other
+// panel. Buttons (Copy / Regenerate) and the underlying `note`
+// data source remain UNCHANGED.
+// ─────────────────────────────────────────────────────────────
+const HR_BLUE = {
+  50:  "#EFF6FF",
+  100: "#DBEAFE",
+  200: "#BFDBFE",
+  300: "#93C5FD",
+  400: "#60A5FA",
+  500: "#3B82F6",
+  600: "#2563EB",
+  700: "#1D4ED8",
+  800: "#1E40AF",
+  900: "#1E3A8A",
+};
+const HR_CSS = `
+.hr-root {
+  font-family: var(--font-body, 'Geist', 'Inter', system-ui, sans-serif);
+  color: #0F172A;
+}
+.hr-eyebrow {
+  display: inline-flex; align-items: center; gap: 8px;
+  padding: 4px 12px; border-radius: 9999px;
+  background: ${HR_BLUE[50]};
+  border: 1px solid ${HR_BLUE[200]};
+  color: ${HR_BLUE[800]};
+  font-family: var(--font-mono, 'Geist Mono', 'JetBrains Mono', Consolas, monospace);
+  font-size: 10.5px; font-weight: 500; letter-spacing: 0.14em;
+  text-transform: uppercase;
+  margin-bottom: 8px;
+}
+.hr-eyebrow__dot {
+  width: 6px; height: 6px; border-radius: 50%;
+  background: ${HR_BLUE[500]};
+  box-shadow: 0 0 8px ${HR_BLUE[400]};
+}
+.hr-title {
+  font-family: var(--font-display, 'Instrument Serif', Georgia, serif);
+  font-size: clamp(22px, 2.4vw, 28px);
+  font-weight: 400; line-height: 1.15; letter-spacing: -0.018em;
+  margin: 0 0 4px 0; color: #0F172A;
+}
+.hr-titleAccent {
+  font-style: italic; font-weight: 400;
+  background: linear-gradient(135deg, ${HR_BLUE[400]} 0%, ${HR_BLUE[600]} 60%, ${HR_BLUE[800]} 100%);
+  -webkit-background-clip: text; background-clip: text;
+  -webkit-text-fill-color: transparent; color: transparent;
+}
+.hr-subhead {
+  font-size: 13px; line-height: 1.55; color: #475569;
+  margin: 0 0 16px 0;
+}
+.hr-sectionHead {
+  display: inline-flex; align-items: center; gap: 8px;
+  font-family: var(--font-mono, 'Geist Mono', monospace);
+  font-size: 11px; font-weight: 600; letter-spacing: 0.10em;
+  text-transform: uppercase; color: ${HR_BLUE[700]};
+  margin: 18px 0 10px 0;
+}
+.hr-sectionHead::before {
+  content: ""; display: inline-block; width: 18px; height: 1px;
+  background: ${HR_BLUE[300]};
+}
+.hr-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+/* TimeCard — default variant. */
+.hr-card {
+  position: relative;
+  background: #FFFFFF;
+  border: 1px solid ${HR_BLUE[100]};
+  border-radius: 14px;
+  padding: 14px 16px;
+  display: flex; flex-direction: column; gap: 6px;
+  min-height: 96px;
+  transition: border-color 180ms ease, box-shadow 180ms ease;
+}
+.hr-card:hover { border-color: ${HR_BLUE[300]}; box-shadow: 0 4px 16px -8px rgba(37, 99, 235, 0.18); }
+/* Major variant — index-0 (longest-duration) card. Spans 2 grid
+   columns on wide layouts so it reads as the dominant activity. */
+.hr-card--major {
+  background: linear-gradient(135deg, ${HR_BLUE[50]} 0%, #FFFFFF 70%);
+  border-color: ${HR_BLUE[200]};
+}
+/* Wide variant — spans both columns of the 2-col grid. Used when
+   Search KB / SOP Reference should fill row 2 because Discuss with
+   LogIQ was never opened. */
+.hr-card--wide {
+  grid-column: 1 / -1;
+}
+/* Full variant — total card. Always last and full-width. */
+.hr-card--full {
+  grid-column: 1 / -1;
+  background: linear-gradient(135deg, ${HR_BLUE[600]} 0%, ${HR_BLUE[800]} 100%);
+  border-color: ${HR_BLUE[700]};
+  color: #FFFFFF;
+}
+.hr-card--full .hr-cardLabel,
+.hr-card--full .hr-cardNum,
+.hr-card--full .hr-cardTag { color: #FFFFFF; }
+.hr-card--full .hr-cardTag {
+  background: rgba(255, 255, 255, 0.14);
+  border-color: rgba(255, 255, 255, 0.28);
+}
+/* Diag variant — diagnostic activity card (carries a codeChip). */
+.hr-card--diag {
+  background: #FFFFFF;
+  border-color: ${HR_BLUE[100]};
+}
+/* Type roles inside a card */
+.hr-cardK {
+  font-family: var(--font-mono, 'Geist Mono', monospace);
+  font-feature-settings: 'tnum' 1;
+  font-size: 10px; font-weight: 600; letter-spacing: 0.12em;
+  text-transform: uppercase; color: ${HR_BLUE[500]};
+}
+.hr-cardLabel {
+  font-size: 13px; font-weight: 600; line-height: 1.4;
+  color: #0F172A;
+}
+.hr-cardNum {
+  font-family: var(--font-mono, 'Geist Mono', monospace);
+  font-feature-settings: 'tnum' 1;
+  font-size: 22px; font-weight: 600; line-height: 1.1;
+  color: ${HR_BLUE[800]};
+  margin-top: 2px;
+}
+.hr-card--full .hr-cardNum { font-size: 28px; }
+.hr-cardNum small {
+  font-family: var(--font-mono, 'Geist Mono', monospace);
+  font-size: 12px; font-weight: 500; color: inherit;
+  opacity: 0.75; margin-left: 3px;
+}
+.hr-cardNum__active {
+  font-family: var(--font-body, 'Geist', system-ui, sans-serif);
+  font-size: 11px; font-weight: 500; letter-spacing: 0.04em;
+  margin-left: 10px; opacity: 0.85;
+}
+.hr-cardTag {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-family: var(--font-mono, 'Geist Mono', monospace);
+  font-feature-settings: 'tnum' 1;
+  font-size: 11px; font-weight: 500;
+  background: ${HR_BLUE[50]};
+  border: 1px solid ${HR_BLUE[200]};
+  color: ${HR_BLUE[700]};
+  padding: 2px 8px; border-radius: 9999px;
+}
+.hr-ticket {
+  font-family: var(--font-mono, 'Geist Mono', monospace);
+  font-feature-settings: 'tnum' 1;
+  font-size: 11.5px; font-weight: 600;
+  background: ${HR_BLUE[50]};
+  border: 1px solid ${HR_BLUE[200]};
+  color: ${HR_BLUE[800]};
+  padding: 1px 7px; border-radius: 6px;
+  white-space: nowrap;
+}
+.hr-tickets { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.hr-codeChip {
+  display: inline-block;
+  font-family: var(--font-mono, 'Geist Mono', monospace);
+  font-feature-settings: 'tnum' 1;
+  white-space: nowrap;
+  background: ${HR_BLUE[50]};
+  border: 1px solid ${HR_BLUE[200]};
+  color: ${HR_BLUE[900]};
+  font-size: 11.5px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  max-width: 100%; overflow-x: auto;
+}
+.hr-codeChips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px; }
+/* ReasonStrip */
+.hr-reason {
+  display: flex; align-items: flex-start; gap: 10px;
+  margin-top: 18px;
+  padding: 12px 14px;
+  background: ${HR_BLUE[50]};
+  border-left: 3px solid ${HR_BLUE[600]};
+  border-radius: 8px;
+  font-size: 13px; line-height: 1.55; color: ${HR_BLUE[900]};
+}
+.hr-reason__label {
+  font-family: var(--font-mono, 'Geist Mono', monospace);
+  font-size: 10.5px; font-weight: 600; letter-spacing: 0.14em;
+  text-transform: uppercase; color: ${HR_BLUE[700]};
+  white-space: nowrap; padding-top: 1px;
+}
+/* Diag-row layout */
+.hr-diagList {
+  display: flex; flex-direction: column; gap: 10px;
+}
+.hr-diagRow {
+  display: grid; grid-template-columns: 24px 1fr;
+  gap: 10px;
+  padding: 10px 12px;
+  background: #FFFFFF;
+  border: 1px solid ${HR_BLUE[100]};
+  border-radius: 10px;
+}
+.hr-diagIdx {
+  font-family: var(--font-mono, 'Geist Mono', monospace);
+  font-feature-settings: 'tnum' 1;
+  font-size: 12px; font-weight: 600; color: ${HR_BLUE[600]};
+  padding-top: 1px;
+}
+.hr-diagText {
+  font-size: 13px; line-height: 1.55; color: #0F172A;
+}
+`;
+let _hrStylesInjected = false;
+function _ensureHrStyles() {
+  if (typeof document === "undefined" || _hrStylesInjected) return;
+  const style = document.createElement("style");
+  style.setAttribute("data-acadia-handoff-report", "1");
+  style.textContent = HR_CSS;
+  document.head.appendChild(style);
+  _hrStylesInjected = true;
+}
+
+
+// Convert "1018s" / "(34m 32s)" / "16m 48s" / loose forms into a
+// canonical {seconds, label} pair so cards always render the same
+// shape. "16m 58s" preferred over "1018s" per spec.
+function _normaliseDuration(raw) {
+  if (!raw) return { seconds: 0, label: "—" };
+  const txt = String(raw).trim();
+  // Already canonical (e.g. "16m 48s", "9s", "34m 32s")
+  const mPlusS = txt.match(/(\d+)\s*m\s*(\d+)\s*s/i);
+  if (mPlusS) {
+    const secs = parseInt(mPlusS[1], 10) * 60 + parseInt(mPlusS[2], 10);
+    return { seconds: secs, label: `${mPlusS[1]}m ${mPlusS[2]}s` };
+  }
+  const onlyM = txt.match(/^(\d+)\s*m\s*$/i);
+  if (onlyM) {
+    return { seconds: parseInt(onlyM[1], 10) * 60, label: `${onlyM[1]}m` };
+  }
+  const onlyS = txt.match(/^(\d+)\s*s\s*$/i);
+  if (onlyS) {
+    const s = parseInt(onlyS[1], 10);
+    if (s >= 60) {
+      const m = Math.floor(s / 60);
+      const r = s % 60;
+      return { seconds: s, label: r === 0 ? `${m}m` : `${m}m ${r}s` };
+    }
+    return { seconds: s, label: `${s}s` };
+  }
+  const onlyDigits = txt.match(/^(\d+)$/);
+  if (onlyDigits) {
+    const s = parseInt(onlyDigits[1], 10);
+    if (s >= 60) {
+      const m = Math.floor(s / 60);
+      const r = s % 60;
+      return { seconds: s, label: r === 0 ? `${m}m` : `${m}m ${r}s` };
+    }
+    return { seconds: s, label: `${s}s` };
+  }
+  return { seconds: 0, label: txt };
+}
+
+
+// Render the canonical "16m 58s" string with the unit halves wrapped
+// in <small> so the digits stay big and prominent. Tabular numerals
+// are applied via the .hr-cardNum class.
+function _renderTimeRichText(label) {
+  if (!label || typeof label !== "string") return label;
+  // Split between digits and the unit letter so "16m 58s" renders as
+  // 16<small>m</small> 58<small>s</small>.
+  const parts = label.split(/(\d+)/).filter(Boolean);
+  return parts.map((p, i) => {
+    if (/^\d+$/.test(p)) {
+      return <span key={i}>{p}</span>;
+    }
+    return <small key={i}>{p}</small>;
+  });
+}
+
+
+// Parse the LLM/template handoff note text into structured sections.
+// The parser is deliberately tolerant — when a bullet doesn't match a
+// recognised shape, it lands in `extraBullets` (rendered as plain
+// items) instead of crashing. If parsing yields nothing meaningful,
+// the caller falls back to the raw <pre> render.
+function _parseHandoffNote(note) {
+  if (!note || typeof note !== "string") return null;
+  // Section split — sections are delimited by *Header:* markers.
+  // Section names we care about: "Diagnostic Summary", "Reason for Escalation".
+  const sections = {};
+  const sectionRe = /\*([^*]+?):\*\s*\n([\s\S]*?)(?=\n\*[^*]+?:\*|$)/g;
+  let m;
+  while ((m = sectionRe.exec(note)) !== null) {
+    sections[m[1].trim()] = m[2].trim();
+  }
+  // Title line — first *...* line at the top.
+  const titleMatch = note.match(/\*([^*]+)\*/);
+  const titleLine = titleMatch ? titleMatch[1].trim() : "Operational Handoff";
+  // Eyebrow / title / titleAccent split — e.g. "Escalation to Tier 2: Triage Complete"
+  let eyebrow = "Escalation to Tier 2";
+  let title = "Triage Complete";
+  let titleAccent = "Complete";
+  if (titleLine.includes(":")) {
+    const [left, right] = titleLine.split(":").map((s) => s.trim());
+    eyebrow = left;
+    title = right;
+    // Accent the last word of the title line.
+    const words = right.split(/\s+/);
+    if (words.length > 1) {
+      titleAccent = words[words.length - 1];
+    } else {
+      titleAccent = right;
+    }
+  }
+  // Activity bullets sit BEFORE the first *Section:* marker. Capture
+  // the slice between the title and the first section header.
+  let activityBody = "";
+  const firstSectionIdx = note.search(/\n\*[^*]+?:\*/);
+  const titleEndIdx = titleMatch
+    ? note.indexOf(titleMatch[0]) + titleMatch[0].length
+    : 0;
+  if (firstSectionIdx > -1) {
+    activityBody = note.slice(titleEndIdx, firstSectionIdx);
+  } else {
+    activityBody = note.slice(titleEndIdx);
+  }
+  // Subhead — the first non-bullet sentence after the title.
+  const subheadMatch = activityBody.match(/^\s*([^\-\n][^\n]*)/);
+  const subhead = subheadMatch ? subheadMatch[1].trim() : "";
+  // Activity bullets — lines starting with "- " (with optional
+  // continuation lines on the next indented row). Bullets that
+  // carry no duration AND no ticket id are pure status lines
+  // ("Tier 1 has completed initial triage.") — they don't deserve
+  // a TimeCard, so we drop them here and let the subhead carry the
+  // narrative context instead.
+  const activities = [];
+  const statusBullets = [];
+  const bulletRe = /(?:^|\n)-\s+([^\n]+(?:\n {2,}[^\n]+)*)/g;
+  let b;
+  while ((b = bulletRe.exec(activityBody)) !== null) {
+    const raw = b[1].replace(/\n {2,}/g, " ").trim();
+    const parsed = _parseActivityBullet(raw);
+    const hasDuration = parsed.durationSeconds > 0 || parsed.isTotal;
+    const hasTickets = parsed.tickets && parsed.tickets.length > 0;
+    // Sprint 13.33 — canonical 2x2 grid cards (Historical / Guided /
+    // Search KB / Discuss with LogIQ) always render, even when the
+    // engineer didn't engage with them (no duration, no tickets).
+    // _layoutActivities handles the "Discuss not opened → Search KB
+    // spans the row" rule downstream.
+    const isCanonical = _classifyActivity(parsed) !== null;
+    if (hasDuration || hasTickets || isCanonical) {
+      activities.push(parsed);
+    } else {
+      statusBullets.push(raw);
+    }
+  }
+  // Diagnostics — bullets inside the Diagnostic Summary section.
+  const diagnostics = [];
+  if (sections["Diagnostic Summary"]) {
+    const diagBody = sections["Diagnostic Summary"];
+    const dRe = /(?:^|\n)-\s+([^\n]+(?:\n[^\-][^\n]*)*)/g;
+    let d;
+    while ((d = dRe.exec(diagBody)) !== null) {
+      const raw = d[1].replace(/\s+/g, " ").trim();
+      diagnostics.push(_parseDiagBullet(raw));
+    }
+  }
+  // Reason — bullets inside the Reason for Escalation section.
+  let reason = null;
+  if (sections["Reason for Escalation"]) {
+    const reasonBody = sections["Reason for Escalation"];
+    const reasonMatch = reasonBody.match(/-\s+([^\n]+)/);
+    reason = reasonMatch ? reasonMatch[1].trim() : reasonBody.replace(/^-\s*/, "").trim();
+  }
+  return { eyebrow, title, titleAccent, subhead, activities, statusBullets, diagnostics, reason };
+}
+
+
+// Activity bullet → {label, durationLabel, durationSeconds, tickets, detail, isTotal, isKb}
+function _parseActivityBullet(raw) {
+  // Total line — "Total time on this triage: 17m 17s."
+  const totalMatch = raw.match(/^Total time on this triage:\s*([0-9msh\s]+)\.?/i);
+  if (totalMatch) {
+    const d = _normaliseDuration(totalMatch[1]);
+    return {
+      label: "Total time on this triage",
+      durationSeconds: d.seconds,
+      durationLabel: d.label,
+      tickets: [],
+      detail: "active",
+      isTotal: true,
+    };
+  }
+  // Pull ticket IDs (INC-XXX / TKT-XXX / similar).
+  const ticketMatches = raw.match(/\b[A-Z]{2,}[A-Z0-9-]*\d[A-Z0-9-]*\b/g) || [];
+  const tickets = [...new Set(ticketMatches.filter((t) => /-/.test(t)))];
+  // Pull duration — Sprint 13.33 — find the LAST paren whose content
+  // contains a time token (digits + m/s/h). Earlier versions used
+  // the FIRST paren, which broke on bullets like Historical's
+  // "(engaged via per-ticket chat for INC-X) ... (3m 12s across
+  // context panels)" — the engagement paren has no time units, so
+  // we'd return 0 duration. Scanning all parens and picking the
+  // last time-bearing one fixes that case while keeping single-paren
+  // bullets working as before.
+  const allParens = raw.match(/\([^)]*\d+\s*[smh]\b[^)]*\)/gi) || [];
+  const durParen = allParens.length > 0 ? allParens[allParens.length - 1] : "";
+  const innerDur = durParen ? durParen.slice(1, -1) : "";
+  const durRaw = (innerDur.match(/\d+\s*m\s*\d+\s*s/i)
+    || innerDur.match(/\d+\s*m/i)
+    || innerDur.match(/\d+\s*s/i)
+    || [""])[0];
+  const d = _normaliseDuration(durRaw);
+  // Label — strip the trailing paren + period.
+  let label = raw.replace(/\s*\([^)]*\)\.?\s*$/, "").trim();
+  // For lines like "Search KB / SOP reference: consulted", split on ":"
+  let detail = "";
+  let isKb = false;
+  if (label.includes(":")) {
+    const [lhs, rhs] = label.split(":").map((s) => s.trim());
+    label = lhs;
+    detail = rhs;
+  }
+  if (/Search\s+KB|SOP\s+reference/i.test(label)) {
+    isKb = true;
+    // KB "opened but not engaged" rule — when the detail mentions
+    // 0 chat sessions, prefer "opened" over "consulted".
+    if (/0\s*chat session/i.test(innerDur) || /0\s*chat/i.test(detail)) {
+      detail = "opened";
+    }
+  }
+  // Tickets line — when the bullet is the "Historical tickets" header
+  // followed by a comma-separated ticket list on the next continuation
+  // line, the ticketMatches array already captured them.
+  return {
+    label,
+    durationSeconds: d.seconds,
+    durationLabel: d.label,
+    tickets,
+    detail,
+    isTotal: false,
+    isKb,
+  };
+}
+
+
+// Diagnostic bullet → {text, commands[]}
+function _parseDiagBullet(raw) {
+  const commands = [];
+  const codeRe = /`([^`]+)`/g;
+  let c;
+  while ((c = codeRe.exec(raw)) !== null) {
+    // Split multi-line code blocks into individual commands.
+    const parts = c[1].split(/\n+/).map((s) => s.trim()).filter(Boolean);
+    parts.forEach((p) => commands.push(p));
+  }
+  const text = raw.replace(/`[^`]+`/g, "").replace(/\s+/g, " ").replace(/\s+\.$/, ".").trim();
+  return { text, commands };
+}
+
+
+// Sprint 13.33 — canonical 2x2 grid for the Activity Summary:
+//   Row 1: Historical tickets surfaced | Guided Troubleshooting
+//   Row 2: Search KB / SOP Reference   | Discuss with LogIQ
+// When Discuss with LogIQ was never opened (no chat sessions), it
+// is hidden and Search KB / SOP Reference spans the full row 2.
+// The Total card is unchanged: rendered last, full-width.
+function _classifyActivity(activity) {
+  if (!activity || activity.isTotal) return null;
+  const label = (activity.label || "").trim();
+  if (/^(?:similar\s+)?historical\s+tickets/i.test(label)) return "historical";
+  if (/^guided\s+troubleshooting/i.test(label)) return "guided";
+  if (/^search\s+kb|^sop\s+reference/i.test(label)) return "search_kb";
+  if (/^discuss\s+with\s+logiq/i.test(label)) return "discuss";
+  return null;
+}
+
+function _isDiscussNotOpened(activity) {
+  if (!activity) return true;
+  const detail = (activity.detail || "").toLowerCase();
+  if (/no per-ticket chat/.test(detail)) return true;
+  if (/^no\b/.test(detail) || /not\s+opened/.test(detail)) return true;
+  const noDuration = (activity.durationSeconds || 0) === 0;
+  const noTickets = !activity.tickets || activity.tickets.length === 0;
+  return noDuration && noTickets;
+}
+
+// Sprint 13.33 — per-card eyebrow labels. Replaces the generic
+// "Activity" tag with the specific journey stage so each card in
+// the 2x2 grid self-identifies (Context Research / Guided
+// Troubleshooting / Search KB / SOP Reference / Discuss with LogIQ).
+const _KIND_LABELS = {
+  historical: "Context Research",
+  guided: "Guided Troubleshooting",
+  search_kb: "Search KB / SOP Reference",
+  discuss: "Discuss with LogIQ",
+};
+
+function _layoutActivities(activities) {
+  const total = activities.find((a) => a.isTotal) || null;
+
+  const byKind = {};
+  activities.forEach((a) => {
+    if (a.isTotal) return;
+    const kind = _classifyActivity(a);
+    if (kind && !byKind[kind]) byKind[kind] = a;
+  });
+
+  const discussOpened = byKind.discuss && !_isDiscussNotOpened(byKind.discuss);
+
+  // Sprint 13.33 — hideLabel suppresses the bold-black `.hr-cardLabel`
+  // below the eyebrow on cards where the parsed label just duplicates
+  // the kindLabel (Guided / SearchKB / Discuss). Historical's parsed
+  // label carries dynamic context that's NOT in the eyebrow (e.g.
+  // "Historical tickets surfaced for context (engaged via per-ticket
+  // chat for INC-X)"), so its label stays visible.
+  const styled = [];
+  if (byKind.historical) {
+    styled.push({
+      ...byKind.historical,
+      variant: "default",
+      kindLabel: _KIND_LABELS.historical,
+    });
+  }
+  if (byKind.guided) {
+    styled.push({
+      ...byKind.guided,
+      variant: "default",
+      kindLabel: _KIND_LABELS.guided,
+      hideLabel: true,
+    });
+  }
+  if (byKind.search_kb) {
+    styled.push({
+      ...byKind.search_kb,
+      variant: discussOpened ? "default" : "wide",
+      kindLabel: _KIND_LABELS.search_kb,
+      hideLabel: true,
+    });
+  }
+  if (discussOpened) {
+    styled.push({
+      ...byKind.discuss,
+      variant: "default",
+      kindLabel: _KIND_LABELS.discuss,
+      hideLabel: true,
+    });
+  }
+
+  // Defensive: surface any non-canonical, non-total bullets that
+  // arrived as activities (e.g., future bullet kinds the backend
+  // adds) so they don't silently vanish.
+  activities.forEach((a) => {
+    if (a.isTotal) return;
+    if (_classifyActivity(a)) return;
+    styled.push({ ...a, variant: "default" });
+  });
+
+  return { styled, total };
+}
+
+
+function TimeCard({ activity }) {
+  const variantClass = activity.variant === "major"
+    ? "hr-card hr-card--major"
+    : activity.variant === "full"
+      ? "hr-card hr-card--full"
+      : activity.variant === "wide"
+        ? "hr-card hr-card--wide"
+        : "hr-card";
+  const eyebrow = activity.kindLabel || "Activity";
+  // Sprint 13.33 — `hideLabel` cards drop the bold-black label below
+  // the eyebrow because it just repeats the kindLabel text (Guided
+  // Troubleshooting / Search KB / Discuss with LogIQ). Cards without
+  // hideLabel (Context Research, Total) still render the parsed label
+  // so its dynamic context (engagement / ticket counts / etc.) stays
+  // visible.
+  return (
+    <div className={variantClass}>
+      <span className="hr-cardK">{eyebrow}</span>
+      {!activity.hideLabel ? (
+        <div className="hr-cardLabel">{activity.label}</div>
+      ) : null}
+      <div className="hr-cardNum">
+        {_renderTimeRichText(activity.durationLabel)}
+        {activity.isTotal ? (
+          <span className="hr-cardNum__active">active</span>
+        ) : null}
+      </div>
+      {activity.detail ? (
+        <span className="hr-cardTag">{activity.detail}</span>
+      ) : null}
+      {activity.tickets && activity.tickets.length > 0 ? (
+        <div className="hr-tickets">
+          {activity.tickets.map((t) => (
+            <span key={t} className="hr-ticket">{t}</span>
+          ))}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+
+function CardsGrid({ activities }) {
+  const { styled, total } = _layoutActivities(activities);
+  if (styled.length === 0 && !total) return null;
+  return (
+    <div className="hr-grid">
+      {styled.map((a, i) => (
+        <TimeCard key={i} activity={a} />
+      ))}
+      {total ? (
+        <TimeCard activity={{ ...total, variant: "full" }} />
+      ) : null}
+    </div>
+  );
+}
+
+
+function DiagList({ diagnostics }) {
+  if (!diagnostics || diagnostics.length === 0) return null;
+  return (
+    <div className="hr-diagList">
+      {diagnostics.map((d, i) => (
+        <div key={i} className="hr-diagRow">
+          <span className="hr-diagIdx">{String(i + 1).padStart(2, "0")}</span>
+          <div>
+            <div className="hr-diagText">{d.text}</div>
+            {d.commands && d.commands.length > 0 ? (
+              <div className="hr-codeChips">
+                {d.commands.map((cmd, j) => (
+                  <span key={j} className="hr-codeChip">{cmd}</span>
+                ))}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+
+function ReasonStrip({ reason }) {
+  if (!reason) return null;
+  return (
+    <div className="hr-reason" role="note">
+      <span className="hr-reason__label">Reason</span>
+      <span>{reason}</span>
+    </div>
+  );
+}
+
+
+// Top-level renderer. Receives the raw `note` text + falls back to
+// `fallbackRenderer` (the original <pre>) when parsing yields no
+// meaningful structure.
+function HandoffReportBody({ note, fallbackRenderer }) {
+  React.useEffect(() => { _ensureHrStyles(); }, []);
+  const parsed = React.useMemo(() => _parseHandoffNote(note), [note]);
+  const usable = !!(
+    parsed
+    && (parsed.activities.length > 0 || parsed.diagnostics.length > 0 || parsed.reason)
+  );
+  if (!usable) return fallbackRenderer ? fallbackRenderer() : null;
+  return (
+    <div className="hr-root">
+      {/* eyebrow */}
+      <div className="hr-eyebrow">
+        <span aria-hidden className="hr-eyebrow__dot" />
+        {parsed.eyebrow}
+      </div>
+      {/* title with accent on the last word */}
+      <h2 className="hr-title">
+        {parsed.title.replace(new RegExp(`\\s*${parsed.titleAccent}$`), "")}{" "}
+        <em className="hr-titleAccent">{parsed.titleAccent}</em>
+      </h2>
+      {parsed.subhead ? <p className="hr-subhead">{parsed.subhead}</p> : null}
+
+      {/* Status bullets that carry neither a duration nor a ticket
+          (e.g. "Tier 1 has completed initial triage.") render here
+          as a muted inline strip rather than empty TimeCards. */}
+      {parsed.statusBullets && parsed.statusBullets.length > 0 ? (
+        <ul style={{
+          listStyle: "none", padding: 0, margin: "0 0 14px 0",
+          display: "flex", flexWrap: "wrap", gap: "6px 14px",
+          fontSize: 12.5, color: "#475569",
+        }}>
+          {parsed.statusBullets.map((s, i) => (
+            <li key={i} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <span aria-hidden style={{
+                width: 4, height: 4, borderRadius: "50%",
+                background: HR_BLUE[400], display: "inline-block",
+              }} />
+              {s}
+            </li>
+          ))}
+        </ul>
+      ) : null}
+
+      {parsed.activities.length > 0 ? (
+        <CardsGrid activities={parsed.activities} />
+      ) : null}
+
+      {parsed.diagnostics.length > 0 ? (
+        <>
+          <div className="hr-sectionHead">Diagnostic Summary</div>
+          <DiagList diagnostics={parsed.diagnostics} />
+        </>
+      ) : null}
+
+      {parsed.reason ? <ReasonStrip reason={parsed.reason} /> : null}
     </div>
   );
 }
@@ -451,6 +1237,38 @@ function HandoffNoteAction({ sessionId, attemptedStage3Steps, onRefreshRouting }
         />
       ) : null}
 
+      {/* Structured Handoff Report — 10-step blue scale, 9 type
+          roles, TimeCard grid (default / major / full / diag) +
+          ReasonStrip. Parses the same `note` payload the original
+          <pre> showed, so the underlying data source is UNCHANGED.
+          When the parser can't extract anything meaningful (very
+          short / malformed notes), it falls back to the original
+          monospace <pre> render — that fallback is the JSX block
+          inside `fallbackRenderer` below.
+
+          OLD render preserved as the fallback path so the engineer
+          never sees a blank panel even if parsing yields nothing:
+
+          ── OLD (also the fallback) ──
+          <pre style={{
+            background: notePreBg, color: notePreText,
+            border: `1px solid ${notePreBorder}`, borderRadius: 4,
+            padding: 12, whiteSpace: "pre-wrap", wordBreak: "break-word",
+            fontFamily: "var(--font-monospace, ui-monospace, SFMono-Regular, Menlo, monospace)",
+            fontSize: 13, lineHeight: 1.45, maxHeight: 560, overflow: "auto",
+          }}>
+            {note}
+          </pre>
+          ── /OLD ── */}
+      {/* Sprint 13.34 — reverted to the original monospace <pre>
+          render at the user's request. The structured Handoff Report
+          (HandoffReportBody + TimeCards grid + diagnostics + reason
+          strip) is no longer the default; the engineer now sees the
+          raw note text exactly as the backend assembled it.
+          HandoffReportBody and the _parseHandoffNote/_layoutActivities
+          helpers above are intentionally kept in the file so the
+          structured render can be reinstated with a single-line swap
+          if needed. */}
       {note ? (
         <pre
           style={{
@@ -494,6 +1312,9 @@ export default function Stage5EscalationPackage({
   // numbers from this map and posts them with the note request.
   attemptedStage3Steps,
 }) {
+  // Block 04 — inject scoped CSS once on first mount. Idempotent.
+  React.useEffect(() => { _ensureB04Styles(); }, []);
+
   // Sprint 12.9 — `expanded` / `autoExpand` toggle suppressed along
   // with the Sprint 7 EscalationPackageCard render. Re-enable if
   // that view is ever reinstated.
@@ -537,10 +1358,36 @@ export default function Stage5EscalationPackage({
         overflow: "hidden",
       }}
     >
+      {/* Sprint 13.35 — reverted to the original centered Acadia
+          watermark at the user's request. The smaller top-right
+          version is preserved below as a comment for easy revert.
+
+          ── ALT (top-right, size 120, opacity 0.10) ──
+          <CardWatermark position="top-right" size={120} opacity={0.10} />
+          ── /ALT ── */}
       <CardWatermark />
-      <Title level={5} style={{ marginTop: 0, position: "relative", zIndex: 1 }}>
-        Operational Handoff
-      </Title>
+      {/* ─── Block 04 — premium heading replacement (heading only) ───
+          OLD heading preserved below for reference. Card wrapper +
+          <CardWatermark/> + footer (Helpful/Dislike) + inner
+          "Operational Handoff" sub-section banner (line ~415) all
+          UNCHANGED — only the top-level panel title is re-typeset
+          to match the Best Historical Match / Guided Workflow /
+          Knowledge Base & SOP Reference header treatment.
+
+          ── OLD ──
+          <Title level={5} style={{ marginTop: 0, position: "relative", zIndex: 1 }}>
+            Operational Handoff
+          </Title>
+          ── /OLD ── */}
+      <div style={{ position: "relative", zIndex: 1, marginTop: 0, marginBottom: 8 }}>
+        <div className="b04-eyebrow">
+          <span aria-hidden className="b04-eyebrow__dot" />
+          Tier-2 Handoff
+        </div>
+        <h2 className="b04-display">
+          Operational <em className="b04-accent">handoff</em>
+        </h2>
+      </div>
 
       {/* Sprint 12.9 — Sprint 7 EscalationPackageCard render
           suppressed. Clicking "Escalate to Tier 2" now lands the
