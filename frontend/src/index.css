@@ -193,6 +193,150 @@ body {
 }
 
 /* ============================================
+   SIDEBAR HOVER-PEEK — Gentle expand animation
+   ============================================
+   Applied to the expanded sidebar only when the engineer triggered
+   the expansion by hovering the 56 px collapsed bar on the blocks
+   screen. The width transitions from 56 px → 280 px (then to 300 px
+   at lg breakpoint) over 650 ms with an ease-out curve so it eases
+   in smoothly rather than snapping. Inner content fades in slightly
+   later so it doesn't appear pre-flattened against the narrow start
+   width. Manual button expansions skip this class and render
+   immediately — only the hover path is intentionally gentle.
+
+   Why a keyframe rather than CSS transition on width?
+     The collapsed and expanded sidebars are two different DOM
+     elements (different return branches in Sidebar.js). A transition
+     can only animate property changes on an existing element. A
+     keyframe animation fires on mount, which is exactly when the
+     expanded element first appears, so we get the slide-out effect
+     without restructuring the component into a single shared root.
+*/
+@keyframes sidebarPeekIn {
+  0% {
+    width: 56px;
+    opacity: 0.85;
+  }
+  100% {
+    width: 280px;
+    opacity: 1;
+  }
+}
+@keyframes sidebarPeekInLg {
+  0% {
+    width: 56px;
+    opacity: 0.85;
+  }
+  100% {
+    width: 300px;
+    opacity: 1;
+  }
+}
+.sidebar-peek-in {
+  animation: sidebarPeekIn 650ms cubic-bezier(0.22, 1, 0.36, 1);
+  /* Slight will-change hint — the animated property is width, which
+     triggers layout. Browsers can pre-allocate paint for it during
+     the 650 ms window. */
+  will-change: width, opacity;
+}
+@media (min-width: 1024px) {
+  .sidebar-peek-in {
+    animation-name: sidebarPeekInLg;
+  }
+}
+/* Inner content fades up after the width is mostly through its
+   curve so it doesn't look like crammed-then-stretched text. */
+.sidebar-peek-in > * {
+  animation: sidebarPeekContent 500ms ease-out 150ms both;
+}
+@keyframes sidebarPeekContent {
+  0%   { opacity: 0;   transform: translateX(-4px); }
+  100% { opacity: 1;   transform: translateX(0);    }
+}
+
+/* ============================================
+   BACK ARROW PILL — top-left return affordance
+   ============================================
+   Used by Ticket Filter and ServiceNow flows. The base colour /
+   border / text come from inline styles on the element (so the
+   accent variable can be overridden per-call); the hover lift,
+   glow shadow, and icon micro-translate live here so :hover and
+   :active pseudo-classes can target them. Pill is spherical to
+   match the landing quick-action pill language.
+*/
+.back-arrow-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 18px 8px 14px;
+  border-radius: 9999px;
+  border: 1px solid transparent;
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  line-height: 1;
+  cursor: pointer;
+  user-select: none;
+  /* Layered transitions so transform and box-shadow share a curve.
+     350 ms is intentionally a hair slow — back navigation is a
+     deliberate action and the affordance benefits from registering
+     a deliberate response. */
+  transition:
+    transform 350ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 350ms cubic-bezier(0.22, 1, 0.36, 1),
+    background 350ms ease-out;
+  /* Default rest state — no lift. */
+  transform: translateY(0);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.04);
+}
+.back-arrow-pill:hover {
+  /* Lift ~1.5 px with a soft accent-tinted glow. The translateY is
+     small enough to feel like a press-ready cue, not a jump. */
+  transform: translateY(-1.5px);
+  box-shadow: 0 6px 16px rgba(91, 141, 239, 0.22),
+              0 1px 2px rgba(15, 23, 42, 0.08);
+}
+.back-arrow-pill:active {
+  /* Tactile press — drop the lift, soften the glow. */
+  transform: translateY(0);
+  box-shadow: 0 1px 2px rgba(15, 23, 42, 0.06);
+  transition-duration: 80ms;
+}
+.back-arrow-pill:focus-visible {
+  outline: 2px solid var(--aurora-2, #5B8DEF);
+  outline-offset: 2px;
+}
+.back-arrow-pill__icon {
+  display: inline-flex;
+  transition: transform 350ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.back-arrow-pill:hover .back-arrow-pill__icon {
+  /* Slide the arrow left a hair on hover so the affordance
+     telegraphs the direction of travel. */
+  transform: translateX(-3px);
+}
+.back-arrow-pill__label {
+  white-space: nowrap;
+}
+/* Icon-only variant — circular pill, no label. The arrow icon
+   carries the full meaning; aria-label/title cover screen readers
+   and tooltip preview. */
+.back-arrow-pill--icon-only {
+  /* Square the padding so the pill collapses into a circle. */
+  padding: 0;
+  width: 40px;
+  height: 40px;
+  justify-content: center;
+  gap: 0;
+  /* Larger icon glyph so the affordance reads at a glance without
+     the label crutch. */
+  font-size: 18px;
+}
+.back-arrow-pill--icon-only .back-arrow-pill__icon {
+  font-size: 18px;
+}
+
+/* ============================================
    RICH FORMATTING — Code blocks with syntax highlighting
    ============================================ */
 

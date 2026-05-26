@@ -38,7 +38,19 @@ import {
  * The Sprint 6 LandingRouter path (single AnswerCard + chips) is
  * preserved when this workspace is not mounted.
  */
-function Tier1WorkspaceInner({ result, onNewAlert }) {
+function Tier1WorkspaceInner({
+  result,
+  onNewAlert,
+  // Premium revamp — top quick-action handlers forwarded from
+  // LandingRouter so the same pill bar that lives on the landing
+  // page also renders inside ResolutionJourney. Optional;
+  // ResolutionJourney's QuickActionsBar hides any pill whose
+  // handler is missing.
+  onOpenRca,
+  onOpenGapAnalysis,
+  onOpenTicketFilter,
+  onOpenServiceNow,
+}) {
   const tier1 = useTier1Session(result);
   const [whatTried, setWhatTried] = useState([]);
   const [activeCard, setActiveCard] = useState(null);
@@ -231,8 +243,13 @@ function Tier1WorkspaceInner({ result, onNewAlert }) {
   // so flag-off behaviour is byte-identical.
   if (TIER1_JOURNEY_ON && result && result.session_id) {
     return (
-      <div className="flex-1 overflow-y-auto px-4 py-6 t-bg-primary">
-        <div className="w-full max-w-6xl mx-auto">
+      // Premium revamp — journey container expanded edge-to-edge.
+      // Outer wrapper was `max-w-6xl` (1152 px) + `px-4` (16 px each side),
+      // which left the journey cards floating in the centre of large
+      // displays. Drop the max-width cap and trim the side gutter to a
+      // thin 8 px so cards stretch nearly to the viewport edges.
+      <div className="flex-1 overflow-y-auto py-6 t-bg-primary" style={{ paddingLeft: 8, paddingRight: 8 }}>
+        <div className="w-full mx-auto" style={{ maxWidth: "100%" }}>
           <div className="flex justify-between items-center mb-3">
             <Space>
               <SessionTimer elapsedSeconds={tier1.elapsed} />
@@ -244,6 +261,10 @@ function Tier1WorkspaceInner({ result, onNewAlert }) {
           <ResolutionJourney
             sessionId={result.session_id}
             onNewAlert={onNewAlert}
+            onOpenRca={onOpenRca}
+            onOpenGapAnalysis={onOpenGapAnalysis}
+            onOpenTicketFilter={onOpenTicketFilter}
+            onOpenServiceNow={onOpenServiceNow}
           />
         </div>
       </div>

@@ -155,7 +155,10 @@ export default function UniversalIntakePanel({
           || `Paste the ${SOURCE_LABEL[source] || source} content here…`
         }
         maxLength={INTAKE_MAX_RAW_CHARS}
-        showCount
+        // `showCount` deliberately OFF — the manual counter below is
+        // styled to match the premium theme + has the explicit one-line
+        // gap before the Extract & Suggest CTA. Keeping AntD's built-in
+        // showCount would render the same number twice (duplicate UX).
         disabled={busy}
       />
       {overLimit && (
@@ -167,28 +170,48 @@ export default function UniversalIntakePanel({
         />
       )}
 
-      <div className="flex justify-between items-center mt-3">
-        <span className="t-text-muted text-xs">
-          {charCount}/{INTAKE_MAX_RAW_CHARS} chars
-        </span>
-        <Button
-          type="primary"
-          icon={<ThunderboltOutlined />}
-          onClick={handleExtract}
-          disabled={busy || !text.trim() || overLimit}
-          loading={busy}
-          // Sprint 11 — match the Proactive "Analyze alert" button's
-          // gradient look (navy → light blue) so the two CTAs feel
-          // visually identical across the split landing page. The
-          // gradient endpoints are the same Acadia brand tokens.
+      {/* Premium revamp — stack the char counter and the
+          Extract & Suggest CTA vertically with a line of breathing
+          room. The counter sits on its own row right under the
+          textarea; the CTA gets a clean line below it. */}
+      <div style={{ marginTop: 12 }}>
+        <div
           style={{
-            background:
-              "linear-gradient(135deg, var(--acadia-primary) 0%, var(--acadia-primary-light) 100%)",
-            borderColor: "transparent",
+            display: "flex",
+            justifyContent: "flex-end",
+            fontSize: 12,
+            color: "var(--text-muted)",
+          }}
+          className="t-text-muted"
+        >
+          {charCount}/{INTAKE_MAX_RAW_CHARS} chars
+        </div>
+        <div
+          style={{
+            marginTop: 16,             // ← the "one line space" the user asked for
+            display: "flex",
+            justifyContent: "flex-end",
           }}
         >
-          {busy ? "Extracting…" : "Extract & Suggest"}
-        </Button>
+          <Button
+            type="primary"
+            icon={<ThunderboltOutlined />}
+            onClick={handleExtract}
+            disabled={busy || !text.trim() || overLimit}
+            loading={busy}
+            // Sprint 11 — match the Proactive "Analyze alert" button's
+            // gradient look (navy → light blue) so the two CTAs feel
+            // visually identical across the split landing page. The
+            // gradient endpoints are the same Acadia brand tokens.
+            style={{
+              background:
+                "linear-gradient(135deg, var(--acadia-primary) 0%, var(--acadia-primary-light) 100%)",
+              borderColor: "transparent",
+            }}
+          >
+            {busy ? "Extracting…" : "Extract & Suggest"}
+          </Button>
+        </div>
       </div>
 
       {error && (

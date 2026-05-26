@@ -63,6 +63,7 @@ export default function FeedbackModal({
 
   return (
     <Modal
+      centered
       title={isLike ? "👍 Give positive feedback" : "👎 Give negative feedback"}
       open={open}
       onOk={handleSubmit}

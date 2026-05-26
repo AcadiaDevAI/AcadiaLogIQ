@@ -24,7 +24,15 @@ import { analyzeAlert } from "./Tier1Copilot/tier1Api";
  * SET_MODE(troubleshooting) so AppLayout's `!state.selectedMode` check
  * flips and the user lands directly in ChatArea reading their answer.
  */
-export default function LandingRouter() {
+export default function LandingRouter({
+  // Top-pill-bar quick actions (passed down to LandingPage). Optional —
+  // if not provided (e.g. legacy callers), the pill bar simply doesn't
+  // render those affordances.
+  onOpenRca,
+  onOpenGapAnalysis,
+  onOpenTicketFilter,
+  onOpenServiceNow,
+} = {}) {
   const { state, dispatch } = useChat();
   // Default landing is now Tier-1 Copilot (was "fingerprint").
   const [screen, setScreen] = useState("tier1");
@@ -152,6 +160,13 @@ export default function LandingRouter() {
             setTier1Result(null);
             setScreen("modes");
           }}
+          // Premium revamp — quick-action pills at the top of the
+          // intake landing. Optional; the bar hides itself if no
+          // handlers are passed.
+          onOpenRca={onOpenRca}
+          onOpenGapAnalysis={onOpenGapAnalysis}
+          onOpenTicketFilter={onOpenTicketFilter}
+          onOpenServiceNow={onOpenServiceNow}
         />
       );
     }
@@ -164,6 +179,14 @@ export default function LandingRouter() {
         <Tier1Workspace
           result={tier1Result}
           onNewAlert={() => setTier1Result(null)}
+          // Premium revamp — surface the top pill bar inside the
+          // journey too. Handlers come from AppLayout via this
+          // router's props (already forwarded for LandingPage /
+          // Tier1IntakeForm).
+          onOpenRca={onOpenRca}
+          onOpenGapAnalysis={onOpenGapAnalysis}
+          onOpenTicketFilter={onOpenTicketFilter}
+          onOpenServiceNow={onOpenServiceNow}
         />
       );
     }
@@ -239,5 +262,12 @@ export default function LandingRouter() {
     );
   }
 
-  return <LandingPage />;
+  return (
+    <LandingPage
+      onOpenRca={onOpenRca}
+      onOpenGapAnalysis={onOpenGapAnalysis}
+      onOpenTicketFilter={onOpenTicketFilter}
+      onOpenServiceNow={onOpenServiceNow}
+    />
+  );
 }

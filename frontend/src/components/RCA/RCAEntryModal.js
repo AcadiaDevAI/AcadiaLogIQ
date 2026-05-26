@@ -123,9 +123,13 @@ export default function RCAEntryModal({ open, onClose, onSubmit }) {
 
   return (
     <Modal
+      centered
       title={
         <Space>
-          <FileSearchOutlined style={{ color: "var(--acadia-primary)" }} />
+          {/* Premium revamp — icon uses the iris aurora token so the
+              modal title accent matches the landing-page RCA pill
+              (iris #5B8DEF) instead of legacy acadia navy. */}
+          <FileSearchOutlined style={{ color: "var(--aurora-2, #5B8DEF)" }} />
           <span>Generate RCA</span>
         </Space>
       }
@@ -133,20 +137,18 @@ export default function RCAEntryModal({ open, onClose, onSubmit }) {
       onCancel={handleCancel}
       footer={[
         <Button key="cancel" onClick={handleCancel}>Cancel</Button>,
-        <Button
-          key="submit"
-          type="primary"
-          onClick={handleSubmit}
-          style={{
-            backgroundColor: "var(--acadia-primary)",
-            borderColor: "var(--acadia-primary)",
-          }}
-        >
+        // Inline style intentionally REMOVED — the premium theme's
+        // `.ant-btn-primary` CSS in src/theme/premium.css paints this
+        // with the aurora gradient + glow. Hard-coding navy here
+        // would override and break the visual match with the landing
+        // page CTA.
+        <Button key="submit" type="primary" onClick={handleSubmit}>
           Generate
         </Button>,
       ]}
       destroyOnClose
-      width={520}
+      width={720}
+      style={{ top: 60 }}
     >
       <Paragraph type="secondary" style={{ marginBottom: 16, fontSize: 13 }}>
         Provide a historical ticket number, or upload a spreadsheet of
@@ -186,7 +188,8 @@ export default function RCAEntryModal({ open, onClose, onSubmit }) {
         style={{ padding: 8 }}
       >
         <p className="ant-upload-drag-icon" style={{ marginBottom: 4 }}>
-          <InboxOutlined style={{ color: "var(--acadia-primary)" }} />
+          {/* Upload icon — iris aurora to match the modal title. */}
+          <InboxOutlined style={{ color: "var(--aurora-2, #5B8DEF)" }} />
         </p>
         <p className="ant-upload-text" style={{ fontSize: 13 }}>
           Click or drag a file to this area

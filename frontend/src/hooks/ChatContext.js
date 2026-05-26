@@ -10,6 +10,11 @@ const initialState = {
   isLoading: false,
   isUploading: false,
   sidebarOpen: true,
+  // Gate for the hover-to-peek auto-expand. Only the Resolution
+  // Journey ("blocks") screen flips this to true — everywhere else
+  // the sidebar should respond purely to manual button clicks, even
+  // if the engineer collapsed it manually.
+  sidebarHoverPeekEnabled: false,
   sidebarTab: "chat",
   userRole: "admin",  // "admin" | "user" — controls upload visibility
 
@@ -341,6 +346,19 @@ function reducer(state, action) {
 
     case "TOGGLE_SIDEBAR":
       return { ...state, sidebarOpen: !state.sidebarOpen };
+
+    // Explicit set (true = visible, false = collapsed). Used by flows
+    // that want a deterministic sidebar state on entry (e.g. journey
+    // mount → collapsed, Stage 4 KB handoff into chat → expanded,
+    // chat "Return to Stages" → collapsed again).
+    case "SET_SIDEBAR":
+      return { ...state, sidebarOpen: !!action.payload };
+
+    // Sidebar hover-peek gate. ResolutionJourney enables this on
+    // mount and clears it on unmount, so the auto-expand only fires
+    // while the engineer is on the blocks screen.
+    case "SET_SIDEBAR_HOVER_PEEK":
+      return { ...state, sidebarHoverPeekEnabled: !!action.payload };
 
     case "SET_SIDEBAR_TAB":
       return { ...state, sidebarTab: action.payload };

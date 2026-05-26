@@ -88,9 +88,13 @@ export default function GapAnalysisEntryModal({ open, onClose, onSubmit }) {
 
   return (
     <Modal
+      centered
       title={
         <Space>
-          <FileSearchOutlined style={{ color: "var(--acadia-primary)" }} />
+          {/* Premium revamp — icon uses the violet aurora token so the
+              modal title accent matches the landing-page Gap Analysis
+              pill (violet #A78BFA) instead of legacy acadia navy. */}
+          <FileSearchOutlined style={{ color: "var(--aurora-3, #A78BFA)" }} />
           <span>Generate Gap Analysis</span>
         </Space>
       }
@@ -98,20 +102,17 @@ export default function GapAnalysisEntryModal({ open, onClose, onSubmit }) {
       onCancel={handleCancel}
       footer={[
         <Button key="cancel" onClick={handleCancel}>Cancel</Button>,
-        <Button
-          key="submit"
-          type="primary"
-          onClick={handleSubmit}
-          style={{
-            backgroundColor: "var(--acadia-primary)",
-            borderColor: "var(--acadia-primary)",
-          }}
-        >
+        // Inline style intentionally REMOVED — premium theme's
+        // `.ant-btn-primary` (src/theme/premium.css) paints aurora
+        // gradient + glow. Hard-coding navy here would visually
+        // disconnect this CTA from the landing page Continue button.
+        <Button key="submit" type="primary" onClick={handleSubmit}>
           Generate
         </Button>,
       ]}
       destroyOnClose
-      width={520}
+      width={720}
+      style={{ top: 60 }}
     >
       <Paragraph type="secondary" style={{ marginBottom: 16, fontSize: 13 }}>
         Enter a historical ticket number and pick which reports you

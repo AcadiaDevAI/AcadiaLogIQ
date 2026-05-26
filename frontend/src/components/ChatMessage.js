@@ -509,6 +509,7 @@ export default function ChatMessage({ msg, index, sessionId, onClarificationSele
 
       {/* Feedback Dialog — shown for both like and dislike */}
       <Modal
+        centered
         title={isLikeModal ? "👍 Give positive feedback" : "👎 Give negative feedback"}
         open={showModal}
         onOk={handleSubmitFeedback}

@@ -8,6 +8,21 @@
     <!--BUILD_TIMESTAMP-->
     <title>Acadia Log IQ</title>
     <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🔍</text></svg>" />
+
+    <!-- Premium theme typography (Aurora Operations).
+         Loaded for both themes but only used by `.theme-premium`
+         selectors; no impact on legacy themes which keep using
+         Poppins + Inter loaded inside src/index.css.
+
+         Instrument Serif → editorial display (page titles, hero copy)
+         Geist            → modern grotesk body (everything else)
+         Geist Mono       → tabular data (incident numbers, timings) -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@300;400;500;600;700&family=Geist+Mono:wght@400;500;600&display=swap"
+    />
   </head>
   <body>
     <noscript>You need to enable JavaScript to run this app.</noscript>

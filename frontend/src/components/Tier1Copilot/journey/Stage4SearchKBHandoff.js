@@ -22,6 +22,7 @@ import { askQuestion, getSession } from "../../../services/api";
 import DislikeButton from "./DislikeButton";
 import EscalateButton from "./EscalateButton";
 import HelpfulButton from "./HelpfulButton";
+import CardWatermark from "./CardWatermark";
 import { STAGE_LABELS } from "../tier1Constants";
 import { postJourneyEvent, searchKbHandoff } from "./journeyApi";
 
@@ -57,6 +58,11 @@ export default function Stage4SearchKBHandoff({
         type: "SET_MODE",
         payload: { selectedMode: "troubleshooting", subMode: null },
       });
+
+      // Premium revamp — expand the sidebar when the engineer lands
+      // in the KB chat. The journey collapses it for focus; chat
+      // wants history + scope visible. Idempotent if already open.
+      dispatch({ type: "SET_SIDEBAR", payload: true });
 
       // Sprint 10.5 §2.1 — hydrate the new chat session into
       // ChatContext via SET_SESSION so state.sessionMetadata picks up
@@ -130,8 +136,17 @@ export default function Stage4SearchKBHandoff({
   };
 
   return (
-    <Card style={{ marginBottom: 16, borderLeft: "4px solid #7c3aed" }}>
-      <Title level={5} style={{ marginTop: 0 }}>
+    <Card
+      style={{
+        marginBottom: 16,
+        borderLeft: "4px solid #7c3aed",
+        // Premium revamp — per-card Acadia watermark.
+        position: "relative",
+        overflow: "hidden",
+      }}
+    >
+      <CardWatermark />
+      <Title level={5} style={{ marginTop: 0, position: "relative", zIndex: 1 }}>
         {STAGE_LABELS.stage_4}
       </Title>
       <Paragraph type="secondary">

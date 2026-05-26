@@ -14,6 +14,10 @@ import { useTier1Theme } from "../../theme/ThemeProvider";
 // Sprint 11 — Proactive | Reactive split-view; ModeToggle removed
 // because both modes are visible side-by-side now.
 import UniversalIntakePanel from "./intake/UniversalIntakePanel";
+// Premium revamp — horizontal pill bar (RCA / Gap / Filter / SN)
+// pinned above the LogIQ title. Handlers come in via props from
+// LandingRouter (which received them from AppLayout).
+import QuickActionsBar from "../QuickActionsBar";
 
 /**
  * Tier1IntakeForm — Sprint 6 default + Sprint 8 progressive variant.
@@ -58,6 +62,19 @@ function SourceAwareIntake(props) {
   return (
     <div className="flex-1 overflow-y-auto px-4 py-6 t-bg-primary">
       <div className="w-full" style={{ maxWidth: 1280, margin: "0 auto" }}>
+        {/* Premium revamp — horizontal pill bar pinned to the very top
+            of the intake landing, above the LogIQ headline. Each pill
+            opens the corresponding right-pane flow (RCA / Gap / Filter
+            / ServiceNow) via handlers passed in from AppLayout. Pills
+            render only when the matching handler prop is supplied. */}
+        <QuickActionsBar
+          onOpenRca={props.onOpenRca}
+          onOpenGapAnalysis={props.onOpenGapAnalysis}
+          onOpenTicketFilter={props.onOpenTicketFilter}
+          onOpenServiceNow={props.onOpenServiceNow}
+          marginBottom={20}
+        />
+
         {/* Sprint 13.30 — page-level title above the Proactive | Reactive
             split. Sized noticeably larger than the per-column headers
             (Proactive / Reactive at 18px) so it reads as the section

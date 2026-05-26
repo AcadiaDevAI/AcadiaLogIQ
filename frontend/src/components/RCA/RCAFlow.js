@@ -36,14 +36,13 @@ import {
   message,
 } from "antd";
 import {
-  ArrowLeftOutlined,
+  CheckCircleFilled,
+  CloseCircleFilled,
   CopyOutlined,
-  DislikeFilled,
   DislikeOutlined,
   FilePdfOutlined,
   FileSearchOutlined,
   FileWordOutlined,
-  LikeFilled,
   LikeOutlined,
   LoadingOutlined,
   ReloadOutlined,
@@ -51,6 +50,9 @@ import {
 
 import { generateRCA, recordRCAFeedback } from "./rcaApi";
 import { exportPdf, exportWord } from "./rcaExport";
+import BackArrowButton from "../common/BackArrowButton";
+import FeedbackModal from "../Tier1Copilot/journey/FeedbackModal";
+import useSidebarPeek from "../../hooks/useSidebarPeek";
 
 
 const { Title, Paragraph, Text } = Typography;
@@ -86,7 +88,7 @@ function _ensureRcaStyles() {
       padding: 40px 48px;
       border-radius: 6px;
       box-shadow: 0 1px 2px rgba(0,0,0,0.06), 0 4px 16px rgba(0,0,0,0.04);
-      max-width: 900px;
+      max-width: 1200px;
       margin: 0 auto;
     }
     @media (max-width: 720px) {
@@ -402,82 +404,192 @@ function ExportButtons({ getNode, filename, source }) {
 
 
 // ─────────────────────────────────────────────────────────────
-// PanelFeedback — 👍 / 👎 row beneath each RCA report body.
+// PanelFeedback — premium pill 👍 / 👎 row beneath each report.
 //
-// 👍 keeps the cached server-side result intact (others reading
-// the same incident get the cached output too).
-// 👎 invalidates the server-side cache and notifies the parent so
-// it can re-run that panel through the LLM. State is local; once
-// the engineer clicks, the icon stays filled until the panel
-// re-renders (which happens on regenerate or full reload).
+// UI/UX mirrors the journey blocks (HelpfulButton / DislikeButton):
+//   * Pill-shaped buttons with aurora accent colours (sage-green
+//     for Helpful, coral for Dislike) — replaces the prior plain
+//     white antd buttons so the report screen feels coherent with
+//     the rest of the premium chrome.
+//   * Click → optimistic UI flip to a confirmation chip + open
+//     shared FeedbackModal (positive / negative variant).
+//   * Backend feedback POST (recordRCAFeedback) still runs so the
+//     server keeps its like/dislike tally. Auto-regenerate on
+//     dislike was dropped — the panel header's "Regenerate" button
+//     is the explicit path now, matching the blocks-screen pattern.
 // ─────────────────────────────────────────────────────────────
-function PanelFeedback({ incidentNumber, panel, label, onDisliked, disabled }) {
+const HELPFUL_ACCENT = {
+  c:         "#46D69A",
+  soft:      "rgba(70, 214, 154, 0.14)",
+  hoverFill: "rgba(70, 214, 154, 0.28)",
+  ring:      "rgba(70, 214, 154, 0.55)",
+};
+const DISLIKE_ACCENT = {
+  c:         "#E0455F",
+  soft:      "rgba(255, 94, 122, 0.12)",
+  hoverFill: "rgba(255, 94, 122, 0.24)",
+  ring:      "rgba(224, 69, 95, 0.55)",
+};
+
+const pillBaseStyle = (accent) => ({
+  display: "inline-flex",
+  alignItems: "center",
+  gap: 6,
+  padding: "8px 16px",
+  height: 36,
+  borderRadius: 9999,
+  background: `linear-gradient(135deg, ${accent.soft}, rgba(255,255,255,0.40))`,
+  backdropFilter: "blur(10px) saturate(150%)",
+  WebkitBackdropFilter: "blur(10px) saturate(150%)",
+  border: `1px solid ${accent.c}40`,
+  color: accent.c,
+  fontFamily:
+    "var(--font-body, 'Geist', 'Inter', system-ui, sans-serif)",
+  fontSize: 13,
+  fontWeight: 600,
+  letterSpacing: "0.01em",
+  cursor: "pointer",
+  whiteSpace: "nowrap",
+  boxShadow: "0 1px 3px rgba(10, 16, 24, 0.06)",
+  transition:
+    "transform 180ms cubic-bezier(0.16, 1, 0.3, 1), " +
+    "background 220ms cubic-bezier(0.16, 1, 0.3, 1), " +
+    "border-color 180ms cubic-bezier(0.16, 1, 0.3, 1), " +
+    "box-shadow 220ms cubic-bezier(0.16, 1, 0.3, 1)",
+});
+
+function PillButton({ accent, icon, label, onClick, disabled }) {
+  const idleBg = `linear-gradient(135deg, ${accent.soft}, rgba(255,255,255,0.40))`;
+  const hoverBg = `linear-gradient(135deg, ${accent.hoverFill}, ${accent.soft})`;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      onMouseEnter={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.transform = "translateY(-1px)";
+        e.currentTarget.style.background = hoverBg;
+        e.currentTarget.style.borderColor = accent.ring;
+        e.currentTarget.style.boxShadow =
+          `0 8px 22px -8px ${accent.ring}, 0 0 0 1px ${accent.ring} inset`;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.transform = "translateY(0)";
+        e.currentTarget.style.background = idleBg;
+        e.currentTarget.style.borderColor = `${accent.c}40`;
+        e.currentTarget.style.boxShadow = "0 1px 3px rgba(10, 16, 24, 0.06)";
+      }}
+      style={{
+        ...pillBaseStyle(accent),
+        opacity: disabled ? 0.5 : 1,
+        cursor: disabled ? "not-allowed" : "pointer",
+      }}
+    >
+      {icon}
+      <span>{label}</span>
+    </button>
+  );
+}
+
+function SubmittedChip({ accent, icon, label }) {
+  return (
+    <span
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "6px 12px",
+        borderRadius: 9999,
+        background: `linear-gradient(135deg, ${accent.soft}, rgba(255,255,255,0.50))`,
+        border: `1px solid ${accent.c}55`,
+        color: accent.c,
+        fontFamily: "var(--font-body, 'Geist', system-ui, sans-serif)",
+        fontSize: 12.5,
+        fontWeight: 600,
+        boxShadow: `0 0 0 1px ${accent.c}1A inset`,
+      }}
+    >
+      {icon}
+      {label}
+    </span>
+  );
+}
+
+function PanelFeedback({ incidentNumber, panel, label, disabled }) {
   const [selection, setSelection] = useState(null);
-  const [busy, setBusy] = useState(false);
+  const [modalOpen, setModalOpen] = useState(false);
+  const [modalVariant, setModalVariant] = useState("like");
 
   const send = async (kind) => {
-    if (!incidentNumber || busy) return;
-    setBusy(true);
+    if (selection || disabled) return;
+    setSelection(kind);
+    setModalVariant(kind);
+    setModalOpen(true);
+    if (!incidentNumber) return;
     try {
-      const res = await recordRCAFeedback(incidentNumber, panel, kind);
-      setSelection(kind);
-      if (kind === "like") {
-        message.success(`Thanks — marked ${label} as helpful.`);
-      } else {
-        message.success(
-          `Thanks — ${label} flagged for regeneration.`
-          + (res?.invalidated ? " Cache cleared." : ""),
-        );
-        if (typeof onDisliked === "function") onDisliked();
-      }
+      await recordRCAFeedback(incidentNumber, panel, kind);
+      message.success("Thanks — captured.", 2);
     } catch (err) {
       // eslint-disable-next-line no-console
-      console.error("[rca.feedback]", err);
-      message.error("Couldn't record feedback — please try again.");
-    } finally {
-      setBusy(false);
+      console.warn("[rca.feedback] record failed", err);
     }
   };
 
+  const stageLabel = `RCA · ${label}`;
+
   return (
-    <Space size={6} style={{ marginTop: 12 }}>
-      <Text type="secondary" style={{ fontSize: 12 }}>
-        Was this {label} helpful?
-      </Text>
-      <Tooltip title="Helpful — keeps the cached result for everyone">
-        <Button
-          size="small"
-          icon={
-            selection === "like"
-              ? <LikeFilled style={{ color: "#10b981" }} />
-              : <LikeOutlined />
-          }
-          onClick={() => send("like")}
-          disabled={busy || disabled}
-        >
-          Helpful
-        </Button>
-      </Tooltip>
-      <Tooltip title="Dislike — clears the cached result so the next Generate produces a fresh report">
-        <Button
-          size="small"
-          icon={
-            selection === "dislike"
-              ? <DislikeFilled style={{ color: "#ef4444" }} />
-              : <DislikeOutlined />
-          }
-          onClick={() => send("dislike")}
-          disabled={busy || disabled}
-        >
-          Dislike
-        </Button>
-      </Tooltip>
-    </Space>
+    <>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 12 }}>
+        {selection === "like" ? (
+          <SubmittedChip
+            accent={HELPFUL_ACCENT}
+            icon={<CheckCircleFilled style={{ fontSize: 14 }} />}
+            label="Marked Helpful"
+          />
+        ) : selection === "dislike" ? (
+          <SubmittedChip
+            accent={DISLIKE_ACCENT}
+            icon={<CloseCircleFilled style={{ fontSize: 14 }} />}
+            label="Marked needs work"
+          />
+        ) : (
+          <>
+            <PillButton
+              accent={HELPFUL_ACCENT}
+              icon={<LikeOutlined style={{ fontSize: 14 }} />}
+              label="Helpful"
+              onClick={() => send("like")}
+              disabled={disabled}
+            />
+            <PillButton
+              accent={DISLIKE_ACCENT}
+              icon={<DislikeOutlined style={{ fontSize: 14 }} />}
+              label="Dislike"
+              onClick={() => send("dislike")}
+              disabled={disabled}
+            />
+          </>
+        )}
+      </div>
+      <FeedbackModal
+        open={modalOpen}
+        variant={modalVariant}
+        sessionId={null}
+        stage={stageLabel}
+        onClose={() => setModalOpen(false)}
+      />
+    </>
   );
 }
 
 
 export default function RCAFlow({ onReturnToStages, initialPayload = null }) {
+  // Collapse the sidebar + enable hover-peek while this flow is open,
+  // identical to the Ticket Filter + blocks-screen UX. Hook restores
+  // the expanded default on unmount.
+  useSidebarPeek();
+
   // Sprint 13.32 — inject the PDF-style document CSS on first mount.
   // Idempotent; subsequent mounts hit the module guard and no-op.
   React.useEffect(() => {
@@ -691,7 +803,6 @@ export default function RCAFlow({ onReturnToStages, initialPayload = null }) {
                     panel="customer_facing"
                     label="Customer-Facing RCA"
                     disabled={!!regeneratingPanel}
-                    onDisliked={() => handleRegeneratePanel("customer")}
                   />
                 </>
               ) : !result.customer_facing_error ? (
@@ -761,7 +872,6 @@ export default function RCAFlow({ onReturnToStages, initialPayload = null }) {
                     panel="internal"
                     label="Internal RCA"
                     disabled={!!regeneratingPanel}
-                    onDisliked={() => handleRegeneratePanel("internal")}
                   />
                 </>
               ) : !result.internal_error ? (
@@ -783,10 +893,34 @@ export default function RCAFlow({ onReturnToStages, initialPayload = null }) {
   });
 
   return (
-    <div className="flex flex-col h-full w-full t-bg-primary">
+    <div
+      className="flex flex-col h-full w-full t-bg-primary"
+      style={{ position: "relative" }}
+    >
+      {/* Back arrow — pulled OUT of the scrollable body so it stays
+          pinned to the top-left of the right pane while the engineer
+          scrolls through long RCA reports. Absolute-positioned against
+          the outer flex container; no blur / no background bar. */}
+      <div
+        style={{
+          position: "absolute",
+          top: 16,
+          left: 16,
+          zIndex: 50,
+        }}
+      >
+        <BackArrowButton
+          onClick={() => {
+            if (typeof onReturnToStages === "function") {
+              onReturnToStages();
+            }
+          }}
+        />
+      </div>
+
       {/* Scrollable body */}
       <div className="flex-1 overflow-y-auto px-4 py-6">
-        <div className="w-full max-w-5xl mx-auto">
+        <div className="w-full max-w-7xl mx-auto">
           {/* Header */}
           <div style={{ marginBottom: 16 }}>
             <Title level={3} style={{ marginBottom: 4 }}>
@@ -888,28 +1022,6 @@ export default function RCAFlow({ onReturnToStages, initialPayload = null }) {
         </div>
       </div>
 
-      {/* Fixed bottom-right "Return to Stages" button */}
-      <div
-        style={{
-          padding: "12px 16px",
-          borderTop: "1px solid var(--border-color, #e5e7eb)",
-          display: "flex",
-          justifyContent: "flex-end",
-          flexShrink: 0,
-        }}
-      >
-        <Button
-          type="default"
-          icon={<ArrowLeftOutlined />}
-          onClick={() => {
-            if (typeof onReturnToStages === "function") {
-              onReturnToStages();
-            }
-          }}
-        >
-          Return to Stages
-        </Button>
-      </div>
     </div>
   );
 }

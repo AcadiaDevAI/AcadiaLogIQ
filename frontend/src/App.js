@@ -1,6 +1,11 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { ConfigProvider, theme } from "antd";
 import { ThemeProvider, useTheme } from "./hooks/ThemeContext";
+// Premium theme stylesheet — selectors are scoped to `.theme-premium`,
+// so it has zero effect under the legacy theme. Imported once at app
+// root so the cascade is available when ACTIVE_THEME = "premium".
+import "./theme/premium.css";
+import { resolveAntdTheme } from "./theme/theme-config";
 import { ChatProvider, useChat } from "./hooks/ChatContext";
 import Sidebar from "./components/Sidebar";
 import ChatArea from "./components/ChatArea";
@@ -101,43 +106,132 @@ function AppLayout() {
     setGapModalOpen(false);
   }, []);
 
+  // ── Back-arrow origin tracking ─────────────────────────────────
+  // Ticket Filter and ServiceNow flows are right-pane takeovers that
+  // can be entered from three different screens — the blocks/journey,
+  // chat, or landing. The icon-only back-arrow at the top-left of
+  // those flows is supposed to return the engineer to *where they
+  // came from*, not unconditionally to landing.
+  //
+  // We snapshot the "origin" at the moment the takeover opens, then
+  // restore it on close:
+  //
+  //   journey  → re-dispatch RESUME_JOURNEY with the captured sid so
+  //              LandingRouter's resume effect re-mounts Tier1Workspace
+  //              (LandingRouter's local tier1Result is destroyed on
+  //              unmount, so we cannot rely on natural restoration —
+  //              the explicit resume signal is required).
+  //   chat     → leave selectedMode untouched; AppLayout re-renders
+  //              ChatArea naturally.
+  //   landing  → fall back to the old RESET_MODE_STATE +
+  //              CLEAR_JOURNEY_RESUME behaviour so any stale journey
+  //              breadcrumb doesn't auto-resume a session the engineer
+  //              never visited.
+  //
+  // Journey-active detection uses the existing window events
+  // (`acadia:journey-mounted` / `acadia:journey-unmounted`) that
+  // ResolutionJourney already broadcasts on mount/unmount. The
+  // localStorage key written by the same component supplies the
+  // session id needed for RESUME_JOURNEY.
+  const journeyMountedRef = useRef(false);
+  useEffect(() => {
+    const onMount = () => { journeyMountedRef.current = true; };
+    const onUnmount = () => { journeyMountedRef.current = false; };
+    window.addEventListener("acadia:journey-mounted", onMount);
+    window.addEventListener("acadia:journey-unmounted", onUnmount);
+    return () => {
+      window.removeEventListener("acadia:journey-mounted", onMount);
+      window.removeEventListener("acadia:journey-unmounted", onUnmount);
+    };
+  }, []);
+
+  // Mirror state.selectedMode into a ref so captureOrigin can read the
+  // freshest value without forcing the open handlers to re-create on
+  // every render.
+  const selectedModeRef = useRef(state.selectedMode);
+  useEffect(() => {
+    selectedModeRef.current = state.selectedMode;
+  }, [state.selectedMode]);
+
+  const prevOriginRef = useRef(null);
+
+  const captureOrigin = useCallback(() => {
+    if (journeyMountedRef.current) {
+      let journeySid = null;
+      try {
+        journeySid = localStorage.getItem("tier1_last_active_journey_session");
+      } catch { /* privacy-mode — degrade silently */ }
+      return { type: "journey", journeySid: journeySid || null };
+    }
+    if (selectedModeRef.current) {
+      return { type: "chat" };
+    }
+    return { type: "landing" };
+  }, []);
+
+  const restoreOrigin = useCallback(() => {
+    const origin = prevOriginRef.current;
+    prevOriginRef.current = null;
+    if (origin?.type === "journey" && origin.journeySid) {
+      // Re-fire the resume signal so LandingRouter's effect picks it
+      // up and re-mounts Tier1Workspace at the same session id.
+      dispatch({
+        type: "RESUME_JOURNEY",
+        payload: { journeySessionId: origin.journeySid },
+      });
+      return;
+    }
+    if (origin?.type === "chat") {
+      // No dispatch needed — selectedMode was never cleared, so
+      // AppLayout will re-render ChatArea once the takeover flag
+      // flips off.
+      return;
+    }
+    // origin?.type === "landing" or unknown — old behaviour.
+    dispatch({ type: "RESET_MODE_STATE" });
+    dispatch({ type: "CLEAR_JOURNEY_RESUME" });
+  }, [dispatch]);
+
   // Sidebar's "Ticket Filter" button — no modal, so this is the
   // only handler the feature needs. Closes RCA + Gap on open
   // (symmetric with their handlers above).
   const handleOpenTicketFilter = useCallback(() => {
+    prevOriginRef.current = captureOrigin();
     setRcaOpen(false);
     setRcaPayload(null);
     setGapOpen(false);
     setGapPayload(null);
     setServiceNowOpen(false);
     setTicketFilterOpen(true);
-  }, []);
+  }, [captureOrigin]);
 
-  // "Return to Stages" from Ticket Filter — mirrors RCA / Gap.
+  // Back-arrow / "Return to Stages" from Ticket Filter — restores
+  // whichever screen the engineer came from instead of unconditionally
+  // dropping them on landing.
   const handleReturnFromTicketFilter = useCallback(() => {
-    dispatch({ type: "RESET_MODE_STATE" });
-    dispatch({ type: "CLEAR_JOURNEY_RESUME" });
+    restoreOrigin();
     setTicketFilterOpen(false);
-  }, [dispatch]);
+  }, [restoreOrigin]);
 
   // Sidebar's "Connect to ServiceNow" button — no modal needed since
   // the flow auto-fetches on mount. Closes every other right-pane
   // takeover, identical pattern to handleOpenTicketFilter above.
   const handleOpenServiceNow = useCallback(() => {
+    prevOriginRef.current = captureOrigin();
     setRcaOpen(false);
     setRcaPayload(null);
     setGapOpen(false);
     setGapPayload(null);
     setTicketFilterOpen(false);
     setServiceNowOpen(true);
-  }, []);
+  }, [captureOrigin]);
 
-  // "Return to Stages" from ServiceNow — mirrors RCA / Gap / Filter.
+  // Back-arrow / "Return to Stages" from ServiceNow — restores the
+  // origin screen via the shared restoreOrigin helper.
   const handleReturnFromServiceNow = useCallback(() => {
-    dispatch({ type: "RESET_MODE_STATE" });
-    dispatch({ type: "CLEAR_JOURNEY_RESUME" });
+    restoreOrigin();
     setServiceNowOpen(false);
-  }, [dispatch]);
+  }, [restoreOrigin]);
 
   const handleReturnFromGapAnalysis = useCallback(() => {
     // Mirror RCA's "Return to Stages" — drop the user on the
@@ -250,7 +344,17 @@ function AppLayout() {
             onReturnToStages={handleReturnFromServiceNow}
           />
         ) : showLanding ? (
-          <LandingRouter />
+          /* Landing surface — receives the four quick-action handlers
+             so the top horizontal pill bar (RCA / Gap / Filter /
+             ServiceNow) on the LandingPage modes-picker can open the
+             corresponding right-pane flows without going through the
+             sidebar. */
+          <LandingRouter
+            onOpenRca={() => setRcaModalOpen(true)}
+            onOpenGapAnalysis={() => setGapModalOpen(true)}
+            onOpenTicketFilter={handleOpenTicketFilter}
+            onOpenServiceNow={handleOpenServiceNow}
+          />
         ) : (
           <ChatArea />
         )}
@@ -266,43 +370,15 @@ function AppLayout() {
 function ThemedApp() {
   const { isDark } = useTheme();
 
-  const antTheme = isDark
-    ? {
-        algorithm: theme.darkAlgorithm,
-        token: {
-          colorPrimary: "#6366f1",
-          colorBgContainer: "#16161d",
-          colorBgElevated: "#1e1e28",
-          colorBorder: "#2a2a3d",
-          colorText: "#e2e8f0",
-          colorTextSecondary: "#94a3b8",
-          borderRadius: 8,
-          fontFamily: "'Poppins', 'Inter', system-ui, sans-serif",
-        },
-        components: {
-          Button: { primaryShadow: "none" },
-          Collapse: { headerBg: "transparent", contentBg: "transparent" },
-          Tabs: { colorBgContainer: "transparent", itemColor: "#94a3b8", itemSelectedColor: "#a5b4fc", inkBarColor: "#6366f1" },
-        },
-      }
-    : {
-        algorithm: theme.defaultAlgorithm,
-        token: {
-          colorPrimary: "#4f46e5",
-          colorBgContainer: "#ffffff",
-          colorBgElevated: "#f8f9fb",
-          colorBorder: "#dee2e6",
-          colorText: "#1a1a2e",
-          colorTextSecondary: "#495057",
-          borderRadius: 8,
-          fontFamily: "'Poppins', 'Inter', system-ui, sans-serif",
-        },
-        components: {
-          Button: { primaryShadow: "none" },
-          Collapse: { headerBg: "transparent", contentBg: "transparent" },
-          Tabs: { colorBgContainer: "transparent", itemColor: "#495057", itemSelectedColor: "#4f46e5", inkBarColor: "#4f46e5" },
-        },
-      };
+  // All AntD design tokens (colors, radii, font, component-specific
+  // overrides) are resolved from a single switch in
+  // `src/theme/theme-config.js`. Under premium → Aurora Operations
+  // tokens; under legacy → original light/dark tokens (preserved
+  // byte-for-byte from before the revamp).
+  const antTheme = resolveAntdTheme(isDark, {
+    darkAlgorithm: theme.darkAlgorithm,
+    defaultAlgorithm: theme.defaultAlgorithm,
+  });
 
   return (
     <ConfigProvider theme={antTheme}>

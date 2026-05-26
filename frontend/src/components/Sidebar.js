@@ -115,6 +115,112 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
   // user looking at a misleading "Failed to delete" toast).
   const inFlightDeletes = useRef(new Set());
 
+  // ── Hover-to-peek sidebar ──────────────────────────────────────
+  // When the sidebar is collapsed (state.sidebarOpen === false) AND
+  // the blocks screen has flipped `state.sidebarHoverPeekEnabled`,
+  // the engineer can hover the 56 px bar to expand it automatically.
+  // Moving the mouse away collapses it back.
+  //
+  // Why the dwell delays?
+  //   The first iteration of this fired on the raw mouseenter event,
+  //   which made the sidebar pop open the instant the cursor brushed
+  //   the screen edge. Felt twitchy. We now require the cursor to
+  //   rest on the bar for `EXPAND_DELAY_MS` before expanding, and
+  //   require it to stay AWAY for `COLLAPSE_DELAY_MS` before
+  //   collapsing — both pending timers cancel each other so a quick
+  //   "in–out" or "out–in" doesn't actually trigger anything.
+  //
+  //   700 ms expand / 250 ms collapse felt right: deliberate-slow on
+  //   entry (intentional reveal — a brief cursor cross to reach the
+  //   chat area won't satisfy the dwell), slightly snappier on exit
+  //   so the sidebar doesn't linger when the engineer has clearly
+  //   moved on.
+  //
+  // `hoverExpanded` distinguishes hover-driven expansion (auto-
+  // collapses on mouseleave) from manual button-click expansion
+  // (immune to mouseleave). Manual clicks clear the flag.
+  const EXPAND_DELAY_MS = 700;
+  const COLLAPSE_DELAY_MS = 250;
+  const [hoverExpanded, setHoverExpanded] = useState(false);
+  const expandTimerRef = useRef(null);
+  const collapseTimerRef = useRef(null);
+
+  const clearExpandTimer = () => {
+    if (expandTimerRef.current) {
+      clearTimeout(expandTimerRef.current);
+      expandTimerRef.current = null;
+    }
+  };
+  const clearCollapseTimer = () => {
+    if (collapseTimerRef.current) {
+      clearTimeout(collapseTimerRef.current);
+      collapseTimerRef.current = null;
+    }
+  };
+
+  // Cancel any in-flight hover timers on unmount so a stale timeout
+  // doesn't fire SET_SIDEBAR against an unmounted tree.
+  useEffect(() => {
+    return () => {
+      clearExpandTimer();
+      clearCollapseTimer();
+    };
+  }, []);
+
+  const handleManualToggle = () => {
+    // Manual click on the fold/unfold button always wins over the
+    // hover-peek state. Clear the flag AND any pending timers so the
+    // next mouseleave doesn't close a sidebar the engineer just
+    // opened manually.
+    clearExpandTimer();
+    clearCollapseTimer();
+    setHoverExpanded(false);
+    dispatch({ type: "TOGGLE_SIDEBAR" });
+  };
+
+  const handleHoverExpand = (e) => {
+    // Gate: only the blocks screen enables this. On chat / landing
+    // screens the cursor sweeping across a manually-collapsed sidebar
+    // should be a no-op.
+    if (!state.sidebarHoverPeekEnabled) return;
+    if (state.sidebarOpen) return;
+
+    // Ignore "synthetic" mouse-enters where the cursor didn't
+    // actually move INTO the bar from another DOM element. On page
+    // refresh / tab-switch / alt-tab back, the browser fires a
+    // mouseenter when the user makes the first mouse movement IF
+    // the cursor was already over the element when focus returned.
+    // In that case `relatedTarget` is null (cursor came from outside
+    // the document) — we want the engineer to make a deliberate
+    // gesture toward the sidebar, not have it pop open just because
+    // their cursor happens to be parked on the left edge.
+    if (e && e.relatedTarget == null) return;
+
+    // Cancel any pending collapse — the cursor just came back.
+    clearCollapseTimer();
+    if (expandTimerRef.current) return; // already scheduled
+    expandTimerRef.current = setTimeout(() => {
+      expandTimerRef.current = null;
+      setHoverExpanded(true);
+      dispatch({ type: "SET_SIDEBAR", payload: true });
+    }, EXPAND_DELAY_MS);
+  };
+
+  const handleHoverLeave = () => {
+    // Cancel any pending expand — cursor left before the dwell time
+    // elapsed.
+    clearExpandTimer();
+    // Only auto-collapse if the expansion was hover-triggered. Manual
+    // expansions stay open regardless of mouse position.
+    if (!hoverExpanded) return;
+    if (collapseTimerRef.current) return;
+    collapseTimerRef.current = setTimeout(() => {
+      collapseTimerRef.current = null;
+      setHoverExpanded(false);
+      dispatch({ type: "SET_SIDEBAR", payload: false });
+    }, COLLAPSE_DELAY_MS);
+  };
+
   const isAdmin = state.userRole === "admin";
 
   useEffect(() => {
@@ -399,9 +505,19 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
   // ── Collapsed sidebar ──
   if (!state.sidebarOpen) {
     return (
-      <div className="flex flex-col items-center py-4 px-1 t-bg-secondary border-r w-14 h-screen" style={{ borderColor: "var(--border-color)" }}>
+      <div
+        className="flex flex-col items-center py-4 px-1 t-bg-secondary border-r w-14 h-screen"
+        style={{ borderColor: "var(--border-color)" }}
+        // Hover anywhere on the 56 px bar → auto-expand. Manual
+        // button click still works in parallel (handleManualToggle).
+        onMouseEnter={handleHoverExpand}
+      >
         <Tooltip title="Expand sidebar" placement="right">
-          <Button type="text" icon={<MenuUnfoldOutlined style={{ color: "var(--text-muted)" }} />} onClick={() => dispatch({ type: "TOGGLE_SIDEBAR" })} />
+          <Button
+            type="text"
+            icon={<MenuUnfoldOutlined style={{ color: "var(--text-muted)" }} />}
+            onClick={handleManualToggle}
+          />
         </Tooltip>
         <div className="mt-4">
           <Tooltip title="New Chat" placement="right">
@@ -413,7 +529,24 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
   }
 
   return (
-    <div className="flex flex-col t-bg-secondary border-r w-[280px] h-screen lg:w-[300px]" style={{ borderColor: "var(--border-color)" }}>
+    <div
+      className={
+        // The `sidebar-peek-in` class triggers the gentle 650 ms
+        // width/opacity keyframe animation (see index.css). Only
+        // applied when the expansion came from a hover-peek — manual
+        // button clicks render the expanded sidebar instantly with
+        // no animation, matching their explicit-action character.
+        "flex flex-col t-bg-secondary border-r w-[280px] h-screen lg:w-[300px]"
+        + (hoverExpanded ? " sidebar-peek-in" : "")
+      }
+      style={{ borderColor: "var(--border-color)" }}
+      // When the sidebar was expanded by a hover-peek, leaving the
+      // sidebar area auto-collapses it back to the 56 px bar.
+      // Manual expansions (button click) leave `hoverExpanded === false`
+      // so this handler is a no-op for them — preserving the engineer's
+      // explicit intent to keep the sidebar open.
+      onMouseLeave={handleHoverLeave}
+    >
       {/* Header */}
       <div
         className="flex items-center px-4 py-3 border-b"
@@ -432,7 +565,10 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
         <Button
           type="text"
           icon={<MenuFoldOutlined style={{ color: "var(--text-muted)" }} />}
-          onClick={() => dispatch({ type: "TOGGLE_SIDEBAR" })}
+          // Manual collapse must clear `hoverExpanded` so a subsequent
+          // mouseleave doesn't re-fire SET_SIDEBAR(false) and create
+          // a redundant dispatch. handleManualToggle does both.
+          onClick={handleManualToggle}
           size="small"
           className="ml-auto"
         />
@@ -468,6 +604,19 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
           wire onOpenRca so the file stays backwards-compatible.
           Sprint 13.32.11 — label expanded from "RCA" to
           "Root Cause Analysis" at the user's request. */}
+      {/* ─────────────────────────────────────────────────────────────
+          MOVED — the four quick-action buttons (RCA / Gap Analysis /
+          Ticket Filter / Connect to ServiceNow) now live in a
+          horizontal pill bar at the TOP of LandingPage.js, above the
+          eyebrow. The props (onOpenRca, onOpenGapAnalysis,
+          onOpenTicketFilter, onOpenServiceNow) are still accepted on
+          this component so callers don't need to change; they're
+          forwarded from AppLayout but no longer rendered here.
+
+          To restore the sidebar buttons: uncomment the four blocks
+          below. They render only when the matching handler is passed
+          in, so adding them back is safe.
+      ─────────────────────────────────────────────────────────────
       {typeof onOpenRca === "function" ? (
         <div className="px-3 pt-2">
           <Tooltip title="Generate Internal / External RCA from a ticket number or upload">
@@ -488,11 +637,6 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
         </div>
       ) : null}
 
-      {/* Gap Analysis — sibling button below RCA, identical
-          colour/typography/size so the two read as a peer pair.
-          Wired up via AppLayout's `onOpenGapAnalysis` (mirrors the
-          RCA wiring). Hidden when the parent doesn't pass a handler
-          so existing call sites stay backwards-compatible. */}
       {typeof onOpenGapAnalysis === "function" ? (
         <div className="px-3 pt-2">
           <Tooltip title="Generate a structured Gap Analysis and blameless post-mortem from a ticket number">
@@ -513,11 +657,6 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
         </div>
       ) : null}
 
-      {/* Ticket Filter — sibling button below Gap Analysis. Same
-          colour / typography / size as the RCA and Gap buttons so
-          the three read as a peer trio. Wired via AppLayout's
-          ``onOpenTicketFilter``. Hidden when no handler is passed
-          (backwards-compatible). */}
       {typeof onOpenTicketFilter === "function" ? (
         <div className="px-3 pt-2">
           <Tooltip title="Filter historical tickets by SLA outcome and resolution quality score">
@@ -538,10 +677,6 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
         </div>
       ) : null}
 
-      {/* Connect to ServiceNow — placed directly below Ticket Filter
-          as a sibling. Optional external integration; hidden until
-          AppLayout passes ``onOpenServiceNow``. Different icon to
-          set it apart visually from the local-DB filter above. */}
       {typeof onOpenServiceNow === "function" ? (
         <div className="px-3 pt-2">
           <Tooltip title="Fetch priority-1 incidents from the configured ServiceNow instance">
@@ -561,6 +696,7 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
           </Tooltip>
         </div>
       ) : null}
+      ───────────────────────────────────────────────────────────── */}
 
       {/* Tabs */}
       <div className="flex-1 overflow-hidden px-3 pt-2">

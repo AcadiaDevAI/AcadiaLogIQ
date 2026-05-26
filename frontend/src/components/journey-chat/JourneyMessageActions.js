@@ -1,54 +1,143 @@
 // Sprint 10.5 §2.3 — inline journey actions on assistant chat messages.
 //
-// Renders [← Return to Stages] and [📋 Escalate to Tier 2] inline beside
-// the existing per-message Copy / 👍 / 👎 row. ONLY rendered when the
-// chat session has `journey_session_id` in its metadata — i.e. when
-// the chat was created via a Stage 4 Search-KB handoff. Non-journey
-// chats render the message footer unchanged.
+// LOGIC PRESERVED (Sprint 11 + 13.25 contracts intact):
+//   - Renders [Return to Stages] + [Escalate to Tier 2] inline beside
+//     the per-message Copy / 👍 / 👎 row, gated by `journey_session_id`.
+//   - "Return to Stages" → state-based RESUME_JOURNEY dispatch.
+//   - "Escalate to Tier 2" → opens EscalationReasonModal; on Submit
+//     records two telemetry events in order (escalation_initiated_from_chat,
+//     stage_advanced), then dispatches RESUME_JOURNEY which sends the
+//     user back to Stage 5.
 //
-// Sprint 11 — navigation rewritten.
-//   The original Sprint 10.5 implementation used
-//   `window.location.href = '/tier1/journey/<sid>'` for navigation.
-//   That triggered a full page reload but the React app has no URL
-//   routing — App.js never reads window.location.pathname. Reload
-//   landed the user on the LandingPage, NOT on the journey panel.
+// PRESENTATION UPGRADE (this revision):
+//   - Replaced AntD `type="text"` small Buttons with premium pills
+//     matching the journey footer aesthetic (HelpfulButton /
+//     DislikeButton / EscalateButton style).
+//   - Compact size (height 30px) — they sit inside chat-message
+//     footer rows next to Copy / Like / Dislike actions; keeping
+//     them smaller than the in-journey 36px pills preserves the
+//     visual hierarchy.
+//   - "Return to Stages" → iris accent (#5B8DEF) — matches the
+//     landing-page RCA pill and reads as "navigation back".
+//   - "Escalate to Tier 2" → amber accent (#D88A1A) — matches the
+//     in-journey EscalateButton so the same action wears the same
+//     colour anywhere it appears in the app.
 //
-//   Replaced with state-based dispatch: RESUME_JOURNEY tells
-//   ChatContext to (a) carry the journey session id forward and
-//   (b) clear selectedMode so AppLayout falls back to LandingRouter,
-//   which picks up the resume sid via useEffect and re-mounts
-//   Tier1Workspace with that session. Mirrors the Stage 4 → chat
-//   handoff pattern in reverse (state-based, no URL rewrite).
-//
-// Order matters in handleEscalate: we record telemetry FIRST, then
-// dispatch the resume. If we dispatched first, the unmount could
-// cancel the in-flight POST and lose the event.
+// Loading + disabled states preserved.
 
 import React from "react";
-import { Button, Tooltip, message as antMessage } from "antd";
-import { ArrowLeftOutlined, ExportOutlined } from "@ant-design/icons";
+import { Tooltip, message as antMessage } from "antd";
+import {
+  ArrowLeftOutlined,
+  ExportOutlined,
+  LoadingOutlined,
+} from "@ant-design/icons";
 
 import { useChat } from "../../hooks/ChatContext";
 import EscalationReasonModal from "../Tier1Copilot/journey/EscalationReasonModal";
 import { postJourneyEvent } from "../Tier1Copilot/journey/journeyApi";
 
 
+// ─── Premium pill — compact variant for chat-message action rows ─────
+// Identical visual language to the journey footer pills, scaled down
+// (30px height vs 36px) so they nest cleanly alongside Copy / 👍 / 👎.
+function CompactPill({ accent, icon, label, onClick, disabled, loading }) {
+  const A = accent;
+  const idleBg = `linear-gradient(135deg, ${A.soft}, rgba(255,255,255,0.40))`;
+  const hoverBg = `linear-gradient(135deg, ${A.hoverFill}, ${A.soft})`;
+  const isDisabled = disabled || loading;
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={isDisabled}
+      onMouseEnter={(e) => {
+        if (isDisabled) return;
+        e.currentTarget.style.transform = "translateY(-1px)";
+        e.currentTarget.style.background = hoverBg;
+        e.currentTarget.style.borderColor = A.ring;
+        e.currentTarget.style.boxShadow =
+          `0 6px 18px -6px ${A.ring}, 0 0 0 1px ${A.ring} inset`;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.transform = "translateY(0)";
+        e.currentTarget.style.background = idleBg;
+        e.currentTarget.style.borderColor = `${A.c}40`;
+        e.currentTarget.style.boxShadow = "0 1px 2px rgba(10, 16, 24, 0.05)";
+      }}
+      style={{
+        display: "inline-flex",
+        alignItems: "center",
+        gap: 6,
+        padding: "5px 12px",
+        height: 30,
+        borderRadius: 9999,
+        background: idleBg,
+        backdropFilter: "blur(10px) saturate(150%)",
+        WebkitBackdropFilter: "blur(10px) saturate(150%)",
+        border: `1px solid ${A.c}40`,
+        color: A.c,
+        fontFamily:
+          "var(--font-body, 'Geist', 'Inter', system-ui, sans-serif)",
+        fontSize: 12.5,
+        fontWeight: 600,
+        letterSpacing: "0.01em",
+        cursor: isDisabled ? "not-allowed" : "pointer",
+        whiteSpace: "nowrap",
+        opacity: isDisabled ? 0.6 : 1,
+        boxShadow: "0 1px 2px rgba(10, 16, 24, 0.05)",
+        transition:
+          "transform 180ms cubic-bezier(0.16, 1, 0.3, 1), " +
+          "background 220ms cubic-bezier(0.16, 1, 0.3, 1), " +
+          "border-color 180ms cubic-bezier(0.16, 1, 0.3, 1), " +
+          "box-shadow 220ms cubic-bezier(0.16, 1, 0.3, 1)",
+      }}
+    >
+      {loading ? (
+        <LoadingOutlined style={{ fontSize: 13 }} />
+      ) : (
+        <span style={{ display: "inline-flex", alignItems: "center", fontSize: 13 }}>
+          {icon}
+        </span>
+      )}
+      <span>{label}</span>
+    </button>
+  );
+}
+
+
+// ─── Accent palettes — match the corresponding in-journey buttons ───
+const ACCENT_BACK = {
+  c:         "#5B8DEF",                       // iris (RCA pill / navigation)
+  soft:      "rgba(91, 141, 239, 0.14)",
+  hoverFill: "rgba(91, 141, 239, 0.28)",
+  ring:      "rgba(91, 141, 239, 0.55)",
+};
+
+const ACCENT_ESCALATE = {
+  c:         "#D88A1A",                       // amber (matches EscalateButton)
+  soft:      "rgba(255, 179, 71, 0.16)",
+  hoverFill: "rgba(255, 179, 71, 0.30)",
+  ring:      "rgba(216, 138, 26, 0.55)",
+};
+
+
 export default function JourneyMessageActions({ journeySessionId }) {
   const { dispatch } = useChat();
   const [escalating, setEscalating] = React.useState(false);
-  // Sprint 13.25 — chat-side Escalate to Tier 2 also opens the
-  // trigger-classification modal first, mirroring the in-journey
-  // EscalateButton. Click → modal → Submit → existing telemetry +
-  // RESUME_JOURNEY dispatch.
+  // Sprint 13.25 — modal-gated escalate
   const [modalOpen, setModalOpen] = React.useState(false);
 
   if (!journeySessionId) return null;
 
+  // ─── LOGIC — UNCHANGED, plus sidebar auto-collapse ──────────────
   const handleBack = () => {
-    // Sprint 11 — state-based return. ChatContext will clear
-    // selectedMode + carry the sid to LandingRouter which will
-    // re-mount Tier1Workspace; resume-state then lands the user
-    // at whichever stage they were last on.
+    // Returning to the journey = entering the "Preliminary Tier 1
+    // Checks" surface again. Collapse the sidebar immediately so the
+    // transition feels instant; ResolutionJourney's mount effect
+    // will reconfirm the same on remount.
+    dispatch({ type: "SET_SIDEBAR", payload: false });
     dispatch({
       type: "RESUME_JOURNEY",
       payload: { journeySessionId },
@@ -60,22 +149,9 @@ export default function JourneyMessageActions({ journeySessionId }) {
     setModalOpen(true);
   };
 
-  // Sprint 13.25 — `handleEscalateProceed` is the body of the
-  // pre-13.25 click handler. The modal calls this AFTER the
-  // engineer submits the trigger-classification form.
   const handleEscalateProceed = async () => {
     setEscalating(true);
     try {
-      // Sprint 10.7 §4.3 — fire TWO events in order:
-      //   1. escalation_initiated_from_chat — Sprint 10.5 analytics
-      //      surface, kept verbatim so existing dashboards stay valid.
-      //   2. stage_advanced (stage_5) — the Sprint 10.7 resume signal,
-      //      so /resume-state opens the journey at Stage 5 with the
-      //      escalation package visible.
-      // Order matters: write 1 first so analytics record even if the
-      // resume write fails; write 2 second so the engineer's resume
-      // pointer is updated. We `await` both before dispatching so the
-      // unmount can't cancel either request.
       await postJourneyEvent(
         journeySessionId,
         "stage_5",
@@ -86,10 +162,6 @@ export default function JourneyMessageActions({ journeySessionId }) {
         "stage_5",
         "stage_advanced",
       );
-      // Sprint 11 — state-based return. resume-state will read the
-      // stage_advanced row above and land the user at Stage 5,
-      // matching what Stage 4's "Escalate to Tier-2" button does
-      // (which just calls onReveal('stage_5') in-place).
       dispatch({
         type: "RESUME_JOURNEY",
         payload: { journeySessionId },
@@ -98,33 +170,35 @@ export default function JourneyMessageActions({ journeySessionId }) {
       antMessage.error("Could not open escalation. Please try again.");
       setEscalating(false);
     }
-    // Note: we do not clear escalating in the success path because
-    // the dispatch above triggers AppLayout to swap LandingRouter in
-    // and unmount this component.
+    // We do NOT clear escalating in the success path — the dispatch
+    // above triggers AppLayout to swap LandingRouter in and unmount.
   };
 
   return (
     <>
       <Tooltip title="Return to the Resolution Journey panels">
-        <Button
-          type="text"
-          size="small"
-          icon={<ArrowLeftOutlined />}
-          onClick={handleBack}
-        >
-          Return to Stages
-        </Button>
+        {/* Tooltip's child must accept refs cleanly — wrap in a span
+            so the unstyled <button> works with AntD's Tooltip without
+            a forwardRef warning. */}
+        <span style={{ display: "inline-flex" }}>
+          <CompactPill
+            accent={ACCENT_BACK}
+            icon={<ArrowLeftOutlined />}
+            label="Return to Stages"
+            onClick={handleBack}
+          />
+        </span>
       </Tooltip>
       <Tooltip title="Open the escalation package for Tier-2 handoff">
-        <Button
-          type="text"
-          size="small"
-          icon={<ExportOutlined />}
-          loading={escalating}
-          onClick={handleEscalateClick}
-        >
-          Escalate to Tier 2
-        </Button>
+        <span style={{ display: "inline-flex" }}>
+          <CompactPill
+            accent={ACCENT_ESCALATE}
+            icon={<ExportOutlined />}
+            label="Escalate to Tier 2"
+            onClick={handleEscalateClick}
+            loading={escalating}
+          />
+        </span>
       </Tooltip>
       <EscalationReasonModal
         open={modalOpen}

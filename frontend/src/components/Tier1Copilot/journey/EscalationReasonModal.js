@@ -124,6 +124,7 @@ export default function EscalationReasonModal({
 
   return (
     <Modal
+      centered
       title="Why are you escalating to Tier 2?"
       open={open}
       onOk={handleSubmit}

@@ -29,18 +29,24 @@ import {
 } from "antd";
 import {
   ApiOutlined,
-  ArrowLeftOutlined,
   LoadingOutlined,
   ReloadOutlined,
 } from "@ant-design/icons";
 
 import { fetchServiceNowIncidents } from "./serviceNowApi";
+import BackArrowButton from "../common/BackArrowButton";
+import useSidebarPeek from "../../hooks/useSidebarPeek";
 
 
 const { Title, Paragraph, Text } = Typography;
 
 
 export default function ServiceNowFlow({ onReturnToStages }) {
+  // Collapse the sidebar + enable hover-peek while this flow is
+  // open, identical to the blocks screen and Ticket Filter. Hook
+  // restores the sidebar to its expanded default on unmount.
+  useSidebarPeek();
+
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
   const [result, setResult] = useState(null);
@@ -91,6 +97,20 @@ export default function ServiceNowFlow({ onReturnToStages }) {
       {/* Scrollable body */}
       <div className="flex-1 overflow-y-auto px-4 py-6">
         <div className="w-full max-w-5xl mx-auto">
+          {/* Top-left back affordance — quick bail-out path. The
+              bottom-right "Return to Stages" button below stays as
+              the deliberate-completion exit. Both wire into the
+              same onReturnToStages prop so they share behaviour. */}
+          <div style={{ marginBottom: 12 }}>
+            <BackArrowButton
+              onClick={() => {
+                if (typeof onReturnToStages === "function") {
+                  onReturnToStages();
+                }
+              }}
+            />
+          </div>
+
           {/* Header */}
           <div style={{ marginBottom: 16 }}>
             <Title level={3} style={{ marginBottom: 4 }}>
@@ -186,29 +206,6 @@ export default function ServiceNowFlow({ onReturnToStages }) {
             </Card>
           ) : null}
         </div>
-      </div>
-
-      {/* Fixed bottom-right Return button — same UX as Ticket Filter / RCA / Gap. */}
-      <div
-        style={{
-          padding: "12px 16px",
-          borderTop: "1px solid var(--border-color, #e5e7eb)",
-          display: "flex",
-          justifyContent: "flex-end",
-          flexShrink: 0,
-        }}
-      >
-        <Button
-          type="default"
-          icon={<ArrowLeftOutlined />}
-          onClick={() => {
-            if (typeof onReturnToStages === "function") {
-              onReturnToStages();
-            }
-          }}
-        >
-          Return to Stages
-        </Button>
       </div>
     </div>
   );

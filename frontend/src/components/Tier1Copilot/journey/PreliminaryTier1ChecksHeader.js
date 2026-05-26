@@ -71,17 +71,45 @@ export default function PreliminaryTier1ChecksHeader() {
   // exactly (zero visual change), dark mode picks --bg-tertiary
   // (#1e1e28) so the panel sits as an elevated dark surface above
   // the page bg. Nothing else about this component changed.
+  //
+  // Premium revamp — pale-blue background for the pre-flight card.
+  //
+  // IMPORTANT: under the premium theme, `src/theme/premium.css`
+  // overrides `.ant-card { background: var(--glass-2) !important }`
+  // — which means setting `style.background` on the Card outer
+  // gets clobbered. We instead set the background on `bodyStyle`
+  // (= `.ant-card-body`), which premium.css does NOT override, so
+  // the colour reliably shows in every theme.
+  //
+  //   Light: #93C5FD (Tailwind blue-300) — clearly pale-blue,
+  //          unmistakable next to the white data cards below.
+  //   Dark : rgba(56, 189, 248, 0.22)     — sky-aurora wash that
+  //          reads as the same accent against the deeper bg.
   const { isDark } = useTheme();
-  const cardBackground = isDark ? "#1e1e28" : "#f7faff";
+  const cardBackground = isDark
+    ? "rgba(56, 189, 248, 0.22)"
+    : "#BFDBFE"; // Tailwind blue-200 — clearly pale blue without
+                 // dominating the page. (Blue-100 #DBEAFE was too
+                 // faint to register against the page bg.)
 
   return (
     <Card
       style={{
         marginBottom: 16,
+        // Original left-rail blue restored.
         borderLeft: "4px solid #1F6FEB",
+        // Outer background — works for legacy themes (where no
+        // `!important` rule overrides it). On premium the bodyStyle
+        // below carries the colour.
         background: cardBackground,
       }}
-      bodyStyle={{ paddingTop: 12, paddingBottom: 12 }}
+      bodyStyle={{
+        paddingTop: 12,
+        paddingBottom: 12,
+        // Premium-theme-safe carrier for the pale-blue colour.
+        background: cardBackground,
+        borderRadius: "inherit",
+      }}
     >
       <div
         onClick={() => setExpanded((v) => !v)}
@@ -102,6 +130,9 @@ export default function PreliminaryTier1ChecksHeader() {
         }}
         aria-expanded={expanded}
       >
+        {/* Header text + icon back to the legacy default colour
+            (AntD Title's inherited text colour). Only the card
+            BACKGROUND is the vibrant pale-blue accent now. */}
         <Title level={5} style={{ marginTop: 0, marginBottom: 0 }}>
           <SafetyCertificateOutlined style={{ marginRight: 8 }} />
           Preliminary Tier 1 Checks

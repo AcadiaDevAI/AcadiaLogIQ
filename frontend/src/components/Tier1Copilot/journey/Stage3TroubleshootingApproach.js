@@ -26,6 +26,7 @@ import DislikeButton from "./DislikeButton";
 import EscalateButton from "./EscalateButton";
 import HelpfulButton from "./HelpfulButton";
 import NextStageButton from "./NextStageButton";
+import CardWatermark from "./CardWatermark";
 import { stripLeadingNumber } from "./stepText";
 import useChatHandoff from "./useChatHandoff";
 import { STAGE_LABELS } from "../tier1Constants";
@@ -573,8 +574,17 @@ export default function Stage3TroubleshootingApproach({
   }
 
   return (
-    <Card style={{ marginBottom: 16, borderLeft: "4px solid #2563eb" }}>
-      <Title level={5} style={{ marginTop: 0 }}>
+    <Card
+      style={{
+        marginBottom: 16,
+        borderLeft: "4px solid #2563eb",
+        // Premium revamp — per-card Acadia watermark.
+        position: "relative",
+        overflow: "hidden",
+      }}
+    >
+      <CardWatermark />
+      <Title level={5} style={{ marginTop: 0, position: "relative", zIndex: 1 }}>
         Guided Troubleshooting Workflow
       </Title>
 

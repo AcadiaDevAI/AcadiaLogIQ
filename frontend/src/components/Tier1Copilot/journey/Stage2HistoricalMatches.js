@@ -14,6 +14,7 @@ import DislikeButton from "./DislikeButton";
 import EscalateButton from "./EscalateButton";
 import HelpfulButton from "./HelpfulButton";
 import NextStageButton from "./NextStageButton";
+import CardWatermark from "./CardWatermark";
 import { STAGE_LABELS } from "../tier1Constants";
 
 const { Title, Paragraph, Text } = Typography;
@@ -192,12 +193,36 @@ export default function Stage2HistoricalMatches({
   }));
 
   return (
-    <Card style={{ marginBottom: 16, borderLeft: "4px solid #2563eb" }}>
-      <Title level={5} style={{ marginTop: 0 }}>
+    <Card
+      style={{
+        marginBottom: 16,
+        borderLeft: "4px solid #2563eb",
+        // Premium revamp — per-card Acadia watermark. Card must be
+        // position:relative + overflow:hidden so the absolute-
+        // positioned <CardWatermark> sits behind the body without
+        // bleeding past the rounded corners.
+        position: "relative",
+        overflow: "hidden",
+      }}
+    >
+      <CardWatermark />
+      <Title level={5} style={{ marginTop: 0, position: "relative", zIndex: 1 }}>
         Related Incidents & Probable Causes
       </Title>
 
-      <Collapse defaultActiveKey={["match-0"]} items={items} />
+      {/* Premium revamp — Collapse in `ghost` mode so its panels are
+          transparent. Without this, AntD's default opaque-white
+          panel surfaces sit on top of the CardWatermark and hide it
+          completely. Ghost mode keeps headers + content fully
+          readable (text still reads on top of whatever's behind);
+          the brand mark now shows through the panel area. */}
+      <div style={{ position: "relative", zIndex: 1 }}>
+        <Collapse
+          ghost
+          defaultActiveKey={["match-0"]}
+          items={items}
+        />
+      </div>
 
       {/* Sprint 11 — "View more matches" reveal. Only shown when the
           backend returned more useful cards than the default visible

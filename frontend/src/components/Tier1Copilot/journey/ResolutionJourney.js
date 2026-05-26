@@ -15,6 +15,14 @@ import React, { useCallback, useEffect, useState } from "react";
 import { Alert, Spin } from "antd";
 
 import SkeletonCard from "../SkeletonCard";
+// Top quick-action pill bar — same component the landing page uses,
+// surfaced again on the journey page per the spec.
+import QuickActionsBar from "../../QuickActionsBar";
+// Premium revamp — sidebar state. The journey wants the sidebar
+// collapsed by default so the engineer's eye lands on the stages,
+// not on chat history. Chat handoff re-expands it; Return-to-Stages
+// re-collapses (handled in their respective components).
+import { useChat } from "../../../hooks/ChatContext";
 
 // Sprint 10.2 — Stage 0 redesigned (best-ticket distillation) and
 // Stage 1A + 1B merged into PivotInsightsPanel. Old standalone
@@ -133,7 +141,22 @@ function _clearJourneyState(sessionId) {
 }
 
 
-export default function ResolutionJourney({ sessionId, onNewAlert }) {
+export default function ResolutionJourney({
+  sessionId,
+  onNewAlert,
+  // Premium revamp — quick-action handlers threaded down from
+  // AppLayout via LandingRouter → Tier1Workspace. Render the same
+  // pill bar that lives on the landing page so RCA / Gap Analysis /
+  // Ticket Filter / ServiceNow stay one click away while the engineer
+  // is in the journey.
+  onOpenRca,
+  onOpenGapAnalysis,
+  onOpenTicketFilter,
+  onOpenServiceNow,
+}) {
+  // Read chat dispatch up-front; we use it below to drive the
+  // sidebar visibility based on the engineer's active stage.
+  const { dispatch: chatDispatch } = useChat();
   // Sprint 13.22 — initial state pulls from localStorage so it
   // survives mid-flow remounts (Stage 4 KB chat round-trip is the
   // common case). When localStorage is empty, falls back to the
@@ -167,6 +190,41 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
   // this to render the package open immediately instead of behind a
   // toggle. Stays false during normal walked-through journeys.
   const [resumedAtStage5, setResumedAtStage5] = useState(false);
+
+  // ── Sidebar auto-collapse on the journey surface ────────────────
+  // The journey is the "Preliminary Tier 1 Checks" screen — a focus
+  // surface. The engineer should look at stages, not chat history,
+  // so the sidebar tucks itself away when this view mounts.
+  // Everywhere else in the app (chat, landing, modals) the sidebar
+  // stays at its natural expanded default. The Stage 4 KB handoff
+  // and JourneyMessageActions explicitly expand it again when the
+  // engineer leaves the journey for chat.
+  useEffect(() => {
+    // Collapse the sidebar on entry to the blocks screen and enable
+    // the hover-peek gate so the engineer can briefly hover the
+    // 56 px bar to expand it. The gate is mount-scoped — unmounting
+    // (Stage 4 chat handoff, navigate away, return to landing) clears
+    // it so the hover-expand never fires on chat or landing screens.
+    //
+    // The cleanup also restores SET_SIDEBAR(true). The journey is the
+    // only screen where the sidebar should be collapsed by default;
+    // every other screen (landing, chat, RCA, Gap Analysis, Ticket
+    // Filter, ServiceNow) expects the sidebar expanded. Without this
+    // restore, navigating away from the journey leaves the sidebar
+    // stuck in its collapsed-on-mount state.
+    //
+    // Stage 4's KB handoff and JourneyMessageActions both explicitly
+    // dispatch SET_SIDEBAR(true) themselves before unmounting; the
+    // cleanup's restore is idempotent in those paths and serves as a
+    // safety net for every other exit (Start new ticket, navigate to
+    // landing, escalate, etc.).
+    chatDispatch({ type: "SET_SIDEBAR", payload: false });
+    chatDispatch({ type: "SET_SIDEBAR_HOVER_PEEK", payload: true });
+    return () => {
+      chatDispatch({ type: "SET_SIDEBAR_HOVER_PEEK", payload: false });
+      chatDispatch({ type: "SET_SIDEBAR", payload: true });
+    };
+  }, [chatDispatch]);
 
   const [helpfulPerStage, setHelpfulPerStage] = useState({});
   // Sprint 13.19 — Stage 3 checkbox state lifted here so Stage 5's
@@ -450,8 +508,8 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
   // ── Loading skeleton on first paint ──
   if (loading) {
     return (
-      <div className="flex-1 overflow-y-auto px-4 py-6 t-bg-primary">
-        <div className="w-full max-w-6xl mx-auto">
+      <div className="flex-1 overflow-y-auto py-6 t-bg-primary" style={{ paddingLeft: 8, paddingRight: 8 }}>
+        <div className="w-full mx-auto" style={{ maxWidth: "100%" }}>
           <div style={{ textAlign: "center", padding: 24 }}>
             <Spin />
             <span style={{ marginLeft: 12 }}>Assembling your resolution journey…</span>
@@ -464,8 +522,8 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
 
   if (error) {
     return (
-      <div className="flex-1 overflow-y-auto px-4 py-6 t-bg-primary">
-        <div className="w-full max-w-6xl mx-auto">
+      <div className="flex-1 overflow-y-auto py-6 t-bg-primary" style={{ paddingLeft: 8, paddingRight: 8 }}>
+        <div className="w-full mx-auto" style={{ maxWidth: "100%" }}>
           <Alert
             type="error"
             showIcon
@@ -481,8 +539,33 @@ export default function ResolutionJourney({ sessionId, onNewAlert }) {
   if (!initial) return null;
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 py-6 t-bg-primary">
-      <div className="w-full max-w-6xl mx-auto">
+    <div className="flex-1 overflow-y-auto py-6 t-bg-primary" style={{ paddingLeft: 8, paddingRight: 8 }}>
+      {/* Premium revamp — page-level Acadia watermark removed.
+          Each stage card now carries its OWN watermark
+          (CardWatermark inside Stage 2 / 3 / 4 / 5) so the brand
+          presence is per-block rather than behind everything at
+          once. The page background stays clean. */}
+
+      {/* Premium revamp — journey grid stretches to nearly the full
+          viewport width. The user explicitly asked for minimal side
+          gutters; we drop the max-width cap entirely (full width)
+          and leave only an 8 px page gutter on each side. */}
+      <div className="w-full mx-auto" style={{ maxWidth: "100%" }}>
+        {/* Premium revamp — top quick-action pill bar. Mirrors the
+            landing page bar so RCA / Gap Analysis / Ticket Filter /
+            Connect to ServiceNow stay one click away while the
+            engineer is in the journey (including the Best Historical
+            Match & Recommended Resolution panel). Each pill is
+            wired through AppLayout → LandingRouter → Tier1Workspace;
+            handlers are optional so legacy callers degrade silently. */}
+        <QuickActionsBar
+          onOpenRca={onOpenRca}
+          onOpenGapAnalysis={onOpenGapAnalysis}
+          onOpenTicketFilter={onOpenTicketFilter}
+          onOpenServiceNow={onOpenServiceNow}
+          marginBottom={20}
+        />
+
         {/* Sprint 12.8 — Preliminary Tier 1 Checks header. Static
             informational card; always rendered at the very top,
             ahead of every cohort-derived panel. Engineer's pre-flight

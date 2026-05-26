@@ -32,7 +32,6 @@ import {
   message,
 } from "antd";
 import {
-  ArrowLeftOutlined,
   FilterOutlined,
   LoadingOutlined,
   CheckCircleTwoTone,
@@ -40,6 +39,8 @@ import {
 } from "@ant-design/icons";
 
 import { filterTickets } from "./ticketFilterApi";
+import BackArrowButton from "../common/BackArrowButton";
+import useSidebarPeek from "../../hooks/useSidebarPeek";
 
 
 const { Title, Paragraph, Text } = Typography;
@@ -157,6 +158,12 @@ function TicketCard({ ticket }) {
 
 
 export default function TicketFilterFlow({ onReturnToStages }) {
+  // Collapse the sidebar + enable hover-peek while this flow is
+  // open, identical to the blocks screen. Hook restores the sidebar
+  // to its expanded default on unmount, so leaving Ticket Filter
+  // returns the engineer to landing/chat with an expanded sidebar.
+  useSidebarPeek();
+
   // Dropdown selections. Both default to undefined so the submit
   // button stays disabled until the user makes both choices.
   const [sla, setSla] = useState(undefined);
@@ -226,6 +233,20 @@ export default function TicketFilterFlow({ onReturnToStages }) {
       {/* Scrollable body */}
       <div className="flex-1 overflow-y-auto px-4 py-6">
         <div className="w-full max-w-5xl mx-auto">
+          {/* Top-left back affordance — quick bail-out path. The
+              bottom-right "Return to Stages" button below stays as
+              the deliberate-completion exit. Both wire into the
+              same onReturnToStages prop so they share behaviour. */}
+          <div style={{ marginBottom: 12 }}>
+            <BackArrowButton
+              onClick={() => {
+                if (typeof onReturnToStages === "function") {
+                  onReturnToStages();
+                }
+              }}
+            />
+          </div>
+
           {/* Header */}
           <div style={{ marginBottom: 16 }}>
             <Title level={3} style={{ marginBottom: 4 }}>
@@ -338,29 +359,6 @@ export default function TicketFilterFlow({ onReturnToStages }) {
             )
           ) : null}
         </div>
-      </div>
-
-      {/* Fixed bottom-right Return button — same UX as RCA / Gap */}
-      <div
-        style={{
-          padding: "12px 16px",
-          borderTop: "1px solid var(--border-color, #e5e7eb)",
-          display: "flex",
-          justifyContent: "flex-end",
-          flexShrink: 0,
-        }}
-      >
-        <Button
-          type="default"
-          icon={<ArrowLeftOutlined />}
-          onClick={() => {
-            if (typeof onReturnToStages === "function") {
-              onReturnToStages();
-            }
-          }}
-        >
-          Return to Stages
-        </Button>
       </div>
     </div>
   );

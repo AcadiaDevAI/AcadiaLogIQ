@@ -13,6 +13,7 @@ import React from "react";
 import { Button, Card, List, Tag, Tooltip, Typography } from "antd";
 import { MessageOutlined } from "@ant-design/icons";
 
+import CardWatermark from "./CardWatermark";
 import CorpusStatsTail from "./CorpusStatsTail";
 import DislikeButton from "./DislikeButton";
 import EscalateButton from "./EscalateButton";
@@ -114,8 +115,16 @@ export default function Stage0BestTicketDistillation({
   // ── Sparse case (cohort empty) ──
   if (data.sparse) {
     return (
-      <Card style={{ marginBottom: 16, borderLeft: "4px solid #6B6B6B" }}>
-        <Title level={5} style={{ marginTop: 0 }}>Best Historical Match & Recommended Resolution</Title>
+      <Card
+        style={{
+          marginBottom: 16,
+          borderLeft: "4px solid #6B6B6B",
+          position: "relative",
+          overflow: "hidden",
+        }}
+      >
+        <CardWatermark />
+        <Title level={5} style={{ marginTop: 0, position: "relative", zIndex: 1 }}>Best Historical Match & Recommended Resolution</Title>
         {/* Sprint 13.8 — profile_match line suppressed in the sparse
             case too, for parity with the main panel above. */}
         {/*
@@ -137,14 +146,26 @@ export default function Stage0BestTicketDistillation({
   const color = ringColor(data.clean_resolution_percent || 0);
 
   return (
-    <Card style={{ marginBottom: 16, borderLeft: `4px solid ${color}` }}>
+    <Card
+      style={{
+        marginBottom: 16,
+        borderLeft: `4px solid ${color}`,
+        // Premium revamp — per-card Acadia watermark, centered behind
+        // content. Card needs `position: relative` + `overflow: hidden`
+        // for the absolute-positioned <CardWatermark> to sit inside
+        // the card's rounded border.
+        position: "relative",
+        overflow: "hidden",
+      }}
+    >
+      <CardWatermark />
       {/* Sprint 13.8 — marginBottom bumped 4 → 16 so there is one
           line of breathing room between the title and the headline.
           The original 4px was set when `profile_match` rendered as a
           tag directly below the title (now commented out); without
           that intermediate element the title and headline collide
           visually. */}
-      <Title level={5} style={{ marginTop: 0, marginBottom: 16 }}>
+      <Title level={5} style={{ marginTop: 0, marginBottom: 16, position: "relative", zIndex: 1 }}>
         Best Historical Match & Recommended Resolution
       </Title>
 

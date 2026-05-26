@@ -115,63 +115,151 @@ def _load_or_cache(session_id: str) -> List[Dict[str, Any]]:
 
 
 # ─────────────────────────────────────────────────────────────
-# Sprint 13.24 PERF — session-keyed cache for the LLM-synthesised
-# consolidated ledger. The ledger is built from the cohort and is
-# DETERMINISTIC for a given cohort, so caching by session_id is
-# safe (cohort is fixed for the life of the session). Two routes
-# call `build_consolidated_ledger`:
-#   * /stage-3 (build_stage3 → builder)
+# Sprint 13.24 PERF / cross-session cache for the LLM-synthesised
+# consolidated ledger.
+#
+# WAS: keyed by session_id (per-session only — every fresh engineer
+#      on the same alert paid the ~5s LLM cost again).
+#
+# NOW: keyed by COHORT FINGERPRINT (a SHA-1 over the sorted incident
+#      numbers in the cohort). Why this works:
+#         * Same alert signature → same cohort tickets (deterministic
+#           cohort ranking).
+#         * Same cohort → same LLM input → same LLM output.
+#         * Therefore two sessions with the same alert share the
+#           cache. The second session is near-instant. Cost per
+#           "repeated ticket" drops to zero.
+#
+# Two routes call `build_consolidated_ledger`:
+#   * /stage-3 (build_stage3 → builder)        — the Guided
+#                                                Troubleshooting
+#                                                Workflow surface
 #   * /escalation-handoff-note (when stage_3 was visited)
-# Without this cache, the second route runs a duplicate ~5s LLM
-# call. With it, both routes share one warm result.
-# Bypass via `force=True` to support a Regenerate UI affordance.
+# With this cache, both routes share one warm result across sessions.
+#
+# Invalidation paths:
+#   * `force=True` from the UI Regenerate button → bypasses cache,
+#     stores the fresh result under the same fingerprint key.
+#   * Cohort change in /load_or_cache (re-ingest mid-session) →
+#     invalidate the OLD fingerprint entry; next call repopulates
+#     under the new fingerprint.
+#   * **Dislike of stage_3** (post_event hook) → invalidate the
+#     fingerprint entry so the next request triggers a fresh LLM
+#     synthesis. Honors the user's "regenerate on dislike" contract.
+#
+# 30-min TTL still applies as an upper bound so a stuck cache entry
+# can't outlive an ingestion change.
 # ─────────────────────────────────────────────────────────────
-_CONSOLIDATED_TTL_SECONDS = 1800   # 30 min — cohort doesn't change within a journey
+_CONSOLIDATED_TTL_SECONDS = 1800   # 30 min upper bound
 _CONSOLIDATED_CACHE_MAX = 256
+# Map: cohort_fingerprint (sha1 hex) → (expires_at_epoch, (steps, used_fallback))
 _consolidated_cache: "OrderedDict[str, Tuple[float, Tuple[List[Any], bool]]]" = OrderedDict()
 
 
-def _consolidated_get(session_id: str):
-    entry = _consolidated_cache.get(session_id)
+def _compute_cohort_fingerprint(cohort: List[Dict[str, Any]]) -> Optional[str]:
+    """Stable hash of the cohort's sorted incident numbers.
+
+    Two sessions with identical cohorts produce identical fingerprints —
+    that's the whole reason this cache key works across sessions.
+
+    Returns None on empty / structurally-broken cohorts so we never
+    cache a placeholder result under a meaningless key.
+    """
+    if not isinstance(cohort, list) or not cohort:
+        return None
+    nums: List[str] = []
+    for t in cohort:
+        if not isinstance(t, dict):
+            continue
+        n = (t.get("Metadata") or {}).get("Incident_Number")
+        if n:
+            nums.append(str(n))
+    if not nums:
+        return None
+    nums.sort()
+    import hashlib
+    return hashlib.sha1("|".join(nums).encode("utf-8")).hexdigest()
+
+
+def _consolidated_get_by_fp(fp: Optional[str]):
+    if not fp:
+        return None
+    entry = _consolidated_cache.get(fp)
     if not entry:
         return None
     expires_at, payload = entry
     if time.time() >= expires_at:
-        _consolidated_cache.pop(session_id, None)
+        _consolidated_cache.pop(fp, None)
         return None
-    _consolidated_cache.move_to_end(session_id)
+    _consolidated_cache.move_to_end(fp)
     return payload
 
 
-def _consolidated_put(session_id: str, payload):
-    _consolidated_cache[session_id] = (
-        time.time() + _CONSOLIDATED_TTL_SECONDS, payload,
-    )
-    _consolidated_cache.move_to_end(session_id)
+def _consolidated_put_by_fp(fp: Optional[str], payload):
+    if not fp:
+        return  # never cache under an undefined key
+    _consolidated_cache[fp] = (time.time() + _CONSOLIDATED_TTL_SECONDS, payload)
+    _consolidated_cache.move_to_end(fp)
     while len(_consolidated_cache) > _CONSOLIDATED_CACHE_MAX:
         _consolidated_cache.popitem(last=False)
 
 
+def _consolidated_invalidate_by_fp(fp: Optional[str]) -> None:
+    if fp:
+        _consolidated_cache.pop(fp, None)
+
+
+def _consolidated_invalidate_by_cohort(cohort: List[Dict[str, Any]]) -> None:
+    """Convenience wrapper — compute the fingerprint from the cohort
+    and evict the matching entry. No-op when the cohort is empty."""
+    fp = _compute_cohort_fingerprint(cohort)
+    _consolidated_invalidate_by_fp(fp)
+
+
 def _consolidated_invalidate(session_id: str) -> None:
-    _consolidated_cache.pop(session_id, None)
+    """Legacy signature kept for the existing call site in
+    `_load_or_cache`. Resolves the session's cached cohort (already
+    sitting in `_cohort_cache` because the caller just put it there)
+    → fingerprint → eviction.
+
+    No-op if the cohort isn't cached (rare; the caller paths always
+    populate `_cohort_cache` before calling us).
+    """
+    cohort = _cache_get(session_id)
+    if cohort is None:
+        return
+    _consolidated_invalidate_by_cohort(cohort)
 
 
 def get_or_compute_consolidated_ledger(
-    session_id: str,
+    session_id: str,                 # kept for log-correlation only
     cohort: List[Dict[str, Any]],
     *,
     force: bool = False,
 ):
     """Cache-aware wrapper around `build_consolidated_ledger`.
+
     Returns the same ``(steps, used_fallback)`` tuple the underlying
-    builder returns.
+    builder returns. Cache key is the cohort fingerprint, so two
+    sessions with the same alert (→ same cohort) share the LLM
+    result. `session_id` is preserved in the signature for
+    log-correlation and call-site back-compat.
     """
+    fp = _compute_cohort_fingerprint(cohort)
     if not force:
-        cached = _consolidated_get(session_id)
+        cached = _consolidated_get_by_fp(fp)
         if cached is not None:
+            logger.info(
+                "[journey.consolidated] cache HIT sid=%s fp=%s",
+                session_id, (fp[:10] if fp else None),
+            )
             return cached
+    logger.info(
+        "[journey.consolidated] cache MISS sid=%s fp=%s force=%s — LLM call",
+        session_id, (fp[:10] if fp else None), force,
+    )
     payload = build_consolidated_ledger(cohort)
-    _consolidated_put(session_id, payload)
+    _consolidated_put_by_fp(fp, payload)
     return payload
 
 
@@ -743,6 +831,37 @@ async def post_event(
         event_type=req.event_type,
         payload=req.payload,
     )
+
+    # ─── Cache invalidation on Stage-3 dislike ─────────────────────
+    # When the engineer clicks Dislike on the Guided Troubleshooting
+    # Workflow (stage_3), evict the cohort-keyed consolidated-ledger
+    # cache so the next request triggers a fresh LLM synthesis. Honors
+    # the contract: "cache by default, regenerate on dislike."
+    #
+    # We resolve the cohort via `_load_or_cache` (cached if still
+    # warm, fresh from DB if TTL expired) so the fingerprint lookup
+    # is reliable even on a long-running session that already evicted
+    # its cohort cache entry.
+    #
+    # Failure-open: any error here just leaves the cache as-is. The
+    # telemetry write above already succeeded; this is an optional
+    # side-effect.
+    if req.event_type == "disliked_clicked" and req.stage == "stage_3":
+        try:
+            cohort = _load_or_cache(session_id)
+            _consolidated_invalidate_by_cohort(cohort)
+            logger.info(
+                "[journey.event] stage_3 dislike → consolidated cache invalidated "
+                "sid=%s cohort_size=%d",
+                session_id, len(cohort) if isinstance(cohort, list) else 0,
+            )
+        except Exception as exc:
+            # eslint-style: failure must not break the telemetry write
+            logger.warning(
+                "[journey.event] stage_3 dislike-invalidate failed sid=%s: %s",
+                session_id, exc,
+            )
+
     return JourneyEventResponse(ok=bool(ok))
 
 
