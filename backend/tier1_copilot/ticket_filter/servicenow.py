@@ -28,6 +28,7 @@ Failure modes — always surface, never swallow
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 import socket
@@ -36,7 +37,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Tuple
 from xml.etree import ElementTree as ET
 
 logger = logging.getLogger("acadia-log-iq")
@@ -233,6 +234,83 @@ def _xml_element_to_dict(element: ET.Element) -> Any:
     return result
 
 
+def _parse_servicenow_body(
+    body: bytes,
+    content_type: str,
+    status: int,
+    instance_url: str,
+) -> Any:
+    """Parse a ServiceNow Table-API response body — XML, JSON, or fail loudly.
+
+    ServiceNow Personal Developer Instances ignore the ``Accept`` header
+    we send and answer in JSON by default. When the instance is asleep
+    or the request hit a login redirect, the body is HTML — neither
+    XML nor JSON. This helper:
+
+      1. Picks JSON or XML first based on the Content-Type header,
+         then falls back to the other if the preferred parse fails.
+      2. On total failure, raises ``ServiceNowAPIError`` with a real
+         body snippet so the operator can see *what* came back
+         (hibernation page, HTML error, garbage, …) without digging
+         through logs.
+
+    Returns a dict (or whatever the parse yields) — caller normalises
+    the ``result`` wrapper into the incidents list afterwards.
+    """
+    body_text = (body or b"").decode("utf-8", errors="replace")
+    body_len = len(body_text)
+    snippet = body_text.strip()[:400]
+
+    is_json_hint = "json" in content_type
+    is_xml_hint = "xml" in content_type
+
+    # Order of attempts: prefer whatever the Content-Type suggests,
+    # fall back to the other parser if the preferred one chokes.
+    attempts: Tuple[str, ...] = (
+        ("json", "xml") if is_json_hint
+        else ("xml", "json") if is_xml_hint
+        else ("json", "xml")  # unknown / empty → try JSON first (PDI default)
+    )
+
+    last_err: Exception = None  # type: ignore[assignment]
+    for kind in attempts:
+        try:
+            if kind == "json":
+                obj = json.loads(body_text)
+                logger.info(
+                    "[servicenow] parsed JSON response (ct=%r, status=%s, len=%d)",
+                    content_type, status, body_len,
+                )
+                # ServiceNow's JSON shape is {"result": ...} — return as-is;
+                # the caller's "result" normalisation handles both shapes.
+                return obj
+            if kind == "xml":
+                root = ET.fromstring(body_text)
+                logger.info(
+                    "[servicenow] parsed XML response (ct=%r, status=%s, len=%d)",
+                    content_type, status, body_len,
+                )
+                return _xml_element_to_dict(root)
+        except (json.JSONDecodeError, ET.ParseError) as exc:
+            last_err = exc
+            continue
+
+    # Both parsers failed. Surface the body snippet so we know whether
+    # we got HTML (hibernation / login redirect) or genuine garbage.
+    logger.warning(
+        "[servicenow] could not parse response as JSON or XML "
+        "(ct=%r, status=%s, len=%d) — body snippet: %r",
+        content_type, status, body_len, snippet,
+    )
+    raise ServiceNowAPIError(
+        f"ServiceNow response was not parseable as XML or JSON. "
+        f"HTTP {status}, Content-Type={content_type!r}, "
+        f"body[:200]={snippet[:200]!r}. "
+        f"(Common cause: the PDI {instance_url} is hibernating — "
+        f"open it in a browser to wake it up.)"
+    ) from last_err
+
+
 def fetch_priority_1_incidents() -> Dict[str, Any]:
     """Hit ``GET /api/now/table/incident?priority=1`` and return parsed JSON.
 
@@ -291,6 +369,7 @@ def fetch_priority_1_incidents() -> Dict[str, Any]:
     try:
         with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
             status = response.status
+            content_type = (response.headers.get("Content-Type") or "").lower()
             body = response.read()
     except urllib.error.HTTPError as exc:
         # Read body for diagnostics but DO NOT log the Authorization header.
@@ -314,16 +393,11 @@ def fetch_priority_1_incidents() -> Dict[str, Any]:
             f"Could not reach ServiceNow at {instance_url}. {exc}"
         ) from exc
 
-    try:
-        root = ET.fromstring(body)
-    except ET.ParseError as exc:
-        logger.warning(
-            "[servicenow] XML parse failed (status=%s len=%d): %s",
-            status, len(body or b""), exc,
-        )
-        raise ServiceNowAPIError("ServiceNow response was not valid XML.") from exc
-
-    parsed = _xml_element_to_dict(root)
+    # ── Parse the response body — XML or JSON, ServiceNow can return
+    #    either. PDIs default to JSON regardless of the Accept header
+    #    we sent, and hibernation / login redirects come back as HTML.
+    #    Be liberal in what we accept; be explicit when we can't parse.
+    parsed = _parse_servicenow_body(body, content_type, status, instance_url)
 
     # Normalise the <result> wrapper into a flat list so the frontend
     # never has to branch on "single vs many" incidents.
