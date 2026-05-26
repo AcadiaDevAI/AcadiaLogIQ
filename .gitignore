@@ -32,7 +32,13 @@ backend/env.bvk
 Thumbs.db
 
 # Application data
-uploads/
+# Anchor to repo-root so this only ignores the runtime file-storage
+# directory (./uploads/) and NOT the Python package backend/uploads/
+# (which holds schemas.py / service.py / keys.py and must ship to
+# the deployed image). Without the leading slash, `uploads/` matched
+# `backend/uploads/` too and the package never reached git → EC2
+# deploys failed at import time with ModuleNotFoundError.
+/uploads/
 data/
 *.db
 *.sqlite
@@ -56,3 +62,4 @@ yarn-error.log*
 *.bak
 
 .claude/settings.local.json
+backend/uploads/
