@@ -10,9 +10,12 @@ services:
       - ./backend/.env
     environment:
       - APP_ROLE=api
-      - STORAGE_TYPE=local
-      - LOCAL_STORAGE_PATH=/app/uploads
-      - UPLOAD_DIR=/app/uploads
+      # Storage backend — S3 presigned PUT pipeline. The bucket name
+      # (S3_UPLOAD_BUCKET) and region (AWS_REGION) MUST be set in
+      # ./backend/.env. The legacy LOCAL_STORAGE_PATH / UPLOAD_DIR
+      # values are intentionally removed; the local-disk path is no
+      # longer used by the application.
+      - STORAGE_TYPE=s3
       - PYTHONUNBUFFERED=1
       # Phase 2 — gunicorn settings. Tune in production via the ECS
       # task definition; defaults here are sensible for an EC2 t3.medium.
@@ -93,8 +96,9 @@ services:
       # Restrict this worker to report kinds. ingest_document goes
       # to the ingest-worker service below.
       - WORKER_KINDS=rca_customer,rca_internal,gap_analysis_gap,gap_analysis_pm
-      - STORAGE_TYPE=local
-      - LOCAL_STORAGE_PATH=/app/uploads
+      # S3 storage — same configuration as the api service. The bucket
+      # name + region come from ./backend/.env.
+      - STORAGE_TYPE=s3
       - PYTHONUNBUFFERED=1
       # Worker pools size separately — they hold a DB connection
       # only briefly per job and don't compete with the API tier.
@@ -140,8 +144,9 @@ services:
     environment:
       - APP_ROLE=worker
       - WORKER_KINDS=ingest_document
-      - STORAGE_TYPE=local
-      - LOCAL_STORAGE_PATH=/app/uploads
+      # S3 storage — ingest worker reads the uploaded object from S3
+      # using the same provider as the api/worker services.
+      - STORAGE_TYPE=s3
       - PYTHONUNBUFFERED=1
       - DB_POOL_SIZE=2
       - DB_MAX_OVERFLOW=2
