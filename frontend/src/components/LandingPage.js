@@ -375,14 +375,12 @@ export default function LandingPage({
   }, [dispatch]);
 
   // Two-step landing. The new "entry" view is the pre-landing tile
-  // grid (RCA / Gap / Ticket Filter / Connect to ServiceNow /
-  // Proactive-Reactive). Picking Proactive-Reactive + Continue
-  // advances to the existing "mode" view (Troubleshoot / Ticket
-  // handling / Escalate / Vendor-OEM); the other four entries fire
-  // their corresponding popup handler — the same handler the top
-  // QuickActionsBar pill would have fired.
+  // grid (RCA / Gap / Proactive-Reactive). Clicking a tile fires its
+  // action immediately — no Continue button. Proactive/Reactive
+  // routes to the Tier-1 intake form; the other tiles open their
+  // corresponding popup (the same popup the top QuickActionsBar pill
+  // would have opened).
   const [view, setView] = useState("entry");
-  const [entryChoice, setEntryChoice] = useState(null);
 
   const [mode, setMode] = useState(null);
   const [subMode, setSubMode] = useState(null);
@@ -391,16 +389,15 @@ export default function LandingPage({
   const needsSubMode = mode === "troubleshooting";
   const canContinue = !!mode && (!needsSubMode || !!subMode);
 
-  const entryCanContinue = !!entryChoice;
   const entryHandlers = {
     onOpenRca,
     onOpenGapAnalysis,
     onOpenTicketFilter,
     onOpenServiceNow,
   };
-  const handleEntryContinue = () => {
-    if (!entryCanContinue) return;
-    if (entryChoice === "proactive_reactive") {
+  const handleEntrySelect = (opt) => {
+    if (!opt) return;
+    if (opt.value === "proactive_reactive") {
       // Hand off to the router so it can swap to the Tier-1 intake
       // form (the Proactive / Reactive screen). Fall back to the
       // in-page mode-picker view only when the router didn't wire
@@ -412,8 +409,7 @@ export default function LandingPage({
       }
       return;
     }
-    const opt = ENTRY_OPTIONS.find((o) => o.value === entryChoice);
-    const fn = opt && opt.handlerProp ? entryHandlers[opt.handlerProp] : null;
+    const fn = opt.handlerProp ? entryHandlers[opt.handlerProp] : null;
     if (typeof fn === "function") {
       fn();
     } else {
@@ -449,7 +445,6 @@ export default function LandingPage({
   // tile grid below, so showing them at the top too would be
   // duplicate. All other screens still get the QuickActionsBar.
   if (view === "entry") {
-    const selectedOpt = ENTRY_OPTIONS.find((o) => o.value === entryChoice);
     return (
       <div
         style={{
@@ -529,64 +524,11 @@ export default function LandingPage({
                   <ModePill
                     key={opt.value}
                     option={opt}
-                    active={entryChoice === opt.value}
-                    onClick={() => setEntryChoice(opt.value)}
+                    active={false}
+                    onClick={() => handleEntrySelect(opt)}
                     large
                   />
                 ))}
-              </div>
-
-              {/* Description of the currently selected entry */}
-              {entryChoice && (
-                <p
-                  style={{
-                    fontFamily: "var(--font-body)",
-                    fontSize: 13.5,
-                    color: "var(--text-muted)",
-                    margin: "0 0 18px",
-                    lineHeight: 1.5,
-                  }}
-                >
-                  {selectedOpt?.sub}
-                </p>
-              )}
-
-              {/* CTA row */}
-              <div
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                  gap: 12,
-                  paddingTop: 4,
-                  borderTop: "1px solid var(--border)",
-                  marginTop: 12,
-                }}
-              >
-                <div
-                  style={{
-                    fontFamily: "var(--font-mono)",
-                    fontSize: 11,
-                    color: "var(--text-dim)",
-                    textTransform: "uppercase",
-                    letterSpacing: "0.1em",
-                    paddingTop: 16,
-                  }}
-                >
-                  {entryCanContinue ? "Ready" : "Pick an entry to continue"}
-                </div>
-                <div style={{ paddingTop: 12 }}>
-                  <Button
-                    type="primary"
-                    size="large"
-                    onClick={handleEntryContinue}
-                    disabled={!entryCanContinue}
-                    icon={<ArrowRightOutlined />}
-                    iconPosition="end"
-                  >
-                    Continue
-                  </Button>
-                </div>
               </div>
             </div>
           </div>
