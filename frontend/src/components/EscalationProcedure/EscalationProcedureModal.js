@@ -43,6 +43,20 @@ const { Paragraph, Text } = Typography;
 const { Dragger } = Upload;
 
 
+// Strip the upload-pipeline job-id prefix (32-hex or UUID-with-hyphens
+// followed by "_") and any path segments so the picker shows a clean
+// "Escalation_Procedures_KB.pdf" instead of
+// "4c28ee09e4cf4fd7bae1400bb56bce0c_Escalation_Procedures_KB.pdf"
+// or "tenants/foo/4c28.../Escalation_Procedures_KB.pdf".
+const prettifyKbFilename = (raw) => {
+  if (!raw) return "—";
+  const tail = String(raw).split("/").pop() || raw;
+  return tail
+    .replace(/^[0-9a-f]{32}_/i, "")
+    .replace(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_/i, "");
+};
+
+
 export default function EscalationProcedureModal({ open, onClose }) {
   const [loadingStatus, setLoadingStatus] = useState(false);
   const [status, setStatus] = useState(null);
@@ -276,8 +290,12 @@ export default function EscalationProcedureModal({ open, onClose }) {
           }}
         >
           <Text type="secondary" style={{ flex: 1, minWidth: 0 }}>
-            KB file: <Text code>{status?.filename || "—"}</Text> · Sections
-            detected: <Text code>{Object.keys(sectionsReady).length}</Text>
+            KB file:{" "}
+            <Text code title={status?.filename || ""}>
+              {prettifyKbFilename(status?.filename)}
+            </Text>{" "}
+            · Sections detected:{" "}
+            <Text code>{Object.keys(sectionsReady).length}</Text>
           </Text>
           <Tooltip title="Delete KB file">
             <Button
