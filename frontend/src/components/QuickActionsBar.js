@@ -28,6 +28,7 @@ import {
   ProfileOutlined,
   FileSearchOutlined,
   ApiOutlined,
+  AlertOutlined,
 } from "@ant-design/icons";
 
 
@@ -55,6 +56,18 @@ const QUICK_ACTIONS = [
       ring: "rgba(167, 139, 250, 0.45)",
     },
     handlerProp: "onOpenGapAnalysis",
+  },
+  {
+    key: "escalation_procedure",
+    label: "Escalation Procedure",
+    icon: <AlertOutlined />,
+    accent: {
+      c: "#F87171",
+      soft: "rgba(248, 113, 113, 0.14)",
+      hoverFill: "rgba(248, 113, 113, 0.28)",
+      ring: "rgba(248, 113, 113, 0.45)",
+    },
+    handlerProp: "onOpenEscalationProcedure",
   },
   // Sprint 13.36 — Ticket Filter and Connect to ServiceNow pills
   // suppressed at the user's request. Code preserved so the entries

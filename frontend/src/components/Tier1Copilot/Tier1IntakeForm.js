@@ -89,6 +89,7 @@ function SourceAwareIntake(props) {
         <QuickActionsBar
           onOpenRca={props.onOpenRca}
           onOpenGapAnalysis={props.onOpenGapAnalysis}
+          onOpenEscalationProcedure={props.onOpenEscalationProcedure}
           onOpenTicketFilter={props.onOpenTicketFilter}
           onOpenServiceNow={props.onOpenServiceNow}
           marginBottom={16}

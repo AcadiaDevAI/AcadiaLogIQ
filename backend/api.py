@@ -640,6 +640,19 @@ except Exception as _jobs_exc:
         _jobs_exc,
     )
 
+# Escalation Procedures KB — independent feature, lives at /escalation.
+# One consolidated PDF, four section-scoped chatbots. Zero overlap with
+# the main chat / RCA / Gap pipeline.
+try:
+    from backend.escalation.routes import router as _escalation_router
+    app.include_router(_escalation_router)
+    logger.info("[escalation] router mounted at /escalation")
+except Exception as _escalation_exc:
+    logger.warning(
+        "[escalation] failed to mount router (module disabled): %s",
+        _escalation_exc,
+    )
+
 # Ticket Filter — independent feature, lives at /ticket-filter.
 # Two-field dropdown filter (SLA_Target_Met + Resolution_Quality_Score)
 # over historical tickets. Zero dependency on RCA / Gap / Chat code;

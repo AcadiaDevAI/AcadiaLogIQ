@@ -23,6 +23,8 @@ import GapAnalysisFlow from "./components/GapAnalysis/GapAnalysisFlow";
 import GapAnalysisEntryModal from "./components/GapAnalysis/GapAnalysisEntryModal";
 import TicketFilterFlow from "./components/TicketFilter/TicketFilterFlow";
 import ServiceNowFlow from "./components/ServiceNow/ServiceNowFlow";
+import EscalationProcedureModal from "./components/EscalationProcedure/EscalationProcedureModal";
+import EscalationChatWidget from "./components/EscalationProcedure/EscalationChatWidget";
 
 function BuildStamp() {
   return (
@@ -238,6 +240,15 @@ function AppLayout() {
     setServiceNowOpen(false);
   }, [restoreOrigin]);
 
+  // Escalation Procedure — opens the radio-picker modal. The modal
+  // hands off to the floating EscalationChatWidget (mounted globally
+  // below) via the `acadia:open-escalation-chat` window event so the
+  // chat panel persists even after the modal closes.
+  const [escalationModalOpen, setEscalationModalOpen] = useState(false);
+  const handleOpenEscalationProcedure = useCallback(() => {
+    setEscalationModalOpen(true);
+  }, []);
+
   const handleReturnFromGapAnalysis = useCallback(() => {
     // Mirror RCA's "Return to Stages" — drop the user on the
     // landing intake form (Proactive / Reactive picker). Reset all
@@ -357,6 +368,7 @@ function AppLayout() {
           <LandingRouter
             onOpenRca={() => setRcaModalOpen(true)}
             onOpenGapAnalysis={() => setGapModalOpen(true)}
+            onOpenEscalationProcedure={handleOpenEscalationProcedure}
             onOpenTicketFilter={handleOpenTicketFilter}
             onOpenServiceNow={handleOpenServiceNow}
           />
@@ -364,6 +376,15 @@ function AppLayout() {
           <ChatArea />
         )}
       </div>
+
+      {/* Escalation Procedure picker (modal) + the floating chat widget
+          it hands off to. The widget is mounted at the app shell so it
+          persists across screen changes (landing → chat → journey). */}
+      <EscalationProcedureModal
+        open={escalationModalOpen}
+        onClose={() => setEscalationModalOpen(false)}
+      />
+      <EscalationChatWidget />
 
       {/* BuildStamp watermark removed at user request — the component
           definition above is left in place for diagnostic reuse but

@@ -29,6 +29,7 @@ import {
   ProfileOutlined,
   FileSearchOutlined,
   ThunderboltOutlined,
+  AlertOutlined,
 } from "@ant-design/icons";
 import { useChat } from "../hooks/ChatContext";
 import { setSessionMode } from "../services/api";
@@ -95,6 +96,14 @@ const ENTRY_OPTIONS = [
     icon: <ProfileOutlined />,
     accent: "var(--aurora-3)",
     handlerProp: "onOpenGapAnalysis",
+  },
+  {
+    value: "escalation_procedure",
+    label: "Escalation Procedure",
+    sub: "Review the Tier-1 to Tier-2 escalation workflow",
+    icon: <AlertOutlined />,
+    accent: "var(--p2)",
+    handlerProp: "onOpenEscalationProcedure",
   },
   // Sprint 13.36 — Ticket Filter and Connect to ServiceNow tiles
   // suppressed at the user's request. Code preserved here so the
@@ -351,6 +360,7 @@ export default function LandingPage({
   // Each is optional — pill renders only when its handler is provided.
   onOpenRca,
   onOpenGapAnalysis,
+  onOpenEscalationProcedure,
   onOpenTicketFilter,
   onOpenServiceNow,
   // Wired from LandingRouter — fires when the user picks the
@@ -392,6 +402,7 @@ export default function LandingPage({
   const entryHandlers = {
     onOpenRca,
     onOpenGapAnalysis,
+    onOpenEscalationProcedure,
     onOpenTicketFilter,
     onOpenServiceNow,
   };
@@ -578,6 +589,7 @@ export default function LandingPage({
         <QuickActionsBar
           onOpenRca={onOpenRca}
           onOpenGapAnalysis={onOpenGapAnalysis}
+          onOpenEscalationProcedure={onOpenEscalationProcedure}
           onOpenTicketFilter={onOpenTicketFilter}
           onOpenServiceNow={onOpenServiceNow}
         />

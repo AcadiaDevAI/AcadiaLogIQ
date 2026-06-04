@@ -151,6 +151,7 @@ export default function ResolutionJourney({
   // is in the journey.
   onOpenRca,
   onOpenGapAnalysis,
+  onOpenEscalationProcedure,
   onOpenTicketFilter,
   onOpenServiceNow,
 }) {
@@ -561,6 +562,7 @@ export default function ResolutionJourney({
         <QuickActionsBar
           onOpenRca={onOpenRca}
           onOpenGapAnalysis={onOpenGapAnalysis}
+          onOpenEscalationProcedure={onOpenEscalationProcedure}
           onOpenTicketFilter={onOpenTicketFilter}
           onOpenServiceNow={onOpenServiceNow}
           marginBottom={20}

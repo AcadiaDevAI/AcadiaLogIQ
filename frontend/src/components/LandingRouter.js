@@ -30,6 +30,7 @@ export default function LandingRouter({
   // render those affordances.
   onOpenRca,
   onOpenGapAnalysis,
+  onOpenEscalationProcedure,
   onOpenTicketFilter,
   onOpenServiceNow,
 } = {}) {
@@ -169,6 +170,7 @@ export default function LandingRouter({
           // handlers are passed.
           onOpenRca={onOpenRca}
           onOpenGapAnalysis={onOpenGapAnalysis}
+          onOpenEscalationProcedure={onOpenEscalationProcedure}
           onOpenTicketFilter={onOpenTicketFilter}
           onOpenServiceNow={onOpenServiceNow}
         />
@@ -189,6 +191,7 @@ export default function LandingRouter({
           // Tier1IntakeForm).
           onOpenRca={onOpenRca}
           onOpenGapAnalysis={onOpenGapAnalysis}
+          onOpenEscalationProcedure={onOpenEscalationProcedure}
           onOpenTicketFilter={onOpenTicketFilter}
           onOpenServiceNow={onOpenServiceNow}
         />
@@ -270,6 +273,7 @@ export default function LandingRouter({
     <LandingPage
       onOpenRca={onOpenRca}
       onOpenGapAnalysis={onOpenGapAnalysis}
+      onOpenEscalationProcedure={onOpenEscalationProcedure}
       onOpenTicketFilter={onOpenTicketFilter}
       onOpenServiceNow={onOpenServiceNow}
       // Picking "Proactive / Reactive" on the entry-tile view +

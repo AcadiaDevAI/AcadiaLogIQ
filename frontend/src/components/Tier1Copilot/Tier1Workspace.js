@@ -48,6 +48,7 @@ function Tier1WorkspaceInner({
   // handler is missing.
   onOpenRca,
   onOpenGapAnalysis,
+  onOpenEscalationProcedure,
   onOpenTicketFilter,
   onOpenServiceNow,
 }) {
@@ -263,6 +264,7 @@ function Tier1WorkspaceInner({
             onNewAlert={onNewAlert}
             onOpenRca={onOpenRca}
             onOpenGapAnalysis={onOpenGapAnalysis}
+            onOpenEscalationProcedure={onOpenEscalationProcedure}
             onOpenTicketFilter={onOpenTicketFilter}
             onOpenServiceNow={onOpenServiceNow}
           />
