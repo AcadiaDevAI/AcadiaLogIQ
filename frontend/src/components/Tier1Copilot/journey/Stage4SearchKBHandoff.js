@@ -140,16 +140,28 @@ export default function Stage4SearchKBHandoff({
         });
       }
 
-      // Sprint 10.6 §3 — auto-fire /ask exactly like regular chat
-      // would. The handoff already persisted the user turn; we now
-      // generate the assistant turn through the SAME pipeline regular
-      // chat uses (no allowed_doc_kinds, no filter). Whatever
-      // retrieval finds — the engineer's PDF, SOPs, KBs — surfaces
-      // as a grounded answer. If retrieval finds nothing, /ask's
-      // natural low-confidence reply handles it gracefully.
+      // Sprint 10.6 §3 — auto-fire /ask through the same pipeline
+      // regular chat uses, BUT with retrieval pinned to KB-style
+      // chunks (PDF / DOCX / SOP / runbook). The previous behaviour
+      // ("no allowed_doc_kinds, no filter") leaked ticket JSON into
+      // KB-search answers because every upload was being mis-tagged
+      // as doc_kind="ticket". With content-aware doc_kind detection
+      // in the ingestion path, KB uploads now land as doc_kind="kb"
+      // and we can safely scope retrieval to those.
+      //
+      // If the backend handoff returned an explicit allowed_doc_kinds
+      // for this stage, honor it — otherwise default to ["kb"].
+      const handoffDocKinds = Array.isArray(data.allowed_doc_kinds) && data.allowed_doc_kinds.length
+        ? data.allowed_doc_kinds
+        : ["kb"];
       dispatch({ type: "SET_LOADING", payload: true });
       try {
-        const askRes = await askQuestion(data.prefilled_message, chat_session_id);
+        const askRes = await askQuestion(
+          data.prefilled_message,
+          chat_session_id,
+          null,
+          { allowedDocKinds: handoffDocKinds },
+        );
         const askData = askRes.data;
         dispatch({
           type: "ADD_ASSISTANT_MESSAGE",

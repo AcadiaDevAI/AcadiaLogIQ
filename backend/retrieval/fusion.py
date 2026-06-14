@@ -148,7 +148,7 @@ def fuse_results(
         results.append((cid, d["text"], d["metadata"], scores[cid]))
 
     logger.debug(
-        "Fusion complete: vector=%d bm25=%d keyword=%d metadata=%d → fused=%d "
+        "Fusion complete: vector=%d bm25=%d keyword=%d metadata=%d -> fused=%d "
         "(weights: v=%.2f b=%.2f k=%.2f, strategy=%s)",
         len(vector_results), len(bm25_results), len(keyword_results),
         len(metadata_results or []), len(results),

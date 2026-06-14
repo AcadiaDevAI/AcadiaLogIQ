@@ -180,6 +180,23 @@ def _extract_identifiers_hotfix(query: str) -> List[Tuple[str, str]]:
                     )
                     covered.append(span)  # claim span so other patterns don't re-tag
                     continue
+            # Domain-phrase guard: real identifiers (INC-10001, BGP-5-ADJCHANGE,
+            # CHG-2024-001) contain at least one digit. Hyphenated pure-letter
+            # phrases (BROADCAST-STORM, CRYPTO-ENGINE, MAC-FLAP) are domain
+            # terminology, NOT identifiers — letting them through causes the
+            # orchestrator to short-circuit to "identifier_not_found" before
+            # vector/BM25 search ever runs, silently dropping legitimate KB
+            # queries. Only the generic 'identifier' pattern is permissive
+            # enough to match these; 'numeric_id' and 'ticket_like' already
+            # require digits.
+            if id_type == "identifier" and not any(ch.isdigit() for ch in canonical):
+                logger.info(
+                    "[id_extract] dropping %r — no digits (looks like a "
+                    "domain phrase, not an identifier)",
+                    canonical,
+                )
+                covered.append(span)
+                continue
             seen.add(key)
             out.append((canonical, id_type))
             covered.append(span)
@@ -194,6 +211,22 @@ def _extract_identifiers_hotfix(query: str) -> List[Tuple[str, str]]:
             continue
         try:
             if is_identifier_type(canon):
+                # Same domain-phrase guard as the regex path (see lines
+                # ~190-200): real record identifiers carry at least one
+                # digit. All-caps domain tokens that happen to live in
+                # the learned vocabulary (AS_PATH, BGP_NEIGHBOR, etc.)
+                # otherwise trigger the exact-match short-circuit and
+                # return 0 or sparse LIKE-scan hits — silently downgrading
+                # the answer for natural-language KB questions like
+                # "what does AS_PATH mean?". Skipping pure-letter tokens
+                # here lets the hybrid pipeline take over for those.
+                if not any(ch.isdigit() for ch in canon):
+                    logger.info(
+                        "[id_extract] vocab path dropping %r — no digits "
+                        "(looks like a domain term, not a record id)",
+                        canon,
+                    )
+                    continue
                 out.append((canon, "vocab_identifier"))
         except Exception:
             continue
@@ -647,7 +680,7 @@ def retrieve(
                     "timing_total_ms": elapsed_ms,
                 }
                 logger.info(
-                    "Retrieval short-circuit: identifier_exact for %s → %d chunks (%dms)",
+                    "Retrieval short-circuit: identifier_exact for %s -> %d chunks (%dms)",
                     requested_identifiers, len(ranked), elapsed_ms,
                 )
                 return result
@@ -716,33 +749,73 @@ def retrieve(
                         "timing_total_ms": elapsed_ms,
                     }
                     logger.info(
-                        "Retrieval short-circuit: %s for %s → %d chunks (%dms)",
+                        "Retrieval short-circuit: %s for %s -> %d chunks (%dms)",
                         mode_label, requested_identifiers, len(ranked), elapsed_ms,
                     )
                     return result
 
-                result.intent = QueryIntent(
-                    strategy="keyword",
-                    reason=f"identifier not found: {requested_identifiers}",
+                # ────────────────────────────────────────────────────────
+                # Natural-language fall-through:
+                # ────────────────────────────────────────────────────────
+                # If the query also reads like a natural-language question
+                # (contains interrogatives or explanatory verbs), DO NOT
+                # declare identifier_not_found — the user probably mentioned
+                # an identifier-shaped term incidentally ("how is BGP-5
+                # handled in the SOP?") and still wants a real answer.
+                # Falling through to the hybrid pipeline gives them one;
+                # the previous behaviour silently returned "not found".
+                #
+                # When the query is JUST an identifier ("INC-10001"), we
+                # keep the original short-circuit — the user is looking
+                # up a specific record and an exact-match miss is the
+                # honest answer.
+                lowered = (raw_query or query or "").lower()
+                _NL_HINTS = (
+                    "what", "how", "why", "when", "which", "where", "who",
+                    "explain", "describe", "list", "show", "tell me", "find",
+                    "summarize", "summarise", "compare", "propose", "sop",
+                    "warning", "procedure", "steps", "guide",
                 )
-                result.ranked = []
-                elapsed_ms = int((time.perf_counter() - t_start) * 1000)
-                first_canonical = (
-                    requested_identifiers[0][0] if requested_identifiers else None
-                )
-                result.stats = {
-                    "search_mode": "identifier_not_found",
-                    "requested_identifiers": requested_identifiers,
-                    "requested_ticket_ids": requested_ticket_ids,
-                    "ticket_id": first_canonical,
-                    "matched_count": 0,
-                    "timing_total_ms": elapsed_ms,
-                }
-                logger.info(
-                    "Retrieval short-circuit: identifier_not_found for %s (%dms)",
-                    requested_identifiers, elapsed_ms,
-                )
-                return result
+                looks_like_question = any(hint in lowered for hint in _NL_HINTS)
+
+                if looks_like_question:
+                    logger.info(
+                        "[retrieve] identifier(s) %s not found, but query "
+                        "reads as natural language — falling through to "
+                        "hybrid pipeline instead of declaring not_found",
+                        requested_identifiers,
+                    )
+                    # Wipe the extracted identifiers so downstream channels
+                    # (vector, BM25, keyword, metadata) get the original
+                    # phrasing without an exact-match constraint hanging
+                    # over them. We intentionally let the code fall through
+                    # past the `return result` rather than recursing.
+                    requested_identifiers = []
+                    requested_ticket_ids = []
+                    # Continue to Step 1 below — DO NOT return here.
+                else:
+                    result.intent = QueryIntent(
+                        strategy="keyword",
+                        reason=f"identifier not found: {requested_identifiers}",
+                    )
+                    result.ranked = []
+                    elapsed_ms = int((time.perf_counter() - t_start) * 1000)
+                    first_canonical = (
+                        requested_identifiers[0][0] if requested_identifiers else None
+                    )
+                    result.stats = {
+                        "search_mode": "identifier_not_found",
+                        "requested_identifiers": requested_identifiers,
+                        "requested_ticket_ids": requested_ticket_ids,
+                        "ticket_id": first_canonical,
+                        "matched_count": 0,
+                        "timing_total_ms": elapsed_ms,
+                    }
+                    logger.info(
+                        "Retrieval short-circuit: identifier_not_found for %s (%dms)",
+                        requested_identifiers, elapsed_ms,
+                    )
+                    return result
 
     # =====================================================================
     # Step 1: Classify the query to determine search strategy
@@ -1036,7 +1109,7 @@ def retrieve(
     if _agg_intent_probe is not None:
         _rerank_cap = int(getattr(settings, "RERANK_TOP_K_AGGREGATION", 40))
         logger.info(
-            "[rerank] aggregation intent detected (op=%s) → cap raised to %d",
+            "[rerank] aggregation intent detected (op=%s) -> cap raised to %d",
             _agg_intent_probe.operation, _rerank_cap,
         )
 
@@ -1078,7 +1151,7 @@ def retrieve(
     }
 
     logger.info(
-        "Retrieval complete: strategy=%s vector=%d bm25=%d kw=%d meta=%d → fused=%d → reranked=%d (%dms)",
+        "Retrieval complete: strategy=%s vector=%d bm25=%d kw=%d meta=%d -> fused=%d -> reranked=%d (%dms)",
         intent.strategy,
         len(vector_results), len(bm25_results),
         len(keyword_results), len(metadata_results),

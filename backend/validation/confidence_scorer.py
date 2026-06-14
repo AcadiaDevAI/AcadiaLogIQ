@@ -171,7 +171,7 @@ def score_confidence(
     result.passed = final_score >= settings.VALIDATION_MIN_CONFIDENCE
 
     logger.info(
-        "Confidence: %.3f (ret=%.2f cov=%.2f gnd=%.2f con=%.2f pen=%.2f) → %s",
+        "Confidence: %.3f (ret=%.2f cov=%.2f gnd=%.2f con=%.2f pen=%.2f) -> %s",
         final_score, result.retrieval_score, result.coverage_score,
         result.grounding_score, result.consistency_score,
         total_penalty, "PASS" if result.passed else "FAIL",

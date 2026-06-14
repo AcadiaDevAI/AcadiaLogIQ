@@ -95,14 +95,14 @@ def resolve_mode(
     # MODE_AUTO — hybrid-first default
     # Gate 1: no sources → nothing to ground against, stay on hybrid.
     if source_count < 1:
-        return False, "mode=auto → hybrid (no sources available)"
+        return False, "mode=auto -> hybrid (no sources available)"
 
     # Gate 2: agent-eligible pattern is the strongest positive signal —
     # queries like "compare X and Y" or "walk me through" intrinsically
     # need multi-step reasoning even at low complexity scores.
     matched = _matched_agent_pattern(query)
     if matched:
-        return True, f"mode=auto → agents (pattern matched: '{matched}')"
+        return True, f"mode=auto -> agents (pattern matched: '{matched}')"
 
     # Gate 3: complexity classifier fallback — complex-tier queries with
     # a high score still escalate even without a pattern hit.
@@ -111,11 +111,11 @@ def resolve_mode(
         and complexity_score >= settings.AGENT_COMPLEXITY_THRESHOLD
     ):
         return True, (
-            f"mode=auto → agents (complex tier, score="
+            f"mode=auto -> agents (complex tier, score="
             f"{complexity_score:.3f} >= {settings.AGENT_COMPLEXITY_THRESHOLD})"
         )
 
     # Default — standard hybrid RAG handles the query.
     return False, (
-        f"mode=auto → hybrid (no agent-eligible pattern, tier={complexity_tier})"
+        f"mode=auto -> hybrid (no agent-eligible pattern, tier={complexity_tier})"
     )

@@ -44,14 +44,13 @@ logger = logging.getLogger("acadia-log-iq")
 router = APIRouter(prefix="/rca", tags=["rca"])
 
 
-# Sprint 13.32.8 — Output budgets for Claude 3.5 Haiku on Bedrock.
-# 3.5 Haiku caps server-side at 8192 output tokens. Customer-Facing
-# is short (400-600 words ≈ 800 tokens), so 2048 gives 2.5× headroom.
-# Internal is the long pole (12 sections + tables + appendix ≈
-# 3000-5000 tokens) — 8000 leaves comfortable headroom and stays
-# just under the 8192 server cap. If you see `stop_reason=max_tokens`
-# in the logs, the next step is either a longer-cap model
-# (anthropic.claude-3-5-sonnet-20241022-v2:0) or a prompt trim.
+# Sprint 13.32.8 — Output budgets for Claude Haiku 4.5 on Bedrock.
+# Customer-Facing is short (400-600 words ≈ 800 tokens), so 2048
+# gives 2.5× headroom. Internal is the long pole (12 sections +
+# tables + appendix ≈ 3000-5000 tokens) — 8000 leaves comfortable
+# headroom against Haiku 4.5's published output ceiling. If you see
+# `stop_reason=max_tokens` in the logs, the next step is either a
+# longer-cap model (Sonnet 4.x family) or a prompt trim.
 _MAX_TOKENS_CUSTOMER = 2048
 _MAX_TOKENS_INTERNAL = 8000
 

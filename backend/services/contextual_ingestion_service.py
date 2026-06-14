@@ -1641,14 +1641,27 @@ def process_document(
     doc_kind: Optional[str] = None,            # Sprint 3-PREP-A
 ) -> Dict[str, Any]:
     # Sprint 3-PREP-A — resolve effective doc_kind.
-    # Precedence: explicit kwarg (validated) > schema-defaulted 'ticket'.
-    # PREP-B will push non-'ticket' values via the kwarg; PREP-A keeps
-    # the default so every row still lands as 'ticket' — flag-off safe.
+    # Precedence: explicit kwarg (validated) > content-detection on the
+    # actual file > "kb" safe default.
+    #
+    # The previous fallback was a hardcoded "ticket", which caused every
+    # PDF / DOCX KB upload to land as doc_kind=ticket and silently break
+    # the KB-search / Discuss-with-LogIQ separation. The detector below
+    # uses magic-byte sniffing + a tiny JSON parse probe to decide what
+    # the file actually IS, then maps to "ticket" (JSON / CSV / TSV) or
+    # "kb" (PDF / DOCX / TXT / etc.).
     _kind_candidate = (doc_kind or "").strip().lower()
     if _kind_candidate and _kind_candidate in settings.VALID_DOC_KINDS:
         resolved_kind = _kind_candidate
     else:
-        resolved_kind = "ticket"
+        from backend.ingestion.file_type_detector import detect_file_kind
+        detection = detect_file_kind(local_path)
+        resolved_kind = detection.doc_kind
+        logger.info(
+            "[doc_kind] auto-detected %s for %s (detected=%s source=%s agreement=%s)",
+            resolved_kind, local_path.name,
+            detection.detected, detection.source, detection.agreement,
+        )
     # Structured-schema detection runs BEFORE generic parse so we never burn
     # Haiku calls re-guessing fields already present in the source JSON.
     # Every schema that fails detection falls through to the legacy pipeline.

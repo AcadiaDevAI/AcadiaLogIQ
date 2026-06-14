@@ -53,7 +53,7 @@ def limit_chunks(
 
     limited = chunks[:cap]
     logger.info(
-        "Chunk limiter applied: %d → %d (cap=%d)",
+        "Chunk limiter applied: %d -> %d (cap=%d)",
         original_count, len(limited), cap,
     )
     return ChunkLimitResult(

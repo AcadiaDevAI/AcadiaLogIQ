@@ -148,7 +148,7 @@ def _compute_dynamic_agent_budget(
     if not getattr(settings, "AGENT_DYNAMIC_BUDGET_ENABLED", True):
         static_budget = getattr(settings, "AGENT_ANALYTICAL_BUDGET", 25000)
         logger.info(
-            "[dynamic_budget] DISABLED → using static budget=%d",
+            "[dynamic_budget] DISABLED -> using static budget=%d",
             static_budget,
         )
         return static_budget
@@ -173,7 +173,7 @@ def _compute_dynamic_agent_budget(
     final = max(floor, min(computed, ceiling))
 
     logger.info(
-        "[dynamic_budget] tickets=%d steps=%d mode=%s → computed=%d final=%d "
+        "[dynamic_budget] tickets=%d steps=%d mode=%s -> computed=%d final=%d "
         "(floor=%d ceiling=%d)",
         safe_ticket_count, safe_step_count, mode, computed, final, floor, ceiling,
     )
@@ -530,6 +530,7 @@ def run_agent_pipeline(
     pattern_context: Optional[Dict[str, Any]] = None,
     session_scope: Optional[List[str]] = None,
     session_mode: Optional[Any] = None,
+    doc_kinds: Optional[List[str]] = None,
 ) -> AgentPipelineResult:
     """
     Run the full multi-agent pipeline: Planner → Analyst → Composer.
@@ -857,6 +858,12 @@ def run_agent_pipeline(
                 generate_fn=generate_fn,
                 bedrock_client=bedrock_client,
                 session_mode=session_mode,
+                # doc_kinds activates the KB-Search composer voice when
+                # the request restricted retrieval to KB / SOP content.
+                # None / ticket-only / mixed kinds leave the composer on
+                # its default conversational voice (byte-identical to
+                # the pre-change behavior).
+                doc_kinds=doc_kinds,
             )
 
             result.steps.append(compose_result)
@@ -996,7 +1003,46 @@ def run_kb_pivot_pipeline(
             voice_override="kb_pivot",
         )
         result.steps.append(compose_result)
-        result.answer = (compose_result.output or "").strip()
+        _pivot_answer = (compose_result.output or "").strip()
+
+        # ── Bring kb_pivot under the same validator as /ask ──
+        # Before this gate, the 👎 path produced answers that bypassed
+        # confidence / grounding / relevancy checks — which is why a
+        # thumbs-down sometimes returned a "real" answer when /ask's
+        # first attempt got replaced by the safe fallback. That
+        # asymmetry trains users to thumbs-down to skip the safety
+        # check, which is exactly the wrong behaviour. Run the same
+        # validate_answer pass here so kb_pivot inherits identical
+        # fabrication-detection and substitution semantics. If the
+        # validator rejects (or replaces) the answer, that becomes the
+        # kb_pivot output.
+        try:
+            from backend.validation.validator import validate_answer as _validate_answer
+            # doc_context for the validator is the same chunk text the
+            # composer saw — concat the findings to reconstruct it.
+            _doc_ctx_for_val = "\n\n".join(findings_parts) if findings_parts else ""
+            _validation = _validate_answer(
+                query=query,
+                answer=_pivot_answer,
+                doc_context=_doc_ctx_for_val,
+                ranked_chunks=ranked[:6],
+                source_names=source_names,
+                model_used="agents (kb_pivot)",
+            )
+            _pivot_answer = getattr(_validation, "answer", _pivot_answer)
+            logger.info(
+                "[kb_pivot] validation passed=%s was_modified=%s confidence=%.3f",
+                bool(getattr(_validation, "passed", False)),
+                bool(getattr(_validation, "was_modified", False)),
+                float(getattr(_validation, "confidence", 0.0) or 0.0),
+            )
+        except Exception as _val_exc:
+            logger.warning(
+                "[kb_pivot] validator pass failed (%s) -- returning composer "
+                "output unmodified", _val_exc,
+            )
+
+        result.answer = _pivot_answer
         result.kb_pivot_empty = False
 
     except Exception as exc:

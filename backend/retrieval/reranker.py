@@ -223,7 +223,7 @@ class LLMReranker(BaseReranker):
             # Sort by blended score descending
             scored.sort(key=lambda x: x[3], reverse=True)
 
-            logger.debug("LLM reranker: %d candidates → %d scored, returning top %d",
+            logger.debug("LLM reranker: %d candidates -> %d scored, returning top %d",
                          len(pool), len(scored), top_k)
             return scored[:top_k]
 

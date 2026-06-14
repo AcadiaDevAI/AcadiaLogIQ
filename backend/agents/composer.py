@@ -9,12 +9,49 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from typing import Any, Callable, Dict, List, Optional
 
 from backend.config import settings
 from backend.agents.base import AgentStepResult, TokenBudget, invoke_llm
 
 logger = logging.getLogger("acadia-log-iq")
+
+
+# ─────────────────────────────────────────────────────────────
+# Journey Context Leak fix — KB-search only.
+#
+# When a chat session is opened from a Tier-1 journey (Stage 0 / Stage 4
+# "Search KB" handoff), api.py enriches retrieval with a
+# `[Context: asset_name=… alert_type=… customer=…]` prefix so BM25 /
+# FTS channels narrow toward the right corner of the corpus. The
+# enrichment is documented to be retrieval-only — never the LLM prompt
+# (see api.py:3924 "We DO NOT touch ... LLM prompt + saved chat
+# message"). In practice, fragments of the journey context still surface
+# in the composer's input by way of (a) Analyst findings echoing the
+# context-biased chunk text, and (b) the model latching onto the
+# asset/alert values seen in the user's pre-filled message body and
+# inventing plausible ticket identifiers around them ("ACC-SW-04 →
+# INC-LAN-88902", "MAC_FLAP_DETECTED → INC-DB-10025"). Grounding then
+# catches the fabrications and the safe-fallback fires, so the user
+# sees "could not be fully verified" on the first answer.
+#
+# This regex strips any leading `[Context: …]` block from text the
+# composer is about to emit / consume, AS A DEFENSIVE BELT-AND-
+# SUSPENDERS measure. Scoped to KB-search mode (is_kb_search_mode) so
+# non-KB flows (ticket history, RCA, escalation) keep their existing
+# behaviour byte-identical.
+# ─────────────────────────────────────────────────────────────
+_JOURNEY_CONTEXT_PREFIX_RE = re.compile(
+    r"\[Context:\s[^\]]*\]\s*", re.IGNORECASE | re.DOTALL,
+)
+
+
+def _strip_journey_context(text: Optional[str]) -> str:
+    """Remove every `[Context: …]` block from `text`. Safe on empty/None."""
+    if not text:
+        return text or ""
+    return _JOURNEY_CONTEXT_PREFIX_RE.sub("", text).lstrip()
 
 
 # ─────────────────────────────────────────────────────────────
@@ -36,6 +73,47 @@ Rules:
 - Do not add section headers unless the user asked for a structured breakdown.
 - Do not say "based on the findings" or "according to the analysis". Just answer.
 - If the findings don't fully cover the question, say what's missing in one plain sentence and give the best partial answer you can."""
+
+
+# ─────────────────────────────────────────────────────────────
+# KB-Search composer voice — activates when the request restricted
+# retrieval to KB / SOP content (i.e. is_kb_search_mode(doc_kinds) is
+# True) and NO explicit voice_override is in play (kb_pivot,
+# expert_copilot, etc., already mandate their own structured formats).
+#
+# The default _composer_rules above suppress structure ("Use natural
+# prose. Bullets only when the question asks for a list ... Do not add
+# section headers..."). For KB / SOP / runbook content the user
+# explicitly wants the MODE-driven format defined in
+# backend/routing/kb_search_prompt.py — concise paragraphs paired with
+# bulleted lists, headings such as "Key Components", "How It Works",
+# numbered procedure steps, and a "Source documents" footer. This
+# voice tells the composer to follow that prompt's MODE-specific
+# guidance instead of the default conversational voice.
+# ─────────────────────────────────────────────────────────────
+_KB_SEARCH_COMPOSER_RULES = """You are an expert IT Operations Knowledge Architect and senior technical writer synthesizing findings from a multi-step analysis of the organization's knowledge corpus (KB articles, SOPs, runbooks, policies, design documents) into the final answer for the user.
+
+The analysis findings below were produced by sub-agents reading the source KB / SOP / runbook documents. Use them as the absolute ground truth.
+
+Rules:
+- KB / SOP / runbook answers are EXPECTED to be structured. Follow the MODE-specific FORMAT, HEADINGS, and STYLE guidance from the KB-Search system prompt appended below — do NOT default to flowing prose.
+- Use markdown headings (##, ###) to organize the answer (e.g., "Key Components", "How It Works", "Current State", "Procedure", "Validate", "Rollback / If It Fails") whenever the MODE calls for them.
+- Use bullet points, numbered steps (1., 2., 3.), and arrows (→) freely to make the structure scannable.
+- End informational answers with a "Source documents" list when the MODE specifies it.
+- Match depth to the query: a quick lookup gets a tight answer, a complex procedure gets the full MODE 2 treatment with PREREQUISITES / PROCEDURE / VALIDATE / ROLLBACK blocks.
+- Do not say "based on the findings" or "according to the analysis". Speak as the knowledge layer of the organization.
+- If the findings don't fully cover the question, surface the gap explicitly per RULE 6 of the KB-Search prompt — never fill documentation gaps with general knowledge presented as organizational fact.
+
+ANTI-LEAK RULE (CRITICAL — context values are NOT facts):
+- The user's chat session may carry an intake-form `USER_CONTEXT` or `[Context: …]` block (asset_name, alert_type, customer, region, etc.) used to NARROW retrieval. Those values are environment cues, not document content.
+- You MAY use them to interpret what the user is asking about.
+- You MUST NOT emit them as if they were ground truth, AND you MUST NOT invent identifiers around them (e.g., do not synthesize "INC-LAN-88902", "INC-DB-10025", "ACC-SW-04", "Ticket #4521" because the context mentions a network/MAC-flap/asset — those are fabrications, not findings).
+- Emit an asset name, ticket ID, incident number, customer name, or device identifier in the answer ONLY when that exact token appears verbatim in the FINDINGS below. If it doesn't appear verbatim, do not name it — describe it generically ("the affected access switch", "the originating ticket").
+
+NEVER-FABRICATE IDENTIFIER RULE (applies regardless of context):
+- Even without a USER_CONTEXT block, NEVER invent any ticket ID, incident number, case number, or change number. Specifically, do NOT emit `INC-…`, `TKT-…`, `CASE-…`, `CHG-…`, `REQ-…`, `Ticket #…`, `Case #…`, or any similar identifier-shaped token UNLESS that exact token appears verbatim in the FINDINGS below.
+- This applies especially to questions about ROUTING, ESCALATING, or ASSIGNING an issue. When asked where to route something, name the receiving team / role only (e.g. "LAN Network Team", "VoIP Engineering on-call"). DO NOT decorate it with an invented incident number or case ID to look concrete.
+- If you're tempted to write "Route to LAN Network Team (ticket INC-XXX-NNNN)" but `INC-XXX-NNNN` is not in the FINDINGS, drop the parenthetical entirely. Team name only."""
 
 
 # ─────────────────────────────────────────────────────────────
@@ -407,6 +485,56 @@ def _build_composer_prompt_with_markdown(base_prompt: str) -> str:
     return base_prompt + _COMPOSER_MARKDOWN_ADDENDUM
 
 
+# ─────────────────────────────────────────────────────────────
+# KB-Search variant of the markdown addendum. Mirrors the structure of
+# _COMPOSER_MARKDOWN_ADDENDUM but flips the suppressive
+# "Default to flowing prose / Do not force structure" line to actively
+# encourage the bullets, numbered steps, and headings required by the
+# KB-Search MODES (see backend/routing/kb_search_prompt.py).
+# ─────────────────────────────────────────────────────────────
+_COMPOSER_MARKDOWN_ADDENDUM_KB = """
+
+Markdown formatting rules (KB / SOP / runbook responses — structured output is expected):
+- Ticket IDs, customer names, product names, component names → use **bold** emphasis (e.g., **INC-10037**, **Enterprise-617**, **ADTRAN 908E**). Do NOT wrap identifiers in backticks.
+- Inline code (`backticks`) is ONLY for literal commands (`show bgp summary`), file paths (`/etc/config`), or variable names. Never for ticket IDs.
+- Procedures, phased plans, and ordered steps → use numbered lists (1., 2., 3.). Arrows (→) work well for state transitions and if/then branches.
+- Comparisons of two or more items → use a markdown table with meaningful column headers.
+- Commands, configs, code → fenced code blocks with language hint (```bash, ```python, ```yaml, etc.).
+- Key recommendations or important takeaways → use > blockquote on its own paragraph.
+- Markdown headings (##, ###) are EXPECTED — group the answer by the MODE-appropriate sections defined in the KB-Search system prompt (e.g., "Key Components", "How It Works", "Current State", "Procedure", "Validate", "Rollback / If It Fails", "Escalate To").
+
+CRITICAL — Confident synthesis: When the user asks for lessons, insights, takeaways, recommendations, biggest learnings, or "what should I learn from X", you MUST synthesize a confident answer by reasoning from the documented RESOLUTION, ROOT CAUSE, SOP STEPS, and QA GAPS content in the findings. The lesson is implicit in how the incident was resolved and what went wrong — extract it and present it confidently in your own words. Do NOT refuse by saying "not explicitly stated" or "I could not find this" just because the literal word "lesson" is absent."""
+
+
+def _build_composer_prompt_for_kb_search(base_prompt: str) -> str:
+    """
+    Build the Composer system prompt for KB-Search mode.
+
+    Appends the KB-friendly markdown addendum (numbered lists, headings,
+    arrows allowed) AND the full RAG Knowledge Architect prompt from
+    backend/routing/kb_search_prompt.py — the same one used by the
+    non-agent route_and_generate path. This way the Composer follows
+    the SAME MODE 1–6 FORMAT / HEADINGS / STYLE rules regardless of
+    whether the answer comes from the agent pipeline or the direct
+    Haiku/Sonnet route.
+
+    Falls back to the standard markdown addendum if the KB-Search
+    prompt module is unavailable for any reason.
+    """
+    if not getattr(settings, "AGENT_COMPOSER_MARKDOWN_ENABLED", True):
+        prompt = base_prompt
+    else:
+        prompt = base_prompt + _COMPOSER_MARKDOWN_ADDENDUM_KB
+    try:
+        from backend.routing.kb_search_prompt import kb_search_prompt_text
+        prompt = prompt + "\n\n" + kb_search_prompt_text()
+    except Exception as exc:
+        logger.warning(
+            "[kb_search_prompt] kb_search_prompt_text failed in composer: %s", exc,
+        )
+    return prompt
+
+
 def run_composer(
     *,
     query: str,
@@ -417,6 +545,7 @@ def run_composer(
     bedrock_client: Any,
     session_mode: Any = None,
     voice_override: Optional[str] = None,
+    doc_kinds: Optional[List[str]] = None,
 ) -> AgentStepResult:
     """
     Composer Agent: synthesizes step-by-step findings into a final answer.
@@ -431,6 +560,35 @@ def run_composer(
     concatenating the raw findings directly.
     """
     # --- Prepare the findings block ---
+    # Journey Context Leak fix — KB-search only. When KB mode is active,
+    # strip any `[Context: asset_name=… alert_type=…]` block from the
+    # incoming query and from each finding before they reach the LLM.
+    # This is defensive: the api.py enrichment is documented to be
+    # retrieval-only, but fragments slip through via Analyst findings
+    # that echo context-biased chunk text, and the model is observed
+    # to invent identifiers around those values (see the
+    # `_strip_journey_context` block comment near the top of this file).
+    # Non-KB flows pass the inputs through unchanged — byte-identical
+    # to pre-fix behaviour.
+    try:
+        from backend.routing.kb_search_prompt import is_kb_search_mode
+        _kb_mode_for_scrub = (
+            voice_override is None and is_kb_search_mode(doc_kinds)
+        )
+    except Exception:
+        _kb_mode_for_scrub = False
+    if _kb_mode_for_scrub:
+        _orig_query_len = len(query or "")
+        query = _strip_journey_context(query)
+        if findings:
+            findings = [_strip_journey_context(f) for f in findings]
+        if (query or "") and len(query) != _orig_query_len:
+            logger.info(
+                "[composer_context_scrub] kb-search journey-context "
+                "prefix stripped from query (chars %d -> %d)",
+                _orig_query_len, len(query),
+            )
+
     findings_text = "\n\n".join(findings) if findings else "[No analysis findings available]"
     sources_str = ", ".join(sorted(set(source_names))[:6]) if source_names else "uploaded documents"
 
@@ -450,8 +608,30 @@ def run_composer(
     _composer_rules_active = _select_composer_voice(
         session_mode, voice_override=voice_override,
     )
+
+    # KB-Search gate: when the request restricted retrieval to KB / SOP
+    # content AND no explicit voice_override is in play (kb_pivot,
+    # expert_copilot, etc., already mandate their own structured formats),
+    # swap the default conversational voice for the KB-Search voice so the
+    # composer follows the MODE-specific FORMAT/HEADINGS rules from
+    # backend/routing/kb_search_prompt.py. The override voices are left
+    # untouched by design — they were chosen deliberately upstream.
+    _kb_mode = False
+    if voice_override is None and _composer_rules_active is _composer_rules:
+        try:
+            from backend.routing.kb_search_prompt import is_kb_search_mode
+            _kb_mode = is_kb_search_mode(doc_kinds)
+        except Exception as _kb_exc:
+            logger.warning(
+                "[kb_search_prompt] is_kb_search_mode failed in composer: %s", _kb_exc,
+            )
+        if _kb_mode:
+            _composer_rules_active = _KB_SEARCH_COMPOSER_RULES
+
     if voice_override and _composer_rules_active is _VOICE_BY_OVERRIDE.get(voice_override):
         _voice_label = f"override:{voice_override}"
+    elif _kb_mode:
+        _voice_label = "kb_search"
     elif _composer_rules_active is not _composer_rules:
         _voice_label = "mode_aware"
     else:
@@ -469,7 +649,10 @@ USER QUESTION: {query}
 
 FINAL ANSWER:"""
 
-    prompt = _build_composer_prompt_with_markdown(_composer_rules_active) + _composer_content
+    if _kb_mode:
+        prompt = _build_composer_prompt_for_kb_search(_composer_rules_active) + _composer_content
+    else:
+        prompt = _build_composer_prompt_with_markdown(_composer_rules_active) + _composer_content
 
     # Brief 5 / Part 2 — composer always produces analytical synthesis output,
     # regardless of the input query's class. Cap at the analytical tier so we
@@ -499,7 +682,7 @@ FINAL ANSWER:"""
         )
         if _composer_max_tokens != _prev_max:
             logger.info(
-                "[composer_budget] analytical floor applied: %d → %d",
+                "[composer_budget] analytical floor applied: %d -> %d",
                 _prev_max, _composer_max_tokens,
             )
 

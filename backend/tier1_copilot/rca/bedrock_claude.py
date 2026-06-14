@@ -91,8 +91,9 @@ def invoke(prompt: str, max_tokens: int = _DEFAULT_MAX_TOKENS, *, temperature: f
         prompt: The full prompt string (system + user content + JSON).
             No truncation is performed here — Claude Haiku's 200k
             context comfortably holds any realistic RCA payload.
-        max_tokens: Output budget. Claude 3.5 Haiku caps at 8192;
-            values above that are silently clamped server-side.
+        max_tokens: Output budget. 8192 is a safe default for Claude
+            Haiku 4.5; values above the model's server-side ceiling are
+            silently clamped.
         temperature: 0.1 by default — RCA output is structured and
             should be near-deterministic. Same value safe_generate
             uses for the Mistral path.

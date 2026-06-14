@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -18,6 +19,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from backend.config import settings
 from backend.validation.confidence_scorer import ConfidenceResult, score_confidence
 from backend.validation.grounding_checker import GroundingResult, check_grounding
+from backend.validation.relevancy_checker import (
+    RelevancyResult,
+    check_relevancy,
+    get_off_topic_fallback,
+)
 
 logger = logging.getLogger("acadia-log-iq")
 
@@ -25,6 +31,118 @@ logger = logging.getLogger("acadia-log-iq")
 # ---------------------------------------------------------------------------
 # Fallback answer templates
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# Dynamic (phrase-list-free) refusal detection
+# ---------------------------------------------------------------------------
+# Detect refusals by STRUCTURE, not exact phrases. The LLM produces dozens
+# of refusal wording variants:
+#   "I cannot find specific information about ..."
+#   "Based on the provided documents, the X is not detailed."
+#   "The retrieved context does not contain ..."
+#   "I'm unable to determine the exact X from ..."
+#   "There is no information about ..."
+#   "Documents do not specify ..."
+# Maintaining a phrase list for every variant is brittle. The two regexes
+# below catch the underlying structure instead:
+#   (1) an opening pattern that begins with a refusal (covers >80% of cases)
+#   (2) a negated modal/auxiliary within ~50 chars of a content-search verb
+# Both fire only when the answer is short — long answers that incidentally
+# include "cannot find" inside a paragraph are real answers, not refusals.
+
+# Pattern (1): refusal openings — match at the start of the answer.
+_REFUSAL_OPENING_RE = re.compile(
+    r"^\s*(?:"
+    r"i\s+(?:cannot|can'?t|could\s+not|couldn'?t|do\s+not|don'?t|"
+    r"am\s+unable|don'?t\s+have|lack|fail\s+to)"
+    r"|"
+    r"(?:the|these|those)\s+(?:document|file|source|context|chunk|"
+    r"passage|provided|available|retrieved|given)s?\s+"
+    r"(?:do(?:es)?\s+not|don'?t|doesn'?t)"
+    r"|"
+    r"there\s+(?:is|are)\s+no\b"
+    r"|"
+    r"based\s+on\s+(?:the\s+)?(?:provided|available|retrieved|given|"
+    r"current)\b[^.]{0,80}(?:cannot|can'?t|do(?:es)?\s+not|don'?t|"
+    r"doesn'?t|unable|no\s+(?:information|specific|mention))"
+    r")",
+    re.IGNORECASE,
+)
+
+# Pattern (2): negated modal/auxiliary near a content-search verb.
+# Catches "cannot find", "do not contain", "unable to provide",
+# "lack details about", "have no information on", etc.
+_HEDGE_NEGATION_RE = re.compile(
+    r"\b(?:"
+    r"cannot|can'?t|"
+    r"could\s+not|couldn'?t|"
+    r"do(?:es)?\s+not|do(?:es)?n'?t|"
+    r"did\s+not|didn'?t|"
+    r"am\s+unable|is\s+unable|are\s+unable|unable\s+to|"
+    r"is\s+not|are\s+not|isn'?t|aren'?t|was\s+not|were\s+not|wasn'?t|weren'?t|"
+    r"have\s+no|has\s+no|had\s+no|"
+    r"don'?t\s+have|doesn'?t\s+have|"
+    r"lack(?:s|ed)?|"
+    r"no\s+(?:information|specific|mention|details?|content|reference|data)"
+    r")\b"
+    r"[\s\S]{0,50}?"
+    r"\b(?:"
+    r"find|finding|found|"
+    r"contain|contains?|containing|"
+    r"see|seen|seeing|"
+    r"show|shown|showing|"
+    r"provide|provided|providing|"
+    r"mention|mentions?|mentioned|"
+    r"specif(?:y|ies|ied|ic|ically)|"
+    r"detail(?:ed|s)?|"
+    r"include|included|including|"
+    r"cover|covered|covering|"
+    r"state|stated|stating|"
+    r"address(?:ed|es)?|"
+    r"answer|answering|answered|"
+    r"discuss(?:ed|es)?|"
+    r"describe|described|"
+    r"reference|references?|"
+    r"information|content|specifics?|"
+    r"verif(?:y|ied)"
+    r")\b",
+    re.IGNORECASE,
+)
+
+# Refusals are typically terse — a real grounded answer with detail is
+# longer than this. A long answer that includes "cannot find" buried in
+# a sub-clause is almost always a real answer that hedges on one point,
+# not a wholesale refusal.
+_REFUSAL_MAX_CHARS = 600
+
+
+def _looks_like_structural_refusal(answer: str) -> bool:
+    """
+    Return True when the answer exhibits refusal STRUCTURE.
+
+    Designed to replace ever-growing phrase lists. Two signals fire:
+      * `_REFUSAL_OPENING_RE` — the answer opens with a known refusal
+        construction (covers ~80% of cases).
+      * `_HEDGE_NEGATION_RE` — a negated modal verb is within ~50
+        chars of a content-search verb (catches in-body refusals).
+
+    Both signals are gated on `len(answer) <= _REFUSAL_MAX_CHARS` so a
+    long, substantive answer that incidentally uses "cannot find" is
+    NOT flagged.
+
+    Never raises. Returns False on empty input.
+    """
+    if not answer:
+        return False
+    stripped = answer.strip()
+    if not stripped or len(stripped) > _REFUSAL_MAX_CHARS:
+        return False
+    if _REFUSAL_OPENING_RE.search(stripped):
+        return True
+    if _HEDGE_NEGATION_RE.search(stripped):
+        return True
+    return False
+
+
 _FALLBACK_INSUFFICIENT = (
     "- I could not find sufficiently supported information for that question "
     "in the currently uploaded files.\n"
@@ -68,6 +186,10 @@ class ValidationResult:
     was_modified: bool = False
     confidence_detail: Optional[ConfidenceResult] = None
     grounding_detail: Optional[GroundingResult] = None
+    # New: response-relevancy judge result. None when the check was
+    # disabled / skipped. Allows the eval log + context_stats to surface
+    # whether the answer was off-topic separately from other failures.
+    relevancy_detail: Optional[RelevancyResult] = None
     version_warning: str = ""
     issues: List[str] = field(default_factory=list)
     validation_ms: int = 0
@@ -191,6 +313,8 @@ def validate_answer(
     # Goal 2.2: only fire on genuine "I cannot find anything" statements.
     # Partial-answer hedges ("do not contain specific X, but Y is...") are
     # acceptable and must not be misclassified as refusals.
+    # Fast-path: exact-phrase match for the handful of refusal strings
+    # we've historically seen verbatim. Kept for back-compat / cheap hit.
     _NOT_FOUND_PHRASES = [
         "could not find supporting information",
         "could not find sufficiently supported",
@@ -199,7 +323,15 @@ def validate_answer(
         "i was unable to find",
     ]
     answer_lower = answer.lower()
-    is_model_refusal = any(phrase in answer_lower for phrase in _NOT_FOUND_PHRASES)
+    # Structural detector covers the long tail of refusal phrasings that
+    # the static list above can't enumerate. See
+    # `_looks_like_structural_refusal` for the patterns. ORed together so
+    # either path is sufficient — false-refusal RETRY logic downstream
+    # then decides whether to attempt a stronger-prompt re-generation.
+    is_model_refusal = (
+        any(phrase in answer_lower for phrase in _NOT_FOUND_PHRASES)
+        or _looks_like_structural_refusal(answer)
+    )
     retrieval_is_strong = (
         len(ranked_chunks) >= 3
         and float(ranked_chunks[0][3] or 0) >= 0.4
@@ -241,19 +373,142 @@ def validate_answer(
     result.issues = list(grounding.issues)
 
     # ==================================================================
+    # Step 2b: Response-relevancy check (Haiku judge)
+    # ==================================================================
+    # Catches the "grounded but off-topic" failure mode: the answer is
+    # faithful to the documents but does not address the user's question.
+    # Skipped when:
+    #   * disabled via ENABLE_RELEVANCY_CHECK, OR
+    #   * grounding already detected fabrications (Case B takes priority
+    #     and we don't waste a Haiku call on an answer we're throwing
+    #     away anyway).
+    # Fails open: if Haiku is unreachable, RelevancyResult.skipped=True
+    # and the answer passes this stage. Better than blocking legitimate
+    # answers during a Bedrock outage.
+    if not grounding.fabrications:
+        relevancy = check_relevancy(query=query, answer=answer)
+    else:
+        relevancy = RelevancyResult(skipped=True)
+    result.relevancy_detail = relevancy
+
+    # ==================================================================
     # Step 3: Decision logic
     # ==================================================================
 
-    # Case A: Both confidence and grounding pass → return as-is
+    # Case A: Both confidence and grounding pass → check relevancy, then return.
     if conf.passed and grounding.passed:
-        result.passed = True
+        # Case E (off-topic) takes precedence over Case A when the
+        # relevancy judge produced a confident "no". `skipped` results
+        # do NOT block — see check_relevancy fail-open contract.
+        if (
+            relevancy is not None
+            and not relevancy.skipped
+            and not relevancy.passed
+        ):
+            # ──────────────────────────────────────────────────────────
+            # Soft-refusal retry (relevancy-driven).
+            # ──────────────────────────────────────────────────────────
+            # A confidence-and-grounding-passing answer that the relevancy
+            # judge still rejected is the classic "Haiku discussed the
+            # topic but hedged on the specific ask" pattern. Length is
+            # typically too long for the structural-refusal regex to
+            # catch (>600 chars), so the existing Step 3b retry path
+            # never fires. Give it one stronger-prompt retry HERE,
+            # before returning the off-topic fallback. Only fires when:
+            #   * retry_fn is wired (api.py always passes _retry_generate)
+            #   * retrieval was strong (matches the hard-refusal retry
+            #     criterion: >=3 chunks, top_score >= 0.4)
+            # Strictly one retry, then fall through if it also fails —
+            # bounded cost, no recursive retry loop.
+            soft_refusal_recovered = False
+            soft_refusal_retried = False
+            if retry_fn is not None and retrieval_is_strong:
+                try:
+                    logger.warning(
+                        "[validator] soft refusal via relevancy (%.2f) "
+                        "on strong retrieval — attempting stronger-prompt retry",
+                        relevancy.score,
+                    )
+                    retry_answer = retry_fn(stronger_prompt=True)
+                    soft_refusal_retried = True
+                    if retry_answer and retry_answer.strip():
+                        # Re-judge ONLY the dimension that failed
+                        # (relevancy). Grounding and confidence were
+                        # already passing on the original answer drawn
+                        # from the same chunks, so the retry is over-
+                        # whelmingly likely to keep passing them. We
+                        # save a Haiku call by not re-running grounding.
+                        retry_relevancy = check_relevancy(
+                            query=query, answer=retry_answer,
+                        )
+                        if (
+                            retry_relevancy is not None
+                            and not retry_relevancy.skipped
+                            and retry_relevancy.passed
+                        ):
+                            # Retry produced a relevant answer — promote it.
+                            result.answer = retry_answer
+                            result.relevancy_detail = retry_relevancy
+                            result.was_modified = True
+                            result.passed = True
+                            result.confidence = conf.score
+                            result.issues.append(
+                                "Recovered from soft refusal via stronger-prompt "
+                                f"retry (relevancy {relevancy.score:.2f} -> "
+                                f"{retry_relevancy.score:.2f})"
+                            )
+                            soft_refusal_recovered = True
+                            logger.info(
+                                "[validator] soft-refusal retry succeeded "
+                                "(relevancy %.2f -> %.2f)",
+                                relevancy.score, retry_relevancy.score,
+                            )
+                        else:
+                            new_score = (
+                                retry_relevancy.score if retry_relevancy else 0.0
+                            )
+                            logger.warning(
+                                "[validator] soft-refusal retry still off-topic "
+                                "(relevancy %.2f)",
+                                new_score,
+                            )
+                except Exception as soft_retry_exc:
+                    logger.warning(
+                        "[validator] soft-refusal retry raised: %s",
+                        soft_retry_exc,
+                    )
 
-        # Append version warning if relevant (informational, not a failure)
-        if grounding.version_warning:
-            result.answer = answer.rstrip() + "\n\n" + grounding.version_warning
-            result.was_modified = True
+            if not soft_refusal_recovered:
+                result.passed = False
+                result.was_modified = True
+                result.answer = get_off_topic_fallback()
+                # Halve confidence so downstream UI / cache / eval can spot
+                # off-topic outcomes even if the score field is glanced at.
+                result.confidence = max(0.0, conf.score * 0.5)
+                result.issues.append(
+                    f"Relevancy score {relevancy.score:.2f} below threshold "
+                    f"{settings.MIN_RELEVANCY_SCORE} — answer did not address the question"
+                )
+                if relevancy.reason:
+                    result.issues.append(f"Relevancy reason: {relevancy.reason}")
+                logger.warning(
+                    "Validation FAILED (off-topic): relevancy=%.2f reason=%r%s",
+                    relevancy.score, relevancy.reason[:120],
+                    " (retry also off-topic)" if soft_refusal_retried else "",
+                )
+        else:
+            result.passed = True
 
-        logger.info("Validation PASSED: confidence=%.3f, grounding=%.3f", conf.score, grounding.grounding_score)
+            # Append version warning if relevant (informational, not a failure)
+            if grounding.version_warning:
+                result.answer = answer.rstrip() + "\n\n" + grounding.version_warning
+                result.was_modified = True
+
+            logger.info(
+                "Validation PASSED: confidence=%.3f, grounding=%.3f, relevancy=%s",
+                conf.score, grounding.grounding_score,
+                f"{relevancy.score:.2f}" if relevancy and not relevancy.skipped else "skipped",
+            )
 
     # Case B: Grounding found fabricated specifics → return fallback
     elif grounding.fabrications:

@@ -131,6 +131,56 @@ def create_chat_session_with_handoff(
                 chat_session_id, scope_incident_id, exc,
             )
 
+    # Sprint 10 follow-up — when this handoff is NOT scope-locked to a
+    # single ticket, it is a Search-in-KB session. Persist the
+    # KB / SOP doc-kind preference on the chat_sessions row (migration
+    # 050) so every subsequent /ask call inside this chat inherits the
+    # same retrieval scope WITHOUT requiring the frontend to re-send
+    # `allowed_doc_kinds` on every message. The /ask handler falls
+    # back to this column whenever the request body doesn't carry an
+    # explicit override.
+    #
+    # The list of doc kinds is read from the canonical Stage 4 builder
+    # (build_stage4 -> Stage4SearchKB.allowed_doc_kinds) so this stays
+    # the single source of truth — no second hard-coded copy here.
+    if (not scope_incident_id) and chat_session_id:
+        try:
+            from sqlalchemy import text as _dk_text
+            from backend.db.connection import engine as _dk_engine
+            from .stage4_kb_handoff import build_stage4 as _build_stage4
+            import json as _json
+
+            # build_stage4 returns Stage4SearchKB with allowed_doc_kinds
+            # already set to its canonical default. We call it with empty
+            # alert/asset values just to extract the doc-kinds list —
+            # no other side effects.
+            _kb_doc_kinds = list(
+                _build_stage4(
+                    severity=None, asset_name=None, alert_type=None,
+                ).allowed_doc_kinds
+            )
+            with _dk_engine.begin() as _conn:
+                _conn.execute(
+                    _dk_text(
+                        "UPDATE chat_sessions "
+                        "SET allowed_doc_kinds = CAST(:kinds AS JSONB) "
+                        "WHERE id = :cid"
+                    ),
+                    {
+                        "kinds": _json.dumps(_kb_doc_kinds),
+                        "cid": chat_session_id,
+                    },
+                )
+        except Exception as exc:
+            # Same safety stance as scope_incident_id above: a failure
+            # here must NOT break the handoff. The chat just falls back
+            # to global retrieval on follow-up turns.
+            logger.warning(
+                "[journey.stage4] failed to persist allowed_doc_kinds "
+                "chat=%s err=%s",
+                chat_session_id, exc,
+            )
+
     # 2. Sprint 10.6 §3 — invoke /ask WITHOUT any doc-kind filter.
     #    No empty-corpus gate, no upload-prompt branch. If retrieval
     #    finds nothing, /ask's natural low-confidence response handles

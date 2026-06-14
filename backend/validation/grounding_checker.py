@@ -36,10 +36,133 @@ class GroundingResult:
     fabrications: List[str] = field(default_factory=list)
 
 
-# Patterns for fabricated specifics (URLs, emails, phone numbers)
+# Patterns for hard fabrications (URLs, emails, phone numbers, ticket
+# IDs) — these trigger full Case B fallback (answer replaced) because
+# they cannot be inferred from context and a wrong value is direct
+# misinformation, not a soft elaboration.
 _URL_PATTERN = re.compile(r"https?://[\w./-]+", re.I)
 _EMAIL_PATTERN = re.compile(r"\b[\w.+-]+@[\w.-]+\.\w{2,}\b", re.I)
 _PHONE_PATTERN = re.compile(r"\b\d{3}[-.]?\d{3}[-.]?\d{4}\b")
+
+# Ticket / record identifier shapes — anything matching this in the
+# answer is a record-reference claim. If the same identifier isn't in
+# the retrieved context, the LLM made it up (the broadcast-storm eval
+# case invented "INC-LAN-88902"). This MUST be a hard fabrication, not
+# a soft penalty, because users treat ticket IDs as authoritative
+# references.
+#
+# Patterns covered:
+#   INC-12345, CHG-001                  (letter-prefix + digits)
+#   INC-LAN-88902, INC-TITAN-812        (letter-prefix + word + digits)
+#   CHG-2024-001                         (letter-prefix + year + seq)
+#   INC0012345                          (no separator)
+# Tightened to require digits SOMEWHERE in the captured token so
+# generic phrases like "BGP-NEIGHBOR" aren't flagged.
+_TICKET_ID_PATTERN = re.compile(
+    r"\b("
+    r"[A-Z]{2,5}-[A-Z]{2,}-\d{2,}"          # INC-LAN-88902, INC-TITAN-812
+    r"|[A-Z]{2,5}-\d{4}-\d{2,}"             # CHG-2024-001
+    r"|[A-Z]{2,5}-\d{3,}"                   # INC-12345, CHG-001
+    r"|[A-Z]{2,5}\d{4,}"                    # INC0012345
+    r")\b"
+)
+
+
+# ---------------------------------------------------------------------------
+# Specifics-fabrication detector (soft signal — reduces grounding score
+# rather than triggering full Case B fallback)
+# ---------------------------------------------------------------------------
+# Catches the failure pattern shown in the manual eval (Q3 timer
+# hallucination, Q10 CLI expansion, Q12 invented warning): the LLM
+# produces plausible technical specifics that are NOT present verbatim
+# in the retrieved documents. The prompt-side "DO NOT FABRICATE
+# SPECIFICS" directive is the primary defence; this detector catches
+# what slips through.
+#
+# Why soft signal: a single fabricated timer value shouldn't nuke an
+# otherwise-good answer (that's Case B's job, reserved for URLs/emails).
+# Instead we count fabricated specifics and proportionally reduce the
+# grounding score. If enough specifics are fabricated, the lowered
+# score itself trips the gate via Case D.
+
+# Numeric specifics with a unit suffix (timers, percentages, durations).
+# Matches: "180s", "180 seconds", "5%", "10ms", "30 min", "port 179",
+# "v1.4.2". Caller compares answer-side matches against context-side
+# matches; deltas are flagged.
+_NUMERIC_UNIT_RE = re.compile(
+    r"\b\d+(?:\.\d+)?\s*"
+    r"(?:s(?:ec(?:ond)?s?)?|ms|m(?:in(?:ute)?s?)?|h(?:ours?)?|"
+    r"d(?:ays?)?|%|percent|"
+    r"port|ports|"
+    r"v\d|version)\b",
+    re.IGNORECASE,
+)
+
+# Command/CLI tokens — common command verbs followed by an argument.
+# Catches "show ip route", "router bgp 65000", "interface GigabitEthernet0/1",
+# "configure terminal", "no shutdown", "frame-relay map bridge ...". A
+# fabricated CLI snippet is the Q10 failure mode.
+_CLI_RE = re.compile(
+    r"\b(?:show|router|interface|no|configure|conf\s+t|"
+    r"frame-relay|access-list|ip\s+route|"
+    r"set|clear|debug|undebug|enable|disable|"
+    r"copy|reload|write|tunnel|crypto)"
+    r"\s+[\w./:-]+"
+    # Optional second arg — MUST contain a digit, slash, colon, or
+    # dot (i.e. look like a real CLI token, not an English word like
+    # "the" / "a" / "interface"). This kills the false-positive where
+    # "no shutdown the interface" was captured as a fake CLI command.
+    r"(?:\s+[\w./:-]*[\d/:.][\w./:-]*)?",
+    re.IGNORECASE,
+)
+
+# Version / RFC / model numbers — "v1.4.2", "RFC 4271", "ISR-4451".
+_VERSION_RE = re.compile(
+    r"\b(?:RFC\s*\d{3,5}|v\d+\.\d+(?:\.\d+)?|"
+    r"\b[A-Z]{2,}-?\d{2,5}[A-Z]?)\b",
+)
+
+
+def _detect_fabricated_specifics(
+    answer: str, doc_context: str
+) -> List[str]:
+    """
+    Return a list of *suspicious* specifics — exact-string tokens that
+    appear in the answer but NOT in the document context.
+
+    Soft signal: caller treats each entry as a grounding-score penalty
+    rather than a fail-the-answer event. This is deliberately tuned to
+    have a low false-negative rate; some legitimate phrases (e.g.
+    common synonyms) will get flagged. The grounding score still
+    decides pass/fail.
+
+    Comparison strategy: case-insensitive, whitespace-normalized exact
+    substring presence in `doc_context`. We don't try fuzzy match —
+    the goal is "did the LLM supply a verbatim specific that the
+    documents don't contain?".
+    """
+    if not answer or not doc_context:
+        return []
+
+    ctx_normalized = " ".join(doc_context.lower().split())
+    suspicious: List[str] = []
+    seen: set = set()
+
+    # Trailing punctuation to strip so "show bgp neighbors." doesn't
+    # falsely fail to match "show bgp neighbors" in context.
+    _TRIM_CHARS = ".,;:!?)]}'\""
+
+    for pattern in (_NUMERIC_UNIT_RE, _CLI_RE, _VERSION_RE):
+        for raw in pattern.findall(answer):
+            token = raw.strip().lower().rstrip(_TRIM_CHARS)
+            token_norm = " ".join(token.split())
+            if not token_norm or token_norm in seen:
+                continue
+            seen.add(token_norm)
+            if token_norm not in ctx_normalized:
+                suspicious.append(raw.strip().rstrip(_TRIM_CHARS))
+
+    return suspicious
 
 
 def check_grounding(
@@ -74,6 +197,11 @@ def check_grounding(
         (_URL_PATTERN, "URL"),
         (_EMAIL_PATTERN, "email"),
         (_PHONE_PATTERN, "phone number"),
+        # Ticket / record identifiers — invented record references are
+        # the worst class of hallucination because users treat them as
+        # authoritative pointers. Catching them here (hard fabrication
+        # → Case B answer replacement) is the right severity.
+        (_TICKET_ID_PATTERN, "ticket / record identifier"),
     ]:
         answer_matches = set(pattern.findall(answer or ""))
         context_matches = set(pattern.findall(doc_context or ""))
@@ -149,6 +277,44 @@ def check_grounding(
         result.grounding_score = 1.0  # no sentences to check
 
     # ==================================================================
+    # Check 3b: Specifics-fabrication detector (SOFT signal)
+    # ==================================================================
+    # Catches the manual-eval failure pattern: the LLM produces a
+    # plausible technical specific (timer value, CLI fragment, version
+    # number) that is NOT present verbatim in retrieved chunks. This
+    # is the Q3/Q10/Q12 pattern. We don't fail outright (that would
+    # nuke borderline answers); instead each suspicious specific
+    # subtracts 0.10 from the grounding score. If enough accumulate,
+    # the lowered score trips the threshold via Case D in the validator.
+    suspicious = _detect_fabricated_specifics(answer or "", doc_context or "")
+    if suspicious:
+        # Penalty tuning notes (see broadcast-storm eval failure):
+        # Previously 0.10 per token, cap 0.50. A 3-fabrication answer
+        # with high sentence-level grounding (0.90) only dropped to
+        # 0.60 — still above the 0.40 threshold — and the answer with
+        # invented "INC-LAN-88902" went out to the user.
+        # Now 0.20 per token, cap 0.60: two fabricated specifics
+        # drop 0.90 → 0.50; three drop to 0.30 (below threshold → fail).
+        # The cap stops a torrent from bypassing the gate logic
+        # entirely; it doesn't prevent a legitimate fail.
+        penalty = min(0.60, 0.20 * len(suspicious))
+        original_score = result.grounding_score
+        result.grounding_score = max(0.0, result.grounding_score - penalty)
+        # Surface the most likely culprits in issues so operators can
+        # see what triggered the penalty without re-running the detector.
+        preview = ", ".join(repr(s)[:40] for s in suspicious[:5])
+        result.issues.append(
+            f"Specifics-fabrication penalty: {len(suspicious)} suspicious "
+            f"token(s) not in context (e.g. {preview}). Score "
+            f"{original_score:.2f} → {result.grounding_score:.2f}"
+        )
+        logger.info(
+            "[grounding] specifics-fabrication: %d tokens penalty=%.2f "
+            "score %.3f -> %.3f",
+            len(suspicious), penalty, original_score, result.grounding_score,
+        )
+
+    # ==================================================================
     # Check 4: Overall pass/fail
     # ==================================================================
     if result.fabrications:
@@ -163,7 +329,7 @@ def check_grounding(
         )
 
     logger.info(
-        "Grounding: score=%.3f, %d fabrications, version_warn=%s, %d issues → %s",
+        "Grounding: score=%.3f, %d fabrications, version_warn=%s, %d issues -> %s",
         result.grounding_score, len(result.fabrications),
         bool(result.version_warning), len(result.issues),
         "PASS" if result.passed else "FAIL",

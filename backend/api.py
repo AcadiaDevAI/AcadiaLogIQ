@@ -346,9 +346,18 @@ bm25 = None
 
 
 def _make_bedrock_client():
+    # Timeouts are sourced from settings so operators can tune them in
+    # .env without touching code. Defaults were lowered in the LLM-
+    # timeout iteration: read_timeout 120s → 45s, max_attempts 10 → 3.
+    # Previously a single hung Bedrock call could leave a /ask request
+    # waiting up to 20 minutes (10 × 120s); now the per-attempt budget
+    # is bounded and the safe_generate path falls back to Haiku on
+    # ReadTimeoutError / ThrottlingException via llm_timeout_guard.
     boto_cfg = BotoConfig(
-        retries={"max_attempts": 10, "mode": "adaptive"},
-        read_timeout=120, connect_timeout=30, tcp_keepalive=True,
+        retries={"max_attempts": settings.LLM_MAX_ATTEMPTS, "mode": "adaptive"},
+        read_timeout=settings.LLM_READ_TIMEOUT_S,
+        connect_timeout=settings.LLM_CONNECT_TIMEOUT_S,
+        tcp_keepalive=True,
     )
     kwargs = {
         "service_name": "bedrock-runtime",
@@ -1043,52 +1052,89 @@ def estimate_tokens(text: str) -> int:
     return len(text) // CHARS_PER_TOKEN
 
 
+def _invoke_primary_llm(prompt: str, max_tokens: int) -> str:
+    """
+    The "raw" primary-model invocation, factored out of safe_generate so
+    the timeout guard can call it as a primary_fn. ANY Bedrock-side
+    exception is allowed to propagate from here — the guard inspects
+    the exception type to decide whether to fall back to Haiku.
+
+    The prompt truncation logic stays here because it's specific to
+    Mistral's MODEL_MAX_TOKENS budget; Haiku has a much larger context
+    and doesn't need it.
+    """
+    max_prompt_tokens = TOKEN_BUDGET["MODEL_MAX_TOKENS"] - max_tokens - 200
+    max_prompt_chars = max_prompt_tokens * CHARS_PER_TOKEN
+
+    if len(prompt) > max_prompt_chars:
+        logger.warning("TRUNCATING: %d -> %d chars", len(prompt), max_prompt_chars)
+        marker = "\nANSWER:"
+        pos = prompt.rfind(marker)
+        if pos > 0:
+            tail = prompt[pos:]
+            prompt = (
+                prompt[: max_prompt_chars - len(tail) - 80]
+                + "\n\n[... context truncated ...]\n"
+                + tail
+            )
+        else:
+            prompt = prompt[:max_prompt_chars] + "\n\n[... truncated ...]\n"
+
+    body = json.dumps(
+        {
+            "prompt": prompt,
+            "max_tokens": max_tokens,
+            "temperature": 0.1,
+            "top_p": 0.9,
+        }
+    ).encode("utf-8")
+
+    resp = bedrock.invoke_model(
+        modelId=settings.BEDROCK_LLM_MODEL,
+        body=body,
+        accept="application/json",
+        contentType="application/json",
+    )
+    payload = json.loads(resp["body"].read().decode("utf-8"))
+
+    if isinstance(payload, dict):
+        if "outputs" in payload and payload["outputs"]:
+            return (payload["outputs"][0].get("text") or "").strip() or "No response."
+        if "generation" in payload:
+            return str(payload["generation"]).strip()
+        if "outputText" in payload:
+            return str(payload["outputText"]).strip()
+    return "No response generated."
+
+
 def safe_generate(prompt: str, max_tokens: int = None) -> str:
+    """
+    Chat-path LLM entry point.
+
+    Calls the primary model (Mistral via `_invoke_primary_llm`). If the
+    Bedrock client raises a *recoverable* error (read timeout, throttle,
+    connection drop), `llm_timeout_guard` retries once on Claude
+    Haiku 4.5. If both fail, the user gets a polite decline message
+    instead of waiting indefinitely.
+
+    Non-recoverable errors (e.g. our own ValidationException) still hit
+    the catch-all below and surface the generic "Error generating..."
+    string. That preserves the function's existing contract: callers
+    always get a non-empty string back.
+    """
     if max_tokens is None:
         max_tokens = TOKEN_BUDGET["MAX_GENERATION_TOKENS"]
     try:
-        max_prompt_tokens = TOKEN_BUDGET["MODEL_MAX_TOKENS"] - max_tokens - 200
-        max_prompt_chars = max_prompt_tokens * CHARS_PER_TOKEN
-
-        if len(prompt) > max_prompt_chars:
-            logger.warning("TRUNCATING: %d -> %d chars", len(prompt), max_prompt_chars)
-            marker = "\nANSWER:"
-            pos = prompt.rfind(marker)
-            if pos > 0:
-                tail = prompt[pos:]
-                prompt = (
-                    prompt[: max_prompt_chars - len(tail) - 80]
-                    + "\n\n[... context truncated ...]\n"
-                    + tail
-                )
-            else:
-                prompt = prompt[:max_prompt_chars] + "\n\n[... truncated ...]\n"
-
-        body = json.dumps(
-            {
-                "prompt": prompt,
-                "max_tokens": max_tokens,
-                "temperature": 0.1,
-                "top_p": 0.9,
-            }
-        ).encode("utf-8")
-
-        resp = bedrock.invoke_model(
-            modelId=settings.BEDROCK_LLM_MODEL, 
-            body=body,
-            accept="application/json",
-            contentType="application/json",
+        from backend.services.llm_timeout_guard import generate_with_fallback
+        text, model_label = generate_with_fallback(
+            prompt=prompt,
+            max_tokens=max_tokens,
+            primary_fn=_invoke_primary_llm,
         )
-        payload = json.loads(resp["body"].read().decode("utf-8"))
-
-        if isinstance(payload, dict):
-            if "outputs" in payload and payload["outputs"]:
-                return (payload["outputs"][0].get("text") or "").strip() or "No response."
-            if "generation" in payload:
-                return str(payload["generation"]).strip()
-            if "outputText" in payload:
-                return str(payload["outputText"]).strip()
-        return "No response generated."
+        if model_label != "primary":
+            # Fallback or decline — log so we can monitor frequency.
+            logger.info("safe_generate result via model=%s", model_label)
+        return text
     except Exception as e:
         logger.exception("Generation failed: %s", e)
         return "Error generating response. Please try again."
@@ -2376,7 +2422,11 @@ async def upload(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     file_type: str = Query(default="kb", pattern="^(kb)$"),
-    doc_kind: str = Form(default="ticket"),   # Sprint 3-PREP-B
+    # doc_kind default switched from "ticket" to "" — an empty value
+    # asks the ingestion service to auto-detect from content (PDF/DOCX
+    # → kb, JSON/CSV → ticket). An explicit value from the form still
+    # wins after whitelist validation below.
+    doc_kind: str = Form(default=""),
     user_id: Optional[str] = Depends(auth_dependency),
 ):
     ext = Path(file.filename).suffix[1:].lower() if file.filename else ""
@@ -2384,14 +2434,15 @@ async def upload(
         raise HTTPException(400, f"Type '{ext}' not allowed. Allowed: {settings.ALLOWED_FILE_TYPES}")
 
     # Sprint 3-PREP-B — validate doc_kind against the whitelist.
-    # Invalid kinds silently coerce to 'ticket' (no 400) so the
-    # /upload contract stays backward-compatible for clients that
-    # haven't shipped the dropdown.
+    # Explicit valid value wins; empty / invalid → None so the ingestion
+    # service runs content detection on the downloaded file. The earlier
+    # "ticket" coerce caused every KB PDF to land as doc_kind=ticket,
+    # silently breaking the KB-search / Discuss-with-LogIQ separation.
     _raw_kind = (doc_kind or "").strip().lower()
     if _raw_kind in settings.VALID_DOC_KINDS:
         resolved_doc_kind = _raw_kind
     else:
-        resolved_doc_kind = "ticket"
+        resolved_doc_kind = None  # auto-detect downstream
 
     owner_id = _normalize_owner_id(user_id)
     job_id = uuid.uuid4().hex
@@ -2593,6 +2644,14 @@ async def upload_finalize(
     # The row's other fields (file_name, file_type, owner_id, hash)
     # were populated at presign time, so both branches operate on
     # the same DB row — only the "what runs the ingest" answer differs.
+    # NOTE on doc_kind: we deliberately pass None here (was hardcoded
+    # "ticket" previously). None lets the ingestion service's content
+    # detector run against the downloaded file and decide between
+    # "ticket" (JSON / CSV / TSV) and "kb" (PDF / DOCX / TXT) based on
+    # magic bytes + a JSON-parse probe. An explicit doc_kind from the
+    # presign request body would still take precedence; that pathway
+    # is not yet plumbed here, which is fine — the detector now does
+    # the right thing for all current upload routes.
     if settings.INGESTION_VIA_WORKER:
         from backend.jobs.ingestion_queue import attach_payload_and_enqueue
         attach_payload_and_enqueue(
@@ -2605,7 +2664,7 @@ async def upload_finalize(
                 "file_id": response.file_id,
                 "owner_id": _normalize_owner_id(user_id),
                 "file_size_mb": response.size_bytes / (1024 * 1024),
-                "doc_kind": "ticket",  # legacy default — coerce-on-unknown
+                "doc_kind": None,  # auto-detect from content in ingestion svc
             },
         )
     else:
@@ -2620,7 +2679,7 @@ async def upload_finalize(
             response.file_id,
             _normalize_owner_id(user_id),
             response.size_bytes / (1024 * 1024),
-            "ticket",
+            None,  # doc_kind — auto-detect in ingestion service
         )
         logger.warning(
             "[upload.finalize] INGESTION_VIA_WORKER=false — running ingest "
@@ -3750,7 +3809,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     # expanded = expand_query(req.q)
     # if expanded.acronyms_found:
     #     logger.info(
-    #         "Query expansion: '%s' → acronyms=%s",
+    #         "Query expansion: '%s' -> acronyms=%s",
     #         req.q, list(expanded.acronyms_found.keys()),
     #     )
     #     # Re-embed with expanded text for better semantic match
@@ -3770,7 +3829,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     expanded = expand_query(retrieval_query)
     if expanded.acronyms_found:
         logger.info(
-            "Query expansion: '%s' → acronyms=%s",
+            "Query expansion: '%s' -> acronyms=%s",
             retrieval_query, list(expanded.acronyms_found.keys()),
         )
 
@@ -3811,6 +3870,48 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     _effective_doc_kinds = _sprint3c_doc_kinds
     if getattr(req, "allowed_doc_kinds", None):
         _effective_doc_kinds = list(req.allowed_doc_kinds)
+
+    # Sprint 10 follow-up — persisted-session fallback (migration 050).
+    # The frontend (useChatHandoff.js, Stage4SearchKBHandoff.js) only
+    # attaches `allowed_doc_kinds` on the AUTO-FIRED first message of a
+    # Search-in-KB chat. Subsequent user-typed turns in the same chat
+    # session went through ChatArea with no `allowed_doc_kinds`, so the
+    # backend was losing KB-search context after turn 1 — composer voice
+    # degraded to "default" and the KB-Search system prompt
+    # (backend/routing/kb_search_prompt.py) never activated.
+    #
+    # Read the value persisted by create_chat_session_with_handoff ONLY
+    # when the request didn't carry an explicit override AND no session-
+    # mode-derived value is present. Result: the chat session "remembers"
+    # it's a KB-search session for the life of the row, no matter what
+    # the frontend sends on follow-ups.
+    if not _effective_doc_kinds and session_id:
+        try:
+            from sqlalchemy import text as _dk_text
+            from backend.db.connection import engine as _dk_engine
+            with _dk_engine.connect() as _conn:
+                _row = _conn.execute(
+                    _dk_text(
+                        "SELECT allowed_doc_kinds FROM chat_sessions "
+                        "WHERE id = :sid"
+                    ),
+                    {"sid": session_id},
+                ).mappings().first()
+            _persisted = _row.get("allowed_doc_kinds") if _row else None
+            if isinstance(_persisted, list) and _persisted:
+                _effective_doc_kinds = [str(k) for k in _persisted if k]
+                logger.info(
+                    "[doc_kinds] session=%s using persisted allowed_doc_kinds=%s",
+                    session_id, _effective_doc_kinds,
+                )
+        except Exception as _dk_exc:
+            # Safe-by-default: a failure here just means the chat falls
+            # back to global retrieval. NEVER let a column-missing /
+            # malformed-JSON error break /ask.
+            logger.warning(
+                "[doc_kinds] persisted-session lookup failed for chat=%s: %s",
+                session_id, _dk_exc,
+            )
 
     # ── Sprint 11 — journey-aware retrieval enrichment ──
     # When this chat session originated from a Stage 0 / Stage 3
@@ -4192,6 +4293,75 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
                     logger.info("Variant query improved results: '%s'", variant[:80])
                     break
 
+    # ── Empty-result fallback chain ──────────────────────────────────
+    # Last line of defence against hallucinations: if BOTH the primary
+    # retrieve AND the glossary-variant retry returned zero chunks, the
+    # next code paths would feed an empty context to the LLM and we'd
+    # get a confidently-wrong answer. The fallback module runs:
+    #   1. Haiku-generated semantic rewrites + orchestrator retry
+    #   2. BM25-only sweep on the original query
+    #   3. Marks the result as "empty_after_fallback" so the short-
+    #      circuit handler below returns a canned decline message
+    #      instead of calling the LLM.
+    #
+    # Gated by settings.ENABLE_EMPTY_RESULT_FALLBACK and disabled
+    # automatically when the chat is scope-locked to a single ticket
+    # (the existing scoped polite-no-answer path below handles that).
+    if (
+        settings.ENABLE_EMPTY_RESULT_FALLBACK
+        and not _scope_incident_ids
+        and not retrieval.ranked
+    ):
+        from backend.retrieval.empty_result_fallback import attempt_fallback
+        retrieval = attempt_fallback(
+            original_query=effective_query,
+            original_retrieval=retrieval,
+            retrieve_fn=orchestrator_retrieve,
+            embed_fn=safe_embed,
+            bm25_search_fn=(bm25.search if bm25 and bm25.size > 0 else None),
+            owner_id=owner_id,
+            allowed_file_ids=active_file_ids,
+            file_type="kb",
+            generate_fn=safe_generate,
+            vector_search_fn=pgvector_search,
+            doc_kinds=_effective_doc_kinds,
+        )
+
+    # ── Graceful decline short-circuit ───────────────────────────────
+    # Fires only when the fallback chain explicitly gave up. NEVER
+    # falls through to the LLM with empty context.
+    from backend.retrieval.empty_result_fallback import (
+        SEARCH_MODE_EMPTY_AFTER_FALLBACK,
+    )
+    if retrieval.stats.get("search_mode") == SEARCH_MODE_EMPTY_AFTER_FALLBACK:
+        decline_msg = settings.EMPTY_FALLBACK_DECLINE_MESSAGE
+        logger.info(
+            "[fallback_chain] declining gracefully — query=%r "
+            "rewrites_tried=%d bm25_tried=%s",
+            (effective_query or req.q)[:120],
+            retrieval.stats.get("fallback_rewrites_tried", 0),
+            retrieval.stats.get("fallback_bm25_tried", False),
+        )
+        save_message_to_session(
+            session_id=session_id,
+            role="assistant",
+            content=decline_msg,
+            owner_id=owner_id,
+            sources={"docs": []},
+        )
+        return AnswerResponse(
+            answer=decline_msg,
+            sources=[],
+            confidence=1.0,
+            processing_time_ms=int((time.perf_counter() - start) * 1000),
+            session_id=session_id,
+            context_stats={
+                "empty_after_fallback": True,
+                "cache_hit": False,
+                **retrieval.stats,
+            },
+        )
+
     doc_ranked_original = retrieval.ranked
     # ── Chunk limiter: cap chunks before context/LLM/agents ──
     _limit = limit_chunks(doc_ranked_original, max_chunks=DEFAULT_MAX_CHUNKS)
@@ -4513,7 +4683,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         and _triage_result.complexity != complexity.tier
     ):
         logger.info(
-            "[triage] overriding complexity tier: heuristic=%s → llm=%s (conf=%.2f)",
+            "[triage] overriding complexity tier: heuristic=%s -> llm=%s (conf=%.2f)",
             complexity.tier, _triage_result.complexity, _triage_result.confidence,
         )
         complexity.tier = _triage_result.complexity
@@ -4539,7 +4709,7 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         effective_mode = intent_result.suggested_mode
         intent_upgrade = True
         logger.info(
-            "Intent '%s' upgrading auto → %s",
+            "Intent '%s' upgrading auto -> %s",
             intent_result.intent, intent_result.suggested_mode,
         )
 
@@ -4641,6 +4811,11 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             pattern_context=pattern_context,
             session_scope=_session_scope,
             session_mode=_sprint3a_session_mode,
+            # KB-Search composer voice activates only when
+            # _effective_doc_kinds is a non-empty subset of {"kb","sop"}.
+            # All other paths (no doc_kinds, ticket-only, mixed) leave the
+            # composer on its default conversational voice.
+            doc_kinds=_effective_doc_kinds,
         )
         raw_answer = agent_result.answer
 
@@ -4657,6 +4832,11 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
                 generate_fn=safe_generate,
                 bedrock_client=bedrock,
                 pattern_context=pattern_context,
+                # KB-search system prompt addendum activates only when
+                # _effective_doc_kinds is a non-empty subset of
+                # {"kb","sop"}. All other call paths (no doc_kinds,
+                # ticket-only, mixed) get the unchanged prompt.
+                doc_kinds=_effective_doc_kinds,
             )
             raw_answer = routing.answer
     else:
@@ -4670,6 +4850,10 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             generate_fn=safe_generate,
             bedrock_client=bedrock,
             pattern_context=pattern_context,
+            # See note above — doc_kinds drives the KB-search addendum,
+            # nothing else is affected when it's None / contains
+            # non-KB kinds.
+            doc_kinds=_effective_doc_kinds,
         )
         raw_answer = routing.answer
 
@@ -4858,21 +5042,41 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         context_stats["session_mode"] = _pattern_session_mode
 
     # ── Store in answer cache (fail-safe; never blocks response) ──
-    try:
-        stored = ANSWER_CACHE.put(
-            query=effective_query,
-            owner_id=owner_id,
-            active_file_ids=active_file_ids,
-            payload={
-                "answer": answer,
-                "sources": doc_src,
-                "confidence": confidence,
-                "context_stats": context_stats,
-            },
+    # Cache-poisoning fix: do NOT cache an answer the validator replaced
+    # with the canned safe-fallback (was_modified=True) or that failed
+    # validation outright (validation.passed=False). Persisting either
+    # serves the failure to every future user who asks a semantically
+    # similar question, training them to thumbs-down (which routes
+    # through run_kb_pivot_pipeline) to get a real answer. Only cache
+    # answers the model produced AND the validator accepted.
+    _cache_eligible = bool(
+        getattr(validation, "passed", False)
+        and not getattr(validation, "was_modified", False)
+    )
+    if _cache_eligible:
+        try:
+            stored = ANSWER_CACHE.put(
+                query=effective_query,
+                owner_id=owner_id,
+                active_file_ids=active_file_ids,
+                payload={
+                    "answer": answer,
+                    "sources": doc_src,
+                    "confidence": confidence,
+                    "context_stats": context_stats,
+                },
+            )
+            context_stats["cache_stored"] = bool(stored)
+        except Exception as _cache_exc:
+            logger.warning("Answer cache put wrapper failed: %s", _cache_exc)
+            context_stats["cache_stored"] = False
+    else:
+        logger.info(
+            "[answer_cache] skip PUT (validation.passed=%s was_modified=%s) "
+            "-- not caching safe-fallback / failed answers",
+            getattr(validation, "passed", None),
+            getattr(validation, "was_modified", None),
         )
-        context_stats["cache_stored"] = bool(stored)
-    except Exception as _cache_exc:
-        logger.warning("Answer cache put wrapper failed: %s", _cache_exc)
         context_stats["cache_stored"] = False
 
     # ── Brief 5 / Part 1 — Semantic answer cache put ──
@@ -4881,7 +5085,17 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     # skips without blocking the response.
     context_stats["semantic_cache_id"] = None
     context_stats["semantic_cache_stored"] = False
-    if settings.SEMANTIC_CACHE_ENABLED and validation.passed:
+    # Cache-poisoning fix (matches the answer_cache gate above): also skip
+    # the semantic cache when the validator substituted a safe fallback.
+    # semantic_cache.put has its own confidence/grounding gate, but it
+    # does not see was_modified — so without this guard a substituted
+    # answer could still be persisted if its confidence happens to scrape
+    # above the floor.
+    if (
+        settings.SEMANTIC_CACHE_ENABLED
+        and validation.passed
+        and not getattr(validation, "was_modified", False)
+    ):
         try:
             from backend.services.semantic_cache import put as _sem_put
             _grounding_passed = bool(

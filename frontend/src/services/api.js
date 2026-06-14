@@ -238,7 +238,29 @@ export const uploadFileV2 = async (file, fileType, onProgress, docKind) => {
 export const listFiles = () => api.get("/files");
 export const deleteFile = (fileId) => api.delete(`/files/${fileId}`);
 
-export const askQuestion = (question, sessionId, clarificationResponse = null) => {
+// askQuestion(question, sessionId, clarificationResponse, options)
+//
+// `options` (added in the content-aware doc_kind iteration) carries
+// optional retrieval scoping flags that ride on top of the existing
+// /ask contract:
+//
+//   options.allowedDocKinds  — Array<string> of doc_kind values to
+//                              restrict retrieval to. Used by the
+//                              "Search-in-KB → open new chat" handoff
+//                              to pin retrieval to KB chunks ("kb"),
+//                              keeping the result set off ticket data.
+//                              When omitted/empty, retrieval falls
+//                              through to backend's mode-derived filter
+//                              exactly as before — no behavioural
+//                              change for existing callers.
+//
+// Backward-compatible: 4th positional arg, defaults to empty options.
+export const askQuestion = (
+  question,
+  sessionId,
+  clarificationResponse = null,
+  options = {},
+) => {
   const payload = { q: question, session_id: sessionId || null };
   if (clarificationResponse) {
     payload.clarification_response = {
@@ -246,6 +268,9 @@ export const askQuestion = (question, sessionId, clarificationResponse = null) =
       selected_option_id: clarificationResponse.selectedOptionId,
       free_text: clarificationResponse.freeText || null,
     };
+  }
+  if (Array.isArray(options.allowedDocKinds) && options.allowedDocKinds.length) {
+    payload.allowed_doc_kinds = options.allowedDocKinds;
   }
   return api.post("/ask", payload);
 };

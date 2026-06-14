@@ -148,7 +148,18 @@ export default function useChatHandoff(journeySessionId) {
 
         dispatch({ type: "SET_LOADING", payload: true });
         try {
-          const askRes = await askQuestion(text, chat_session_id);
+          // When this handoff is NOT scope-locked to a single ticket,
+          // it's the KB-search style entry point — restrict retrieval
+          // to KB chunks so PDFs/SOPs surface but ticket JSON doesn't
+          // leak into the answer. The scoped path (scopeIncidentId
+          // present) already filters by Incident_Number, so a doc_kind
+          // filter would be redundant — and would actually exclude
+          // tickets from a Discuss-with-LogIQ chat. So we only add the
+          // filter on the non-scoped path.
+          const askOptions = scopeIncidentId
+            ? {}
+            : { allowedDocKinds: ["kb"] };
+          const askRes = await askQuestion(text, chat_session_id, null, askOptions);
           const askData = askRes.data;
           dispatch({
             type: "ADD_ASSISTANT_MESSAGE",

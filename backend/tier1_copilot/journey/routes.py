@@ -649,7 +649,7 @@ async def post_escalation_handoff_note(
     else:
         logger.info(
             "[journey.handoff_note] sid=%s — stage3_visited=%s "
-            "ticked_in_body=%d → no diagnostic bullets",
+            "ticked_in_body=%d -> no diagnostic bullets",
             session_id, stage3_visited, len(attempted_step_numbers),
         )
 
@@ -851,7 +851,7 @@ async def post_event(
             cohort = _load_or_cache(session_id)
             _consolidated_invalidate_by_cohort(cohort)
             logger.info(
-                "[journey.event] stage_3 dislike → consolidated cache invalidated "
+                "[journey.event] stage_3 dislike -> consolidated cache invalidated "
                 "sid=%s cohort_size=%d",
                 session_id, len(cohort) if isinstance(cohort, list) else 0,
             )

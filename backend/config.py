@@ -89,11 +89,92 @@ class Settings(BaseSettings):
 
     CHUNK_MAX_CHARS: int = 6000
     CHUNK_MIN_CHARS: int = 200
-    CHUNK_OVERLAP_CHARS: int = 0
+    # Overlap is applied ONLY on size-based mid-section splits (build_chunks).
+    # Structured docs whose chunks are bounded by detected headings are
+    # unaffected. 600 ≈ 10% of CHUNK_MAX_CHARS — preserves cross-boundary
+    # context without producing duplicate retrieval hits. Set to 0 to disable.
+    CHUNK_OVERLAP_CHARS: int = 600
     CHUNK_BATCH_SIZE: int = 10          # ← was 6, now 10 chunks per Haiku call (fewer API calls)
 
     LLM_CHUNK_FALLBACK_PREVIEW_CHARS: int = 8000
     ENABLE_LLM_CHUNK_FALLBACK: bool = True
+
+    # ----------------------------------------------------------------
+    # Ingestion safety caps — protect against huge / malformed uploads.
+    # MAX_DOC_PAGES applies to PDFs (page count from fitz).
+    # MAX_DOC_CHARS is a pre-chunk projection guard (sum of block chars).
+    # MAX_DOC_CHUNKS is enforced after build_chunks; oversized docs raise
+    # so we never silently truncate, and never embed a 10k-chunk runbook.
+    # ----------------------------------------------------------------
+    MAX_DOC_PAGES: int = 1000
+    MAX_DOC_CHARS: int = 8_000_000      # ~1.5M tokens worth of source text
+    MAX_DOC_CHUNKS: int = 5000
+
+    # ----------------------------------------------------------------
+    # Extraction guard — per-page quality check for PDFs.
+    # When a page returns suspiciously little text AND contains images,
+    # we flag it as a likely scanned page that needs OCR. In SHADOW mode
+    # we only LOG the decision (no Textract calls, no cost). Flip
+    # OCR_SHADOW_MODE off in a later iteration once we've tuned the
+    # threshold against real corpus data.
+    # ----------------------------------------------------------------
+    EXTRACTION_GUARD_ENABLED: bool = True
+    EXTRACTION_GUARD_MIN_CHARS_PER_PAGE: int = 50
+    OCR_SHADOW_MODE: bool = True        # log-only; do not call Textract
+
+    # Garbled-text guard — catches PDFs with broken CID fonts where fitz
+    # returns characters but they're unreadable (private-use codepoints,
+    # replacement chars). Runs only on pages that pass the length check;
+    # threshold is the fraction of "good" chars required to NOT flag.
+    ENABLE_GARBLED_TEXT_GUARD: bool = True
+    GARBLED_TEXT_PRINTABLE_THRESHOLD: float = 0.60
+
+    # ----------------------------------------------------------------
+    # Live Textract OCR — only fires when OCR_SHADOW_MODE = False.
+    # Per-doc cap caps the worst case where a 1000-page scanned upload
+    # would otherwise route every page to Textract. The render scale
+    # controls the DPI of the PNG sent to Textract (higher = better
+    # OCR accuracy at higher Textract memory usage; 2.0 is the sweet
+    # spot for most scanned docs).
+    # ----------------------------------------------------------------
+    MAX_OCR_PAGES_PER_DOC: int = 100
+    TEXTRACT_RENDER_DPI_SCALE: float = 2.0
+
+    # ----------------------------------------------------------------
+    # PDF table extraction (fitz.find_tables). When enabled, each PDF
+    # page is scanned for table structures AFTER text extraction; any
+    # tables found are appended as block_type="table" blocks (matching
+    # the existing DOCX table path). Strict mode reduces false positives
+    # from code listings and aligned text. Disable to revert to
+    # text-only PDF parsing.
+    # ----------------------------------------------------------------
+    ENABLE_PDF_TABLE_EXTRACTION: bool = True
+    PDF_TABLE_STRATEGY: str = "lines_strict"   # fitz find_tables strategy
+
+    # ----------------------------------------------------------------
+    # Empty-result fallback chain — runs ONLY after the existing
+    # variant-retry path has already failed to return any chunks.
+    #
+    # Stage 1: Haiku query rewriter generates N alternative phrasings
+    #          (semantically different, not just glossary swaps) and
+    #          retries the orchestrator on each until one returns hits.
+    # Stage 2: BM25-only sweep over the same query — last-ditch lexical
+    #          attempt for cases where vector + hybrid still returned 0.
+    # Stage 3: Graceful decline. The orchestrator returns a sentinel
+    #          RetrievalResult with stats["search_mode"] =
+    #          "empty_after_fallback". The chat endpoint MUST honor
+    #          this sentinel and return a canned "no info" answer —
+    #          NEVER call the LLM with an empty context (that's the
+    #          hallucination path we're closing).
+    # ----------------------------------------------------------------
+    ENABLE_EMPTY_RESULT_FALLBACK: bool = True
+    EMPTY_FALLBACK_LLM_REWRITE_COUNT: int = 2     # Haiku rewrites to try
+    EMPTY_FALLBACK_BM25_TOP_K: int = 20           # BM25-only sweep top-K
+    EMPTY_FALLBACK_DECLINE_MESSAGE: str = (
+        "I couldn't find relevant information in the indexed documents "
+        "for your question. Try rephrasing, or upload a document that "
+        "covers this topic."
+    )
 
     MAX_METADATA_INPUT_CHARS: int = 1800
     MAX_CONTEXT_SUMMARY_CHARS: int = 120
@@ -459,8 +540,64 @@ class Settings(BaseSettings):
     CONF_WEIGHT_CONSISTENCY: float = 0.20
 
     VALIDATION_MIN_CONFIDENCE: float = 0.35
-    VALIDATION_MIN_GROUNDING: float = 0.25
+    # Tightened from 0.25 → 0.40 in response to the manual-eval feedback:
+    # several Q's (Q3 timer hallucination, Q10 CLI expansion) passed the
+    # looser 0.25 gate despite containing fabricated specifics that the
+    # grounding checker only weakly penalised. The prompt-side
+    # "DO NOT FABRICATE SPECIFICS" directive does the prevention work;
+    # this threshold raise catches what still gets through.
+    VALIDATION_MIN_GROUNDING: float = 0.40
     VALIDATION_MIN_COVERAGE: float = 0.20
+
+    # ----------------------------------------------------------------
+    # Response Relevancy gate — Haiku scores "does this answer address
+    # this question?" post-generation. Independent of grounding
+    # (grounded but off-topic still fails). Fails OPEN on Haiku error
+    # so the judge being unreachable doesn't block legitimate answers.
+    # ----------------------------------------------------------------
+    # ----------------------------------------------------------------
+    # KB-search system prompt — activates ONLY when the request's
+    # allowed_doc_kinds is a non-empty subset of {kb, sop}. Adds the
+    # RAG Knowledge Architect addendum to the existing Claude system
+    # prompt. Set to false to disable without touching code.
+    # ----------------------------------------------------------------
+    ENABLE_KB_SEARCH_PROMPT: bool = True
+
+    ENABLE_RELEVANCY_CHECK: bool = True
+    MIN_RELEVANCY_SCORE: float = 0.50          # 0.0-1.0; below = off-topic
+    RELEVANCY_MAX_TOKENS: int = 128            # Haiku output budget for the score
+    RELEVANCY_FALLBACK_MESSAGE: str = (
+        "- The generated answer did not appear to directly address your "
+        "question.\n"
+        "- Please try rephrasing — make sure the question is specific and "
+        "covered by the uploaded content."
+    )
+
+    # ----------------------------------------------------------------
+    # LLM hard timeout + fast-model fallback
+    #
+    # Previous boto3 config used read_timeout=120 and max_attempts=10.
+    # Worst-case user wait was 10 × 120s = 20 minutes for a hung call.
+    # These knobs replace that with a tight per-attempt timeout plus a
+    # capped retry count, and add a fast-model fallback (Haiku 4.5)
+    # when the primary model (Mistral) times out or throttles.
+    #
+    # Wall-clock worst case after this iteration:
+    #   primary attempts (3 × 45s = 135s) + Haiku fallback (~30s) ≈ 165s
+    # Typical case: ~10–20s (no retry needed).
+    #
+    # Fails graceful: if both primary AND Haiku error, returns
+    # LLM_FALLBACK_DECLINE_MESSAGE rather than hanging the user.
+    # ----------------------------------------------------------------
+    LLM_TIMEOUT_FALLBACK_ENABLED: bool = True
+    LLM_READ_TIMEOUT_S: int = 45               # per-attempt socket read timeout
+    LLM_CONNECT_TIMEOUT_S: int = 10            # TCP connect timeout
+    LLM_MAX_ATTEMPTS: int = 3                  # boto3 max_attempts (down from 10)
+    LLM_HAIKU_FALLBACK_MAX_TOKENS: int = 2048  # output budget on fallback path
+    LLM_FALLBACK_DECLINE_MESSAGE: str = (
+        "- The system is taking longer than expected to respond. Please "
+        "try again in a moment, or rephrase your question."
+    )
 
     VALIDATION_HALLUCINATION_PHRASES: List[str] = [
         "as an AI",

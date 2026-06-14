@@ -14,10 +14,13 @@ logger = logging.getLogger("acadia-log-iq")
 
 
 def _make_bedrock_runtime():
+    # Same tightening as the shared bedrock client in api.py — see the
+    # comment there for the rationale. Per-attempt timeout and attempt
+    # cap come from settings so they can be re-tuned per environment.
     boto_cfg = BotoConfig(
-        retries={"max_attempts": 10, "mode": "adaptive"},
-        read_timeout=120,
-        connect_timeout=30,
+        retries={"max_attempts": settings.LLM_MAX_ATTEMPTS, "mode": "adaptive"},
+        read_timeout=settings.LLM_READ_TIMEOUT_S,
+        connect_timeout=settings.LLM_CONNECT_TIMEOUT_S,
         tcp_keepalive=True,
     )
 
@@ -177,6 +180,34 @@ class BedrockHaikuClient:
                 time.sleep(0.3 * attempt)
 
         return None
+
+    def invoke_text(
+        self,
+        *,
+        prompt: str,
+        system: str = "You are a helpful assistant.",
+        max_tokens: Optional[int] = None,
+    ) -> str:
+        """
+        Public free-form text invoke. Companion to invoke_json for callers
+        that want raw text rather than parsed JSON.
+
+        Used by the LLM timeout-fallback guard: when the primary chat model
+        (Mistral) times out or throttles, this is the entry point for the
+        Haiku failover. Returns "" on any failure — the caller decides
+        whether to surface a decline message.
+        """
+        budget = max_tokens or settings.HAIKU_MAX_TOKENS
+        try:
+            raw, _stop = self._invoke_text(
+                system=system,
+                prompt=prompt,
+                max_tokens=budget,
+            )
+            return (raw or "").strip()
+        except Exception as exc:
+            logger.warning("Haiku invoke_text failed: %s", exc)
+            return ""
 
 
 haiku_client = BedrockHaikuClient()

@@ -74,7 +74,9 @@ def _invoke_mistral(
     return generate_fn(prompt, settings.HAIKU_ANSWER_MAX_TOKENS)
 
 
-def _build_claude_system_prompt() -> str:
+def _build_claude_system_prompt(
+    doc_kinds: Optional[List[str]] = None,
+) -> str:
     """
     Build Claude system prompt with optional markdown formatting guidance.
 
@@ -82,7 +84,56 @@ def _build_claude_system_prompt() -> str:
     defines response style and is core to pre-feature behavior. The markdown
     formatting addendum is appended only when RICH_FORMATTING_PROMPT_ENABLED
     so the flag-off path is byte-identical to the pre-brief prompt.
+
+    KB-search addendum (NEW, additive only)
+    ---------------------------------------
+    When `doc_kinds` is a non-empty subset of {"kb","sop"} — i.e. the
+    request restricted retrieval to KB / SOP content — the full
+    "RAG Knowledge Architect" prompt from
+    `backend/routing/kb_search_prompt.py` is appended at the end. The
+    base prompt and formatting addendum are NOT replaced or edited;
+    the KB prompt is purely supplementary guidance for the KB-search
+    chat flow. All other flows (general chat without doc_kinds,
+    ticket-scoped chats, journey stages, RCA, escalation) get the
+    exact same prompt they did before this change.
     """
+    # Detect KB-Search mode early so we can relax the "no bullets / no headers"
+    # guardrails ONLY for the KB/SOP path. All other flows (general chat,
+    # ticket-scoped, RCA, journey stages, escalation) keep the conversational
+    # voice exactly as before.
+    try:
+        from backend.routing.kb_search_prompt import is_kb_search_mode
+        _kb_mode = is_kb_search_mode(doc_kinds)
+    except Exception as _kb_exc:
+        logger.warning("[kb_search_prompt] is_kb_search_mode failed: %s", _kb_exc)
+        _kb_mode = False
+
+    # Formatting-voice lines are the ONLY part of the base prompt that
+    # differs between KB-Search mode and all other flows. In KB mode we
+    # explicitly allow bullets, numbered steps (1., 2., 3.), arrows, and
+    # markdown headings so the KB-Search system addendum below can actually
+    # take effect. In every other flow we keep the original suppressive
+    # rules verbatim.
+    if _kb_mode:
+        _voice_formatting = (
+            "- Structure the answer with bullet points, numbered steps "
+            "(1., 2., 3.) or arrows (→), and markdown headings (##, ###) — KB / "
+            "SOP / runbook answers are EXPECTED to be structured. Follow the "
+            "MODE-specific FORMAT, HEADINGS, and STYLE guidance from the "
+            "KB-Search system prompt appended below.\n"
+            "- Section headings such as \"Key Components\", \"How It Works\", "
+            "\"Procedure\", \"Validate\", \"Rollback / If It Fails\" are "
+            "encouraged whenever the MODE calls for them.\n"
+        )
+    else:
+        _voice_formatting = (
+            "- Use bullet points ONLY when the question genuinely calls for a list "
+            "(e.g., \"list all X\", \"what are the steps\", \"compare\"). For everything "
+            "else, answer in natural prose paragraphs.\n"
+            "- Never produce section headers like \"Root Cause\", \"Resolution\", "
+            "\"Key Findings\" unless the user explicitly asked for a structured breakdown.\n"
+        )
+
     # Conversational-engineer voice. See CONVERSATIONAL_REFACTOR_BRIEF goal 1.1 —
     # bullets-only-when-asked + length-proportional + no "based on documents" phrasing.
     base_prompt = (
@@ -97,20 +148,54 @@ def _build_claude_system_prompt() -> str:
         "- Match your response length to the question. A short specific question "
         "gets a short specific answer — two to four sentences. A broad question gets "
         "a fuller answer. A comparison gets a comparison. A how-to gets steps.\n"
-        "- Use bullet points ONLY when the question genuinely calls for a list "
-        "(e.g., \"list all X\", \"what are the steps\", \"compare\"). For everything "
-        "else, answer in natural prose paragraphs.\n"
-        "- Never produce section headers like \"Root Cause\", \"Resolution\", "
-        "\"Key Findings\" unless the user explicitly asked for a structured breakdown.\n"
+        + _voice_formatting +
         "- The documents are your source of truth. If the answer is in them, give it "
         "confidently in your own words. Never say \"the documents show\" or \"based on "
         "the documents\" — just answer.\n"
         "- If the answer is genuinely not in the documents, say so plainly in one "
-        "sentence. Do not hedge with \"insufficient evidence\" or \"I cannot extract.\""
+        "sentence. Do not hedge with \"insufficient evidence\" or \"I cannot extract.\"\n\n"
+        "DO NOT FABRICATE SPECIFICS — when a precise technical detail is NOT in "
+        "the DOCUMENTS, do NOT supply one from general knowledge:\n"
+        "- Never invent numbers, timer values, percentages, ports, or counters "
+        "(e.g., \"180 seconds\", \"port 179\") that are not in the documents.\n"
+        "- Never invent command syntax, CLI flags, or sub-commands that are not "
+        "literally shown in the documents. If the docs say one form, use that "
+        "form — do NOT expand it into a more \"complete\" textbook version.\n"
+        "- Never invent version numbers, RFC numbers, model numbers, or product codes.\n"
+        "- Never paraphrase a \"typical\" warning, alert, or procedure when the "
+        "documents contain a specific one — use the document's exact wording.\n"
+        "- If a specific the user asks for is not in the documents, say "
+        "\"the source does not specify\" for that detail and continue with what IS "
+        "in the documents. Your training-knowledge is NOT a permitted source for "
+        "specifics — only the documents are.\n"
+        "- You may still synthesize CONCEPTUAL or STRUCTURAL answers (what the "
+        "document teaches, the reasoning, the resolution pattern) confidently. "
+        "The anti-fabrication rule applies to verbatim specifics, not to "
+        "inferred concepts."
     )
 
     if not getattr(settings, "RICH_FORMATTING_PROMPT_ENABLED", True):
         return base_prompt
+
+    # Same KB-mode swap as the base prompt — keep the markdown rules, but
+    # flip the "numbered list ONLY when asked / no headers" lines so KB
+    # answers can actually use the structure the KB-Search prompt requires.
+    if _kb_mode:
+        _addendum_structure = (
+            "- Numbered lists (1., 2., 3.) are encouraged for procedures, "
+            "phased plans, and ordered steps. Arrows (→) work well for "
+            "state transitions, if/then branches, and short flows.\n"
+            "- Markdown headings (##, ###) are EXPECTED — group the answer by "
+            "the MODE-appropriate sections (e.g., \"Key Components\", "
+            "\"Procedure\", \"Validate\", \"Rollback\") as defined in the "
+            "KB-Search system prompt below.\n"
+        )
+    else:
+        _addendum_structure = (
+            "- Numbered list ONLY when the user explicitly asks for steps.\n"
+            "- Default to flowing prose paragraphs for everything else. Do not use "
+            "headers (# ## ###) unless asked for a formal structured report.\n"
+        )
 
     formatting_addendum = (
         "\n\n"
@@ -126,9 +211,7 @@ def _build_claude_system_prompt() -> str:
         "- Emphasize a key fact or metric → **bold**.\n"
         "- Call out a recommendation or important note → use a blockquote "
         "(> line) on its own paragraph.\n"
-        "- Numbered list ONLY when the user explicitly asks for steps.\n"
-        "- Default to flowing prose paragraphs for everything else. Do not use "
-        "headers (# ## ###) unless asked for a formal structured report.\n"
+        + _addendum_structure +
         "\n"
         "CRITICAL — Confident synthesis: When asked for lessons, insights, "
         "takeaways, recommendations, or biggest learnings from a ticket or "
@@ -140,7 +223,27 @@ def _build_claude_system_prompt() -> str:
         "inference."
     )
 
-    return base_prompt + formatting_addendum
+    final_prompt = base_prompt + formatting_addendum
+
+    # ── KB-Search system addendum (additive; off by default unless the
+    # request's allowed_doc_kinds restricted retrieval to KB/SOP).
+    # The check, normalization, and feature-flag gate all live in
+    # kb_search_prompt.get_kb_search_addendum — when the path isn't
+    # KB-search this returns "" and the system prompt is byte-identical
+    # to the pre-change behaviour.
+    try:
+        from backend.routing.kb_search_prompt import get_kb_search_addendum
+        kb_addendum = get_kb_search_addendum(doc_kinds)
+    except Exception as exc:
+        # Defensive: a bug in the KB-prompt module must not break the
+        # main answer path. Log and continue with the unchanged prompt.
+        logger.warning("[kb_search_prompt] get_kb_search_addendum failed: %s", exc)
+        kb_addendum = ""
+
+    if kb_addendum:
+        final_prompt = final_prompt + "\n\n" + kb_addendum
+
+    return final_prompt
 
 
 def _invoke_claude(
@@ -149,11 +252,18 @@ def _invoke_claude(
     model_id: str,
     max_tokens: int,
     temperature: float,
+    doc_kinds: Optional[List[str]] = None,
 ) -> str:
-    """Invoke Claude (Haiku or Sonnet) via Bedrock Messages API."""
+    """Invoke Claude (Haiku or Sonnet) via Bedrock Messages API.
+
+    `doc_kinds` (optional) is forwarded to the system-prompt builder so
+    the KB-search addendum (`backend/routing/kb_search_prompt.py`)
+    activates ONLY when the request restricted retrieval to KB / SOP
+    content. None or any other doc_kinds → unchanged prompt behaviour.
+    """
     body = {
         "anthropic_version": "bedrock-2023-05-31",
-        "system": _build_claude_system_prompt(),
+        "system": _build_claude_system_prompt(doc_kinds=doc_kinds),
         "max_tokens": max_tokens,
         "temperature": temperature,
         "messages": [
@@ -203,6 +313,7 @@ def route_and_generate(
     bedrock_client: Any,
     triage_context: Optional[Dict[str, Any]] = None,
     pattern_context: Optional[Dict[str, Any]] = None,
+    doc_kinds: Optional[List[str]] = None,
 ) -> RoutingResult:
     """
     Main routing entry point. Called by the /ask endpoint.
@@ -249,11 +360,14 @@ def route_and_generate(
     result.reason = reason
 
     logger.info(
-        "Model routing: query='%.80s' → model=%s | %s",
+        "Model routing: query='%.80s' -> model=%s | %s",
         query, model_name, reason,
     )
 
     # Step 3: Build enriched prompt
+    # doc_kinds is threaded through so context_builder can apply the
+    # KB-Search variant of grounding rules (numbered lists + headings
+    # allowed) when the request is restricted to kb/sop content.
     prompt = build_prompt(
         query=query,
         doc_context=doc_context,
@@ -263,6 +377,7 @@ def route_and_generate(
         retrieval_confidence=retrieval_confidence,
         source_count=len(set(source_names)),
         pattern_context=pattern_context,
+        doc_kinds=doc_kinds,
     )
     result.prompt_chars = len(prompt)
 
@@ -277,6 +392,11 @@ def route_and_generate(
                 model_id=settings.BEDROCK_SONNET_MODEL,
                 max_tokens=cap,
                 temperature=settings.SONNET_TEMPERATURE,
+                # KB-search addendum activates only when doc_kinds is a
+                # non-empty subset of {"kb","sop"} (see
+                # kb_search_prompt.is_kb_search_mode). Mistral path is
+                # unaffected by design — KB prompt is Claude-only.
+                doc_kinds=doc_kinds,
             )
         if model_name == "haiku":
             return _invoke_claude(
@@ -285,6 +405,7 @@ def route_and_generate(
                 model_id=settings.BEDROCK_HAIKU_MODEL,
                 max_tokens=cap,
                 temperature=settings.HAIKU_ANSWER_TEMPERATURE,
+                doc_kinds=doc_kinds,
             )
         return _invoke_mistral(prompt, generate_fn)
 

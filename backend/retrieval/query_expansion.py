@@ -461,7 +461,7 @@ def expand_query(query: str, store: Optional[GlossaryStore] = None) -> ExpandedQ
     normalized = re.sub(r"\s+", " ", normalized).strip()
 
     if normalized.lower() != query.lower():
-        logger.info("Query normalized: '%s' → '%s'", query, normalized)
+        logger.info("Query normalized: '%s' -> '%s'", query, normalized)
         # Use normalized version for tokenization and embedding
         query_for_processing = normalized
     else:

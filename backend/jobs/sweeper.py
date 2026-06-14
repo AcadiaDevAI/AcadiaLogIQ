@@ -168,7 +168,7 @@ def sweep_one_table(
 
         logger.warning(
             "[sweeper] stuck table=%s id=%s kind=%s age=%ds ceiling=%ds "
-            "attempts=%d/%d → %s",
+            "attempts=%d/%d -> %s",
             table, row["id"], kind, age, ceiling,
             attempts, max_attempts,
             "permanent_fail" if permanent else "soft_reset",
