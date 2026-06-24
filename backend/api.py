@@ -497,6 +497,16 @@ async def lifespan(app: FastAPI):
         )
     logger.info("===================")
 
+    # Phase 1 multi-tenant: boot-time check that the single-tenant
+    # fallback in db/connection.py hasn't been left active after a
+    # second tenant was provisioned. Cheap (one COUNT on organizations).
+    # See HARD PRE-FLIGHT CHECKLIST in backend/db/connection.py.
+    try:
+        from backend.db.connection import warn_if_multi_tenant_and_fallback_active
+        warn_if_multi_tenant_and_fallback_active()
+    except Exception as _exc:
+        logger.warning("[tenancy] boot guardrail probe failed: %s", _exc)
+
     bm25 = get_bm25_index()
     doc_count = rebuild_bm25_from_postgres()
     logger.info("BM25 ready from PostgreSQL: %d docs", doc_count)
@@ -678,6 +688,20 @@ except Exception as _ticket_filter_exc:
         _ticket_filter_exc,
     )
 
+# Phase 0 multi-tenant — mount the tenancy router. Adds endpoints for
+# org listing, active-org context, and the Clerk webhook receiver. See
+# backend/tenancy/README.md for the full surface and design notes.
+# Fail-soft: a bug in the tenancy package never prevents app start.
+try:
+    from backend.tenancy.routes import router as _tenancy_router
+    app.include_router(_tenancy_router)
+    logger.info("[tenancy] router mounted (Phase 0 multi-tenant foundation)")
+except Exception as _tenancy_exc:
+    logger.warning(
+        "[tenancy] failed to mount router (module disabled): %s",
+        _tenancy_exc,
+    )
+
 # Phase 4 — shared per-user rate limiter (see
 # backend/observability/rate_limit.py). The Limiter is now defined
 # in a separate module so sub-routers (RCA, Gap Analysis, jobs) can
@@ -757,6 +781,27 @@ allow_origins=[
 # handler runs.
 # ─────────────────────────────────────────────────────────────
 app.add_middleware(RequestContextMiddleware)
+
+
+# ─────────────────────────────────────────────────────────────
+# Phase 1 multi-tenant context binding.
+#
+# Resolves the active org from the inbound Clerk JWT and parks it in
+# the ``current_org_id_var`` ContextVar so the SQLAlchemy ``after_begin``
+# hook in ``backend.db.connection`` can stamp every transaction with
+# ``SET LOCAL app.current_org = '<uuid>'``. That session var is what
+# the Row Level Security policies (migration 061) compare against.
+#
+# Registered AFTER ``RequestContextMiddleware`` so the request_id is
+# already bound when we log any tenancy-related warning.
+#
+# Failure-soft: any JWT decode / org lookup error leaves the ContextVar
+# unset. After RLS is enabled, an unset var means zero rows from tenant
+# tables — exactly what we want for unauth requests.
+# ─────────────────────────────────────────────────────────────
+from backend.tenancy.middleware import TenancyContextMiddleware
+app.add_middleware(TenancyContextMiddleware)
+logger.info("[tenancy] TenancyContextMiddleware registered (Phase 1 RLS plumbing)")
 
 
 # ─────────────────────────────────────────────────────────────
@@ -1824,10 +1869,17 @@ async def index_file_job(
             row["embedding"] = emb
             chunk_rows.append(row)
 
+            # Multi-tenant: stamp the chunk's org so BM25.search can
+            # filter by tenant at query time. Pulled from the request-
+            # scoped ContextVar (set by the tenancy middleware OR, for
+            # worker-driven ingest, by worker.py:run_one before dispatch).
+            from backend.db.connection import current_org_id_var as _cur_org_var
+            _bm25_ctx_org = _cur_org_var.get()
             bm25_ids.append(chunk_id)
             bm25_docs.append(embed_text)
             bm25_metas.append(
                 {
+                    "organization_id": str(_bm25_ctx_org) if _bm25_ctx_org else None,
                     "file_id": file_id,
                     "owner_id": owner_id,
                     "source": filename,
@@ -2164,6 +2216,21 @@ async def register_or_login(
         full_name=req.full_name,
         avatar_url=req.avatar_url,
     )
+
+    # Phase 0 multi-tenant — reconcile Clerk org memberships into our
+    # local org_memberships table. Belt-and-suspenders on top of the
+    # webhook: webhooks can be delayed or dropped, and a user logging
+    # in expects their org list to be correct *right now*. Fail-soft —
+    # a sync failure must NEVER block login.
+    try:
+        from backend.tenancy.clerk_sync import sync_user_memberships_from_clerk
+        sync_user_memberships_from_clerk(user_id)
+    except Exception as _tenancy_sync_exc:
+        logger.warning(
+            "[tenancy] post-login membership sync failed for user=%s: %s",
+            user_id, _tenancy_sync_exc,
+        )
+
     return {
         "status": "ok",
         "user_id": user["clerk_id"],

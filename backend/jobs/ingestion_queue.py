@@ -71,6 +71,11 @@ def _engine():
 class _IngestJob:
     """Worker-side dispatch tuple. Internal only — the API surface
     returns plain dicts so the wire contract stays explicit.
+
+    ``organization_id`` is the tenant the upload belongs to. The
+    worker sets ``app.current_org`` from this before invoking the
+    ingestion handler so chunks / embeddings / vocabulary rows
+    materialised by the handler land under the right org.
     """
     id: str            # this is the ``job_id`` TEXT, not a UUID
     kind: str
@@ -79,6 +84,7 @@ class _IngestJob:
     payload: Dict[str, Any]
     attempts: int
     max_attempts: int
+    organization_id: Optional[str]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -97,6 +103,7 @@ def enqueue_ingestion_job(
     payload: Dict[str, Any],
     kind: str = JOB_KIND_INGEST_DOCUMENT,
     max_attempts: int = 3,
+    organization_id: Optional[str] = None,
 ) -> None:
     """INSERT a new pending ingestion job.
 
@@ -119,6 +126,17 @@ def enqueue_ingestion_job(
           "doc_kind":     "ticket",
         }
     """
+    # Multi-tenant: read the tenant from the request-scoped ContextVar
+    # set by TenancyContextMiddleware (or accept it explicitly). We pass
+    # it to the INSERT instead of relying on the column DEFAULT (Acadia)
+    # so a US Pharma upload doesn't trip RLS WITH CHECK on the way in.
+    org_id = (organization_id or "").strip() or None
+    if not org_id:
+        from backend.db.connection import current_org_id_var
+        ctx_org = current_org_id_var.get()
+        if ctx_org is not None:
+            org_id = str(ctx_org)
+
     payload_json = json.dumps(payload or {}, ensure_ascii=False, default=str)
     with _engine().begin() as conn:
         conn.execute(
@@ -128,13 +146,16 @@ def enqueue_ingestion_job(
                     job_id, file_id, owner_id, file_name, file_type,
                     file_hash, status, processed_chunks, total_chunks,
                     successful_chunks, created_at,
-                    kind, payload, attempts, max_attempts, not_before
+                    kind, payload, attempts, max_attempts, not_before,
+                    organization_id
                 )
                 VALUES (
                     :job_id, :file_id, :owner_id, :file_name, :file_type,
                     :file_hash, 'pending', '0', '0',
                     '0', NOW(),
-                    :kind, CAST(:payload AS JSONB), 0, :max_attempts, NOW()
+                    :kind, CAST(:payload AS JSONB), 0, :max_attempts, NOW(),
+                    COALESCE(CAST(:org_id AS UUID),
+                             '76c36d23-b8c1-4b81-b121-bef5e1b10b3b'::uuid)
                 )
                 """
             ),
@@ -148,11 +169,12 @@ def enqueue_ingestion_job(
                 "kind": kind,
                 "payload": payload_json,
                 "max_attempts": int(max_attempts),
+                "org_id": org_id,
             },
         )
     logger.info(
-        "[ingestion.enqueue] job_id=%s file_id=%s kind=%s file=%r",
-        job_id, file_id, kind, file_name,
+        "[ingestion.enqueue] job_id=%s file_id=%s kind=%s org=%s file=%r",
+        job_id, file_id, kind, org_id, file_name,
     )
 
 
@@ -283,7 +305,8 @@ def claim_next(
                    owner_id,
                    payload,
                    attempts,
-                   max_attempts
+                   max_attempts,
+                   organization_id::text AS organization_id
               FROM ingestion_jobs
              WHERE status = 'pending'
                AND not_before <= NOW()
@@ -303,7 +326,8 @@ def claim_next(
                    owner_id,
                    payload,
                    attempts,
-                   max_attempts
+                   max_attempts,
+                   organization_id::text AS organization_id
               FROM ingestion_jobs
              WHERE status = 'pending'
                AND not_before <= NOW()
@@ -345,10 +369,12 @@ def claim_next(
         payload=payload or {},
         attempts=int(row["attempts"]) + 1,  # we just bumped it
         max_attempts=int(row["max_attempts"]),
+        organization_id=row["organization_id"],
     )
     logger.info(
-        "[ingestion.claim] worker=%s id=%s file_id=%s attempt=%d/%d",
-        worker_id, job.id, job.file_id, job.attempts, job.max_attempts,
+        "[ingestion.claim] worker=%s id=%s file_id=%s org=%s attempt=%d/%d",
+        worker_id, job.id, job.file_id, job.organization_id,
+        job.attempts, job.max_attempts,
     )
     return job
 

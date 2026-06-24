@@ -162,12 +162,42 @@ class GlossaryStore:
         return {k: list(v) for k, v in self._acronym_to_full.items()}
 
 
-# Singleton
-_glossary_store = GlossaryStore()
+# ─────────────────────────────────────────────────────────────
+# Multi-tenant glossary registry.
+#
+# Each org gets its own ``GlossaryStore`` so acronyms learned from
+# Acadia documents never expand for a US Pharma user's query (and
+# vice-versa). ``get_glossary_store()`` resolves the right per-org
+# store from the request-scoped ContextVar set by the tenancy
+# middleware. Callers that already operate without an org context
+# (rare — boot diagnostics, tests) get an empty in-memory store
+# so reads short-circuit safely.
+# ─────────────────────────────────────────────────────────────
+_glossary_store_by_org: Dict[str, GlossaryStore] = {}
+_glossary_store_orphan = GlossaryStore()  # used when ContextVar is unset
 
 
-def get_glossary_store() -> GlossaryStore:
-    return _glossary_store
+def get_glossary_store(organization_id: Optional[str] = None) -> GlossaryStore:
+    if organization_id is None:
+        from backend.db.connection import current_org_id_var
+        ctx_org = current_org_id_var.get()
+        organization_id = str(ctx_org) if ctx_org is not None else None
+    if not organization_id:
+        return _glossary_store_orphan
+    store = _glossary_store_by_org.get(organization_id)
+    if store is None:
+        store = GlossaryStore()
+        _glossary_store_by_org[organization_id] = store
+    return store
+
+
+def _clear_all_glossary_stores() -> None:
+    """Reset every per-org cache. Called from rebuild_glossary_from_postgres
+    so the next refresh starts from a clean baseline."""
+    for store in _glossary_store_by_org.values():
+        store.clear()
+    _glossary_store_by_org.clear()
+    _glossary_store_orphan.clear()
 
 
 # ============================================================================
@@ -407,7 +437,7 @@ def expand_query(query: str, store: Optional[GlossaryStore] = None) -> ExpandedQ
     - Build an expanded keyword set for document support checking
     """
     if store is None:
-        store = _glossary_store
+        store = get_glossary_store()
 
     if not query or not query.strip():
         return ExpandedQuery(query, query, [query] if query else [], set(), {})
@@ -626,95 +656,128 @@ def has_sufficient_document_support_v2(
 # ============================================================================
 def rebuild_glossary_from_postgres() -> int:
     """
-    Rebuild the glossary store from all active documents in PostgreSQL.
-    Called once at startup after BM25 rebuild.
+    Rebuild the per-org glossary stores from all active documents in
+    PostgreSQL. Called once at startup after BM25 rebuild and then on a
+    periodic refresher loop.
 
-    Strategy:
+    Multi-tenant: each tenant maintains its own ``GlossaryStore`` so
+    Acadia acronyms don't expand for US Pharma queries and vice-versa.
+    We iterate over active orgs, set the request-scoped ContextVar so
+    SQLAlchemy's after_begin hook stamps ``app.current_org``, and let
+    RLS scope the SELECTs to that tenant's data.
+
+    Strategy (per org):
     1. Check document_metadata.metadata_json for stored glossaries
     2. Scan chunk content for glossary/abbreviation sections
     3. Scan for inline abbreviation definitions
     """
-    from backend.db.connection import SessionLocal
+    from backend.db.connection import SessionLocal, current_org_id_var
     from sqlalchemy import text as sql_text
+    import uuid as _uuid
 
-    _glossary_store.clear()
+    _clear_all_glossary_stores()
 
+    # `organizations` has RLS off — directory query is safe without context.
     try:
         with SessionLocal() as db:
-            # Strategy 1: Check stored metadata for glossaries
-            meta_rows = db.execute(
-                sql_text("""
-                    SELECT dm.document_id::text, dm.metadata_json
-                    FROM document_metadata dm
-                    JOIN documents d ON d.id = dm.document_id
-                    WHERE d.status = 'active'
-                      AND dm.metadata_json IS NOT NULL
-                """)
-            ).mappings().all()
-
-            for row in meta_rows:
-                meta = row["metadata_json"]
-                if isinstance(meta, str):
-                    try:
-                        meta = json.loads(meta)
-                    except (json.JSONDecodeError, TypeError):
-                        continue
-                if isinstance(meta, dict):
-                    glossary = meta.get("glossary") or meta.get("abbreviations") or {}
-                    if glossary and isinstance(glossary, dict):
-                        _glossary_store.add_document_glossary(row["document_id"], glossary)
-
-            # Strategy 2: Scan chunks with glossary-like headings
-            chunk_rows = db.execute(
-                sql_text("""
-                    SELECT c.content, d.id::text AS doc_id
-                    FROM chunks c
-                    JOIN documents d ON d.id = c.document_id
-                    JOIN document_versions dv ON dv.id = c.document_version_id
-                    WHERE d.status = 'active'
-                      AND dv.is_active = TRUE
-                      AND (
-                        LOWER(c.section_heading) LIKE '%glossary%'
-                        OR LOWER(c.section_heading) LIKE '%abbreviat%'
-                        OR LOWER(c.section_heading) LIKE '%acronym%'
-                        OR LOWER(c.section_heading) LIKE '%terminolog%'
-                        OR LOWER(c.section_heading) LIKE '%definition%'
-                      )
-                    LIMIT 50
-                """)
-            ).mappings().all()
-
-            for row in chunk_rows:
-                extracted = extract_glossary_from_text(row["content"])
-                if extracted:
-                    _glossary_store.add_document_glossary(row["doc_id"], extracted)
-
-            # Strategy 3: If still empty, scan first few chunks for glossary content
-            if _glossary_store.size == 0:
-                content_rows = db.execute(
-                    sql_text("""
-                        SELECT c.content, d.id::text AS doc_id
-                        FROM chunks c
-                        JOIN documents d ON d.id = c.document_id
-                        JOIN document_versions dv ON dv.id = c.document_version_id
-                        WHERE d.status = 'active'
-                          AND dv.is_active = TRUE
-                          AND (
-                            LOWER(c.content) LIKE '%glossary%'
-                            OR LOWER(c.content) LIKE '%abbreviation%'
-                          )
-                        LIMIT 30
-                    """)
-                ).mappings().all()
-
-                for row in content_rows:
-                    extracted = extract_glossary_from_text(row["content"])
-                    if extracted:
-                        _glossary_store.add_document_glossary(row["doc_id"], extracted)
-
+            org_rows = db.execute(
+                sql_text("SELECT id::text FROM organizations WHERE deactivated_at IS NULL")
+            ).all()
     except Exception as e:
-        logger.warning("Glossary rebuild from DB failed (non-fatal): %s", e)
+        logger.warning("Glossary rebuild — could not list orgs (non-fatal): %s", e)
+        return 0
+    org_ids = [r[0] for r in org_rows]
 
-    total = _glossary_store.size
-    logger.info("Glossary store rebuilt: %d unique acronyms from documents", total)
-    return total
+    grand_total = 0
+    for org_id in org_ids:
+        _org_token = current_org_id_var.set(_uuid.UUID(org_id))
+        try:
+            org_store = get_glossary_store(org_id)
+            try:
+                with SessionLocal() as db:
+                    # Strategy 1: Check stored metadata for glossaries
+                    meta_rows = db.execute(
+                        sql_text("""
+                            SELECT dm.document_id::text, dm.metadata_json
+                            FROM document_metadata dm
+                            JOIN documents d ON d.id = dm.document_id
+                            WHERE d.status = 'active'
+                              AND dm.metadata_json IS NOT NULL
+                        """)
+                    ).mappings().all()
+
+                    for row in meta_rows:
+                        meta = row["metadata_json"]
+                        if isinstance(meta, str):
+                            try:
+                                meta = json.loads(meta)
+                            except (json.JSONDecodeError, TypeError):
+                                continue
+                        if isinstance(meta, dict):
+                            glossary = meta.get("glossary") or meta.get("abbreviations") or {}
+                            if glossary and isinstance(glossary, dict):
+                                org_store.add_document_glossary(row["document_id"], glossary)
+
+                    # Strategy 2: Scan chunks with glossary-like headings
+                    chunk_rows = db.execute(
+                        sql_text("""
+                            SELECT c.content, d.id::text AS doc_id
+                            FROM chunks c
+                            JOIN documents d ON d.id = c.document_id
+                            JOIN document_versions dv ON dv.id = c.document_version_id
+                            WHERE d.status = 'active'
+                              AND dv.is_active = TRUE
+                              AND (
+                                LOWER(c.section_heading) LIKE '%glossary%'
+                                OR LOWER(c.section_heading) LIKE '%abbreviat%'
+                                OR LOWER(c.section_heading) LIKE '%acronym%'
+                                OR LOWER(c.section_heading) LIKE '%terminolog%'
+                                OR LOWER(c.section_heading) LIKE '%definition%'
+                              )
+                            LIMIT 50
+                        """)
+                    ).mappings().all()
+
+                    for row in chunk_rows:
+                        extracted = extract_glossary_from_text(row["content"])
+                        if extracted:
+                            org_store.add_document_glossary(row["doc_id"], extracted)
+
+                    # Strategy 3: If still empty, scan first few chunks for glossary content
+                    if org_store.size == 0:
+                        content_rows = db.execute(
+                            sql_text("""
+                                SELECT c.content, d.id::text AS doc_id
+                                FROM chunks c
+                                JOIN documents d ON d.id = c.document_id
+                                JOIN document_versions dv ON dv.id = c.document_version_id
+                                WHERE d.status = 'active'
+                                  AND dv.is_active = TRUE
+                                  AND (
+                                    LOWER(c.content) LIKE '%glossary%'
+                                    OR LOWER(c.content) LIKE '%abbreviation%'
+                                  )
+                                LIMIT 30
+                            """)
+                        ).mappings().all()
+
+                        for row in content_rows:
+                            extracted = extract_glossary_from_text(row["content"])
+                            if extracted:
+                                org_store.add_document_glossary(row["doc_id"], extracted)
+            except Exception as e:
+                logger.warning(
+                    "Glossary rebuild failed for org=%s (non-fatal): %s", org_id, e,
+                )
+        finally:
+            current_org_id_var.reset(_org_token)
+
+        grand_total += org_store.size
+        logger.info(
+            "[glossary] org=%s rebuilt acronyms=%d",
+            org_id, org_store.size,
+        )
+
+    logger.info("Glossary store rebuilt: %d unique acronyms across %d org(s)",
+                grand_total, len(org_ids))
+    return grand_total

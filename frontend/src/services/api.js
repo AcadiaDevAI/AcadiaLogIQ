@@ -352,4 +352,46 @@ export const fingerprintLookup = (sessionId, fingerprint) =>
 export const fingerprintSkip = (sessionId) =>
   api.post("/fingerprint/skip", { session_id: sessionId });
 
+// ─────────────────────────────────────────────────────────────
+// Tenancy (multi-tenant Phase 0) — backend endpoints in
+// backend/tenancy/routes.py
+//
+// All four functions return raw axios promises so callers can use
+// .then / await + read response.data exactly like every other API
+// wrapper in this file. They inherit the auth-ready gate + JWT
+// attachment via the shared `api` instance.
+// ─────────────────────────────────────────────────────────────
+
+// GET /organizations
+// Returns the landing-page payload — { your_organizations, other_organizations }.
+// `your_organizations` = orgs the current user is an ACTIVE member of.
+// `other_organizations` = publicly-listable orgs they're NOT in (locked tiles).
+export const listOrganizations = () => api.get("/organizations");
+
+// GET /organizations/me/active
+// Returns current active-org context derived from the JWT claims:
+//   { has_active_org, organization?, last_active_org_id?, platform_role }
+// `organization` is null when the user has no active org chosen.
+// Frontend's OrgContext calls this on mount and after every Clerk
+// org-switch event.
+export const getActiveOrganization = () => api.get("/organizations/me/active");
+
+// PATCH /users/me/active-org
+// Persist the user's restore-on-next-login org choice. The frontend
+// MUST also call Clerk's setActive({ organization }) so the JWT
+// re-issues with the new org claim — this endpoint is just the
+// server-side persistence half.
+export const setActiveOrganization = (organizationId) =>
+  api.patch("/users/me/active-org", { organization_id: organizationId });
+
+// POST /organizations/{slug}/request-access
+// Create a pending access request for a non-member org. Optional
+// `justification` shown to org admins in the review queue.
+// Server returns 409 if the same user already has a pending request
+// for the same org.
+export const requestOrganizationAccess = (slug, justification) =>
+  api.post(`/organizations/${encodeURIComponent(slug)}/request-access`, {
+    justification: justification || null,
+  });
+
 export default api;

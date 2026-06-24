@@ -36,6 +36,7 @@ import signal
 import socket
 import time
 import traceback
+import uuid
 from typing import Optional
 
 from .handlers import HANDLERS, NonRetryableJobError
@@ -206,53 +207,100 @@ def run_one(*, worker_id: Optional[str] = None, kinds: Optional[set] = None) -> 
         )
         return True
 
-    started = time.perf_counter()
-    try:
-        result_kind, result_incident = handler(key_value, job.payload)
-    except NonRetryableJobError as exc:
-        elapsed = time.perf_counter() - started
-        logger.warning(
-            "[worker] permanent failure id=%s kind=%s key=%s table=%s after=%.1fs err=%s",
-            job.id, job.kind, key_value, table_tag, elapsed, exc,
+    # ── Multi-tenant: stamp the job's organization onto the ContextVar
+    # so every SQLAlchemy session inside the handler picks up the right
+    # ``app.current_org`` (see backend/db/connection.py after_begin hook).
+    # Without this the SQLAlchemy hook falls through to
+    # DEFAULT_ORG_ID_FOR_NO_CONTEXT — fine for single-tenant, a
+    # cross-tenant leak the moment a second org exists.
+    #
+    # If a job row is missing organization_id (shouldn't happen after
+    # migrations 058/059 — NOT NULL columns — but defend in depth),
+    # we permanently fail it rather than silently process it under
+    # the wrong tenant.
+    from backend.db.connection import current_org_id_var
+    job_org_raw = job.organization_id
+    if not job_org_raw:
+        logger.error(
+            "[worker] job missing organization_id id=%s kind=%s table=%s — "
+            "marking permanently failed (cannot dispatch without tenant scope)",
+            job.id, job.kind, table_tag,
         )
         _mark_failed(
             job_id=job.id,
-            error_message=str(exc),
+            error_message="job row has no organization_id — refusing to dispatch",
             permanent=True,
         )
         return True
-    except Exception as exc:  # noqa: BLE001 — retry path
-        elapsed = time.perf_counter() - started
-        logger.warning(
-            "[worker] soft failure id=%s kind=%s key=%s table=%s attempt=%d/%d after=%.1fs err=%s",
-            job.id, job.kind, key_value, table_tag,
-            job.attempts, job.max_attempts, elapsed, exc,
+    try:
+        job_org_uuid = uuid.UUID(str(job_org_raw))
+    except (TypeError, ValueError) as exc:
+        logger.error(
+            "[worker] job has malformed organization_id=%r id=%s (%s) — "
+            "marking permanently failed",
+            job_org_raw, job.id, exc,
         )
-        tb_short = "".join(traceback.format_exception_only(type(exc), exc)).strip()
         _mark_failed(
             job_id=job.id,
-            error_message=tb_short,
-            permanent=False,
+            error_message=f"malformed organization_id: {job_org_raw!r}",
+            permanent=True,
         )
         return True
 
-    elapsed = time.perf_counter() - started
-    logger.info(
-        "[worker] done id=%s kind=%s key=%s table=%s elapsed=%.1fs result=%s/%s",
-        job.id, job.kind, key_value, table_tag, elapsed,
-        result_kind, result_incident,
-    )
-    # ingestion-side mark_done doesn't take result_* pointers — the
-    # work product lives in chunks/embeddings, not report_cache.
-    if table_tag == "ingestion":
-        _mark_done(job_id=job.id)
-    else:
-        _mark_done(
-            job_id=job.id,
-            result_kind=result_kind,
-            result_incident=result_incident,
+    ctx_token = current_org_id_var.set(job_org_uuid)
+    try:
+        started = time.perf_counter()
+        try:
+            result_kind, result_incident = handler(key_value, job.payload)
+        except NonRetryableJobError as exc:
+            elapsed = time.perf_counter() - started
+            logger.warning(
+                "[worker] permanent failure id=%s kind=%s key=%s org=%s table=%s after=%.1fs err=%s",
+                job.id, job.kind, key_value, job_org_uuid, table_tag, elapsed, exc,
+            )
+            _mark_failed(
+                job_id=job.id,
+                error_message=str(exc),
+                permanent=True,
+            )
+            return True
+        except Exception as exc:  # noqa: BLE001 — retry path
+            elapsed = time.perf_counter() - started
+            logger.warning(
+                "[worker] soft failure id=%s kind=%s key=%s org=%s table=%s attempt=%d/%d after=%.1fs err=%s",
+                job.id, job.kind, key_value, job_org_uuid, table_tag,
+                job.attempts, job.max_attempts, elapsed, exc,
+            )
+            tb_short = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+            _mark_failed(
+                job_id=job.id,
+                error_message=tb_short,
+                permanent=False,
+            )
+            return True
+
+        elapsed = time.perf_counter() - started
+        logger.info(
+            "[worker] done id=%s kind=%s key=%s org=%s table=%s elapsed=%.1fs result=%s/%s",
+            job.id, job.kind, key_value, job_org_uuid, table_tag, elapsed,
+            result_kind, result_incident,
         )
-    return True
+        # ingestion-side mark_done doesn't take result_* pointers — the
+        # work product lives in chunks/embeddings, not report_cache.
+        if table_tag == "ingestion":
+            _mark_done(job_id=job.id)
+        else:
+            _mark_done(
+                job_id=job.id,
+                result_kind=result_kind,
+                result_incident=result_incident,
+            )
+        return True
+    finally:
+        # Always restore — even if mark_done / mark_failed raise. The
+        # ContextVar leaking to the next loop iteration would silently
+        # mis-tag every subsequent job until shutdown.
+        current_org_id_var.reset(ctx_token)
 
 
 def run() -> None:

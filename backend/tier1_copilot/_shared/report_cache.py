@@ -180,8 +180,10 @@ def save_cached_report(
 ) -> None:
     """UPSERT a freshly-generated Markdown blob.
 
-    Conflict resolution: on the ``(report_kind, incident_number)``
-    unique constraint, the existing row is overwritten and
+    Conflict resolution: on the ``(organization_id, report_kind,
+    incident_number)`` unique constraint (see migration 059 — widened
+    so two tenants can have a report for the same incident number
+    without colliding), the existing row is overwritten and
     ``updated_at`` advances to ``NOW()``. The combination of "👎
     deletes the row" + "save UPSERTs" means a single dislike
     cleanly produces one fresh row on the next generate.
@@ -204,9 +206,14 @@ def save_cached_report(
 
     sql = text(
         """
-        INSERT INTO report_cache (report_kind, incident_number, markdown, model_id)
-        VALUES (:kind, :inc, :md, :model_id)
-        ON CONFLICT (report_kind, incident_number)
+        INSERT INTO report_cache
+            (organization_id, report_kind, incident_number, markdown, model_id)
+        VALUES (
+            COALESCE(CAST(current_setting('app.current_org', true) AS uuid),
+                     '00000000-0000-0000-0000-000000000000'::uuid),
+            :kind, :inc, :md, :model_id
+        )
+        ON CONFLICT (organization_id, report_kind, incident_number)
         DO UPDATE SET
             markdown   = EXCLUDED.markdown,
             model_id   = EXCLUDED.model_id,

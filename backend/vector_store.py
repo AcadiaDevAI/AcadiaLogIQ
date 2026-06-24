@@ -99,7 +99,22 @@ class BM25Index:
         query: str,
         n_results: int = 10,
         file_type: Optional[str] = None,
+        organization_id: Optional[str] = None,
     ) -> List[Tuple[str, str, Dict, float]]:
+        # Multi-tenant: filter candidates by the caller's org. We accept
+        # ``organization_id`` explicitly OR pull from the request-scoped
+        # ContextVar set by TenancyContextMiddleware (so existing call
+        # sites that don't yet pass it keep working). If neither is set,
+        # we return an empty list — failing closed is safer than leaking
+        # cross-tenant chunks into a search response.
+        if organization_id is None:
+            from backend.db.connection import current_org_id_var
+            ctx_org = current_org_id_var.get()
+            if ctx_org is not None:
+                organization_id = str(ctx_org)
+        if not organization_id:
+            return []
+
         query_tokens = self._tokenize(query)
         if not query_tokens or not self.total_docs:
             return []
@@ -111,6 +126,8 @@ class BM25Index:
         scored = []
         for doc_id in candidate_ids:
             meta = self.metadata.get(doc_id, {})
+            if meta.get("organization_id") != organization_id:
+                continue
             if file_type and meta.get("file_type") != file_type:
                 continue
 
@@ -413,15 +430,30 @@ def create_ingestion_job(
     file_type: str,
     file_hash: str,
 ):
+    # Multi-tenant: the column DEFAULT on organization_id points at
+    # Acadia (migration 058). For a US Pharma user, letting the DEFAULT
+    # apply would create an Acadia-tagged row that RLS WITH CHECK would
+    # then reject, surfacing as an opaque 500. Read the org explicitly
+    # from the request-scoped ContextVar set by TenancyContextMiddleware
+    # and pass it to the INSERT. We accept that the row may be created
+    # before the user's first tenant query, so the explicit value is
+    # the authoritative source.
+    from backend.db.connection import current_org_id_var
+    ctx_org = current_org_id_var.get()
+    org_id = str(ctx_org) if ctx_org else None
+
     with SessionLocal() as db:
         db.execute(
             text(
                 """
                 INSERT INTO ingestion_jobs(
-                    job_id, file_id, owner_id, file_name, file_type, file_hash, status
+                    job_id, file_id, owner_id, file_name, file_type, file_hash, status,
+                    organization_id
                 )
                 VALUES (
-                    :job_id, :file_id, :owner_id, :file_name, :file_type, :file_hash, 'queued'
+                    :job_id, :file_id, :owner_id, :file_name, :file_type, :file_hash, 'queued',
+                    COALESCE(CAST(:org_id AS UUID),
+                             '76c36d23-b8c1-4b81-b121-bef5e1b10b3b'::uuid)
                 )
                 ON CONFLICT (job_id) DO NOTHING
                 """
@@ -433,6 +465,7 @@ def create_ingestion_job(
                 "file_name": file_name,
                 "file_type": file_type,
                 "file_hash": file_hash,
+                "org_id": org_id,
             },
         )
         db.commit()
@@ -1060,6 +1093,20 @@ def purge_orphan_chunks_db() -> int:
 # BM25 REBUILD FROM ACTIVE POSTGRES CHUNKS
 # ============================================================================
 def rebuild_bm25_from_postgres(include_old_versions: Optional[bool] = None) -> int:
+    """Rebuild the in-memory BM25 index from active Postgres chunks.
+
+    Multi-tenant: we keep a single shared index across all orgs and
+    stamp each chunk's metadata with its ``organization_id``. The
+    ``BM25Index.search`` method filters by org at query time using
+    the request-scoped ContextVar, so a US Pharma user's keyword
+    search never reaches an Acadia chunk's posting list.
+
+    Boot-time iteration: with RLS enforced on `chunks` / `documents`,
+    a single SELECT without ``app.current_org`` would return zero
+    rows. We iterate active orgs, set the ContextVar so SQLAlchemy's
+    after_begin hook stamps the session var, and pull each org's
+    chunks in turn.
+    """
     bm25_index.clear()
     include_old_versions = settings.INCLUDE_OLD_VERSIONS if include_old_versions is None else include_old_versions
 
@@ -1090,29 +1137,52 @@ def rebuild_bm25_from_postgres(include_old_versions: Optional[bool] = None) -> i
 
     sql += " ORDER BY c.created_at ASC, c.chunk_index ASC"
 
-    with SessionLocal() as db:
-        rows = db.execute(text(sql)).mappings().all()
+    # Lazy import to keep this module import-safe in places where the
+    # tenancy middleware hasn't been loaded yet.
+    from backend.db.connection import current_org_id_var
 
-    ids, docs, metas = [], [], []
-    for row in rows:
-        ids.append(row["id"])
-        docs.append(row["content"])
-        metas.append(
-            {
-                "file_id": row["file_id"],
-                "owner_id": row["owner_id"],
-                "source": row["source"],
-                "file_type": row["file_type"],
-                "section_heading": row["section_heading"],
-                "chunk_type": row["chunk_type"],
-                "summary": row["summary"],
-                "labels_json": row["labels_json"] or {},
-                "metadata_json": row["metadata_json"] or {},
-            }
+    # `organizations` table has RLS disabled (tenant directory), so this
+    # query is safe without an org context.
+    with SessionLocal() as db:
+        org_rows = db.execute(
+            text("SELECT id::text FROM organizations WHERE deactivated_at IS NULL")
+        ).all()
+    org_ids: List[str] = [r[0] for r in org_rows]
+
+    for org_id in org_ids:
+        token = current_org_id_var.set(uuid.UUID(org_id))
+        try:
+            with SessionLocal() as db:
+                rows = db.execute(text(sql)).mappings().all()
+        finally:
+            current_org_id_var.reset(token)
+
+        ids, docs, metas = [], [], []
+        for row in rows:
+            ids.append(row["id"])
+            docs.append(row["content"])
+            metas.append(
+                {
+                    "organization_id": org_id,
+                    "file_id": row["file_id"],
+                    "owner_id": row["owner_id"],
+                    "source": row["source"],
+                    "file_type": row["file_type"],
+                    "section_heading": row["section_heading"],
+                    "chunk_type": row["chunk_type"],
+                    "summary": row["summary"],
+                    "labels_json": row["labels_json"] or {},
+                    "metadata_json": row["metadata_json"] or {},
+                }
+            )
+
+        if ids:
+            bm25_index.add_documents_batch(ids, docs, metas)
+        logger.info(
+            "[bm25] rebuilt org=%s chunks=%d (running total=%d)",
+            org_id, len(ids), bm25_index.size,
         )
 
-    if ids:
-        bm25_index.add_documents_batch(ids, docs, metas)
     return bm25_index.size
 
 

@@ -260,13 +260,23 @@ def persist(learned: Dict[str, List[str]], file_id: str) -> int:
             for plural, singular in type_map.items():
                 for token in learned.get(plural, []):
                     canonical = canonicalize_token(token)
+                    # Migration 060 widened the PK from (token) to
+                    # (organization_id, token) so different tenants can
+                    # have the same token without colliding. The
+                    # organization_id flows in via the column DEFAULT or
+                    # via the org-scoped session var current_setting()
+                    # used here as an explicit override.
                     conn.execute(
                         text(
                             """
                             INSERT INTO learned_vocabulary
-                                (token, token_type, canonical_form, first_seen_file)
-                            VALUES (:tok, :type, :canon, :fid)
-                            ON CONFLICT (token) DO UPDATE SET
+                                (organization_id, token, token_type, canonical_form, first_seen_file)
+                            VALUES (
+                                COALESCE(CAST(current_setting('app.current_org', true) AS uuid),
+                                         '00000000-0000-0000-0000-000000000000'::uuid),
+                                :tok, :type, :canon, :fid
+                            )
+                            ON CONFLICT (organization_id, token) DO UPDATE SET
                                 occurrence_count = learned_vocabulary.occurrence_count + 1,
                                 canonical_form = COALESCE(
                                     learned_vocabulary.canonical_form, EXCLUDED.canonical_form

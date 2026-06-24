@@ -765,6 +765,25 @@ class Settings(BaseSettings):
     CLERK_ENABLED: str = "false"
 
     # ----------------------------------------------------------------
+    # Multi-tenant foundation (Phase 0 / backend.tenancy)
+    # ----------------------------------------------------------------
+    # Webhook signing secret from Clerk dashboard → Webhooks → Your
+    # endpoint → Signing Secret. Required for `POST /webhooks/clerk`
+    # to process events. When unset, the webhook endpoint refuses
+    # everything (fails closed). Format: `whsec_<base64>`.
+    CLERK_WEBHOOK_SIGNING_SECRET: Optional[str] = None
+
+    # Master enforcement flag for tenant scoping. Phase 0 keeps this
+    # FALSE — the tenancy layer is mounted but no business query reads
+    # the org context. Phase 2 flips it to TRUE after the SQL audit
+    # sweep + integration test suite are green.
+    #
+    # When TRUE, every business endpoint that consumes RequestContext
+    # filters by organization_id and refuses requests without an
+    # active org. When FALSE, the multi-tenant code path is a no-op.
+    ENABLE_ORG_SCOPING: bool = False
+
+    # ----------------------------------------------------------------
     # SES email
     # ----------------------------------------------------------------
 

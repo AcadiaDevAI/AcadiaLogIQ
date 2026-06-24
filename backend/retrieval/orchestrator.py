@@ -6,6 +6,7 @@ Called by the /ask endpoint in api.py. Returns ranked chunks ready for context a
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import re
 import time
@@ -1005,24 +1006,38 @@ def retrieve(
 
     # --- Execute channels concurrently ---
     # Strategy-aware: skip channels that won't contribute much
+    #
+    # Multi-tenant: ThreadPoolExecutor.submit does NOT propagate the
+    # caller's ContextVars into the worker threads — they get a fresh,
+    # empty context. We snapshot the current request's context here and
+    # run each channel inside that snapshot via ``ctx.run`` so the
+    # tenancy ContextVar (and anything else request-scoped) flows
+    # through to the SQLAlchemy engine.begin hook in backend.db.connection,
+    # which uses it to stamp ``app.current_org`` on the worker thread's
+    # transaction. Without this, every channel that touches a tenant
+    # table would hit RLS' ``''::uuid`` cast and raise.
+    _request_ctx = contextvars.copy_context()
+    def _run(fn):
+        return _request_ctx.run(fn)
+
     tasks = {}
     with ThreadPoolExecutor(max_workers=4) as executor:
         # Always run vector (it's the backbone)
         if intent.strategy != "keyword":
-            tasks["vector"] = executor.submit(_run_vector)
+            tasks["vector"] = executor.submit(_run, _run_vector)
         else:
             # Even for keyword queries, run vector with reduced priority
-            tasks["vector"] = executor.submit(_run_vector)
+            tasks["vector"] = executor.submit(_run, _run_vector)
 
         # Always run BM25 (fast, in-memory)
-        tasks["bm25"] = executor.submit(_run_bm25)
+        tasks["bm25"] = executor.submit(_run, _run_bm25)
 
         # Always run keyword search (Phase 3 addition)
-        tasks["keyword"] = executor.submit(_run_keyword)
+        tasks["keyword"] = executor.submit(_run, _run_keyword)
 
         # Run metadata filter if we have hints
         if intent.metadata_hints:
-            tasks["metadata"] = executor.submit(_run_metadata)
+            tasks["metadata"] = executor.submit(_run, _run_metadata)
 
         # Collect results
         for name, future in tasks.items():

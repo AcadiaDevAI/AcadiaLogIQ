@@ -95,6 +95,10 @@ class _Job:
     Internal — the API surface returns plain dicts so the wire
     contract stays explicit. ``_Job`` exists so ``claim_next``'s
     return type is statically documented.
+
+    ``organization_id`` is the tenant the job belongs to. Used by the
+    worker to set ``app.current_org`` before dispatching the handler
+    so RLS scopes every DB read/write inside the handler to that org.
     """
     id: str
     kind: str
@@ -103,6 +107,7 @@ class _Job:
     attempts: int
     max_attempts: int
     requested_by: Optional[str]
+    organization_id: Optional[str]
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -117,20 +122,49 @@ def enqueue(
     requested_by: Optional[str],
     payload: Optional[Dict[str, Any]] = None,
     max_attempts: int = 3,
+    organization_id: Optional[str] = None,
 ) -> str:
     """Insert a new pending job, returning its id.
 
-    Idempotent on ``(kind, incident_number)`` while a row is open
-    (status IN pending|running) — duplicates return the existing id.
-    This protects against the React.StrictMode / rapid-double-click
-    pattern we already saw in the Gap Analysis flow.
+    Idempotent on ``(organization_id, kind, incident_number)`` while a
+    row is open (status IN pending|running) — duplicates return the
+    existing id. This protects against the React.StrictMode /
+    rapid-double-click pattern we already saw in the Gap Analysis flow,
+    AND lets two orgs queue the same (kind, incident_number) pair
+    concurrently without colliding (see migration 059's open-job index).
+
+    ``organization_id`` resolution:
+      1. Explicit kwarg from the caller (if it has a RequestContext on
+         hand).
+      2. Otherwise, ``current_org_id_var`` set by the tenancy middleware
+         on the inbound HTTP request.
+    If neither is set we raise — without an org tag, the INSERT would
+    fall through to the column DEFAULT (Acadia) and silently mis-tag
+    every US Pharma request as Acadia. RLS' WITH CHECK would catch the
+    mismatch and 500 the request, but we'd rather raise here with a
+    clearer message than swallow a misconfigured boot path.
     """
     kind = (kind or "").strip()
     inc = (incident_number or "").strip()
+    org_id = (organization_id or "").strip() or None
+    if not org_id:
+        # Lazy import — keeps queue.py free of a hard dep on the
+        # tenancy middleware at module-load time (helps tests that
+        # exercise queue logic without booting the full app).
+        from backend.db.connection import current_org_id_var
+        ctx_org = current_org_id_var.get()
+        if ctx_org is not None:
+            org_id = str(ctx_org)
     if kind not in _VALID_KINDS:
         raise ValueError(f"unknown job kind: {kind!r}")
     if not inc:
         raise ValueError("incident_number is required")
+    if not org_id:
+        raise ValueError(
+            "organization_id is required — pass it explicitly or call "
+            "from a request scope where TenancyContextMiddleware has set "
+            "current_org_id_var"
+        )
 
     payload_json = json.dumps(payload or {}, ensure_ascii=False, default=str)
 
@@ -148,18 +182,19 @@ def enqueue(
                 """
                 SELECT id::text
                   FROM report_jobs
-                 WHERE kind = :kind
+                 WHERE organization_id = CAST(:org AS UUID)
+                   AND kind = :kind
                    AND incident_number = :inc
                    AND status IN ('pending', 'running')
                  LIMIT 1
                 """
             ),
-            {"kind": kind, "inc": inc},
+            {"org": org_id, "kind": kind, "inc": inc},
         ).scalar()
         if existing:
             logger.info(
-                "[jobs.enqueue] idempotent-hit kind=%s inc=%s existing_id=%s",
-                kind, inc, existing,
+                "[jobs.enqueue] idempotent-hit org=%s kind=%s inc=%s existing_id=%s",
+                org_id, kind, inc, existing,
             )
             return str(existing)
 
@@ -168,13 +203,16 @@ def enqueue(
                 text(
                     """
                     INSERT INTO report_jobs
-                        (kind, incident_number, requested_by, payload, max_attempts)
+                        (organization_id, kind, incident_number,
+                         requested_by, payload, max_attempts)
                     VALUES
-                        (:kind, :inc, :user, CAST(:payload AS JSONB), :max_attempts)
+                        (CAST(:org AS UUID), :kind, :inc,
+                         :user, CAST(:payload AS JSONB), :max_attempts)
                     RETURNING id::text
                     """
                 ),
                 {
+                    "org": org_id,
                     "kind": kind,
                     "inc": inc,
                     "user": (requested_by or None),
@@ -194,13 +232,14 @@ def enqueue(
                     """
                     SELECT id::text
                       FROM report_jobs
-                     WHERE kind = :kind
+                     WHERE organization_id = CAST(:org AS UUID)
+                       AND kind = :kind
                        AND incident_number = :inc
                        AND status IN ('pending', 'running')
                      LIMIT 1
                     """
                 ),
-                {"kind": kind, "inc": inc},
+                {"org": org_id, "kind": kind, "inc": inc},
             ).scalar()
             if existing:
                 return str(existing)
@@ -208,8 +247,8 @@ def enqueue(
 
     job_id = str(row[0])
     logger.info(
-        "[jobs.enqueue] new id=%s kind=%s inc=%s by=%s",
-        job_id, kind, inc, requested_by or "(anon)",
+        "[jobs.enqueue] new id=%s org=%s kind=%s inc=%s by=%s",
+        job_id, org_id, kind, inc, requested_by or "(anon)",
     )
     return job_id
 
@@ -263,7 +302,8 @@ def claim_next(*, worker_id: str) -> Optional[_Job]:
     sql_claim = text(
         """
         SELECT id::text AS id, kind, incident_number, payload,
-               attempts, max_attempts, requested_by
+               attempts, max_attempts, requested_by,
+               organization_id::text AS organization_id
           FROM report_jobs
          WHERE status = 'pending'
            AND not_before <= NOW()
@@ -303,11 +343,12 @@ def claim_next(*, worker_id: str) -> Optional[_Job]:
         attempts=int(row["attempts"]) + 1,  # we just bumped it
         max_attempts=int(row["max_attempts"]),
         requested_by=row["requested_by"],
+        organization_id=row["organization_id"],
     )
     logger.info(
-        "[jobs.claim] worker=%s id=%s kind=%s inc=%s attempt=%d/%d",
+        "[jobs.claim] worker=%s id=%s kind=%s inc=%s org=%s attempt=%d/%d",
         worker_id, job.id, job.kind, job.incident_number,
-        job.attempts, job.max_attempts,
+        job.organization_id, job.attempts, job.max_attempts,
     )
     return job
 
