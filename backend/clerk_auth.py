@@ -226,9 +226,12 @@ def get_clerk_user_display(user_id: Optional[str]) -> dict:
         import json
 
         url = f"https://api.clerk.com/v1/users/{user_id}"
+        # Cloudflare (fronts api.clerk.com) 403s the default urllib
+        # User-Agent — set an explicit one or the request is blocked.
         req = urllib.request.Request(url, headers={
             "Authorization": f"Bearer {settings.CLERK_SECRET_KEY}",
             "Content-Type": "application/json",
+            "User-Agent": "AcadiaLogIQ/1.0",
         })
 
         with urllib.request.urlopen(req, timeout=5) as resp:

@@ -214,7 +214,22 @@ def bootstrap_environment() -> None:
         )
 
     # ── Tier 2: AWS Secrets Manager ──
-    aws_loaded = load_secrets_from_aws()
+    # By default ASM does NOT overwrite keys already in os.environ, so an
+    # operator can override a single key on the command line. On EC2 the
+    # container is started with docker-compose `env_file: ./backend/.env`,
+    # which injects EVERY .env key into os.environ before this runs — that
+    # would make ASM a no-op (it skips all already-present keys) and the
+    # stale .env values would win. Setting AWS_SECRETS_OVERRIDE=true makes
+    # ASM authoritative: it overwrites the env_file-injected values so the
+    # secret store is the source of truth in production.
+    #
+    # IMPORTANT: with override on, any key present in BOTH the ASM secret
+    # and the compose `environment:` block is won by ASM. Keep deployment-
+    # specific config (APP_ROLE, DB_POOL_SIZE, GUNICORN_*, WORKER_KINDS,
+    # STORAGE_TYPE) OUT of the ASM secret so the per-service environment
+    # block keeps control.
+    aws_override = _truthy(os.environ.get("AWS_SECRETS_OVERRIDE"))
+    aws_loaded = load_secrets_from_aws(override=aws_override)
 
     # ── Tier 3: backend/.env (gap-fill + final fallback) ──
     # python-dotenv is a transitive dep of pydantic-settings so it's

@@ -338,9 +338,13 @@ def sync_user_memberships_from_clerk(user_clerk_id: str) -> int:
             f"https://api.clerk.com/v1/users/{user_clerk_id}"
             "/organization_memberships?limit=100"
         )
+        # Cloudflare (which fronts api.clerk.com) 403s the default
+        # "Python-urllib/x.y" User-Agent. Any explicit UA passes — without
+        # this header every membership sync silently fails with HTTP 403.
         req = urllib.request.Request(url, headers={
             "Authorization": f"Bearer {settings.CLERK_SECRET_KEY}",
             "Content-Type": "application/json",
+            "User-Agent": "AcadiaLogIQ/1.0",
         })
         with urllib.request.urlopen(req, timeout=5) as resp:
             payload = json.loads(resp.read().decode("utf-8"))

@@ -9,6 +9,9 @@ services:
     env_file:
       - ./backend/.env
     environment:
+      # Make AWS Secrets Manager the source of truth: ASM overwrites the
+      # values injected by `env_file` above (see secrets.bootstrap_environment).
+      - AWS_SECRETS_OVERRIDE=true
       - APP_ROLE=api
       # Storage backend — S3 presigned PUT pipeline. The bucket name
       # (S3_UPLOAD_BUCKET) and region (AWS_REGION) MUST be set in
@@ -96,6 +99,8 @@ services:
       # Restrict this worker to report kinds. ingest_document goes
       # to the ingest-worker service below.
       - WORKER_KINDS=rca_customer,rca_internal,gap_analysis_gap,gap_analysis_pm
+      # ASM is source of truth — overwrite env_file values (see api service).
+      - AWS_SECRETS_OVERRIDE=true
       # S3 storage — same configuration as the api service. The bucket
       # name + region come from ./backend/.env.
       - STORAGE_TYPE=s3
@@ -144,6 +149,8 @@ services:
     environment:
       - APP_ROLE=worker
       - WORKER_KINDS=ingest_document
+      # ASM is source of truth — overwrite env_file values (see api service).
+      - AWS_SECRETS_OVERRIDE=true
       # S3 storage — ingest worker reads the uploaded object from S3
       # using the same provider as the api/worker services.
       - STORAGE_TYPE=s3
