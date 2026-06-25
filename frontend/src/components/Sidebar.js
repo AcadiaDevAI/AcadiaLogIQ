@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from "react";
-import { Button, Tooltip, Badge, Tabs, Empty, Popconfirm, message, Switch } from "antd";
+import { Button, Tooltip, Badge, Tabs, Empty, Popconfirm, message } from "antd";
 import {
   PlusOutlined,
   MessageOutlined,
@@ -18,6 +18,7 @@ import {
 } from "@ant-design/icons";
 import { useChat } from "../hooks/ChatContext";
 import { useTheme } from "../hooks/ThemeContext";
+import { useOrg } from "../hooks/OrgContext";
 import {
   listSessions,
   getSession,
@@ -221,7 +222,15 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
     }, COLLAPSE_DELAY_MS);
   };
 
-  const isAdmin = state.userRole === "admin";
+  // Real role-based access control. Admin rights come from the user's
+  // role in the ACTIVE org (or platform super-admin) — NOT a client-side
+  // toggle. Members are read-only: no Upload tab, no delete buttons. The
+  // backend independently enforces this on the upload/delete endpoints
+  // (require_org_admin), so hiding the UI here is convenience, not security.
+  const { activeOrg, platformRole } = useOrg();
+  const isAdmin =
+    (activeOrg?.role || "").toLowerCase() === "admin" ||
+    platformRole === "super_admin";
 
   useEffect(() => {
     fetchSessions();
@@ -345,9 +354,6 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
     }
   };
 
-  const handleRoleToggle = (checked) => {
-    dispatch({ type: "SET_USER_ROLE", payload: checked ? "admin" : "user" });
-  };
 
   // ── Build tabs based on role ──
   const tabItems = [
@@ -725,29 +731,22 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
         <Tabs defaultActiveKey="chat" items={tabItems} size="small" className="sidebar-tabs" />
       </div>
 
-      {/* ── Role Toggle (Admin / User) ── */}
+      {/* ── Role indicator (read-only) ──
+          Reflects the user's role in the active org. It is NOT toggleable:
+          upload/delete are admin-only and enforced server-side. Members
+          see "Member" here and get a read-only Files view. */}
       <div
-        className="flex items-center justify-between px-4 py-2.5 border-t"
+        className="flex items-center gap-2 px-4 py-2.5 border-t"
         style={{ borderColor: "var(--border-color)" }}
       >
-        <div className="flex items-center gap-2">
-          {isAdmin ? (
-            <SettingOutlined style={{ color: "var(--acadia-primary)", fontSize: 14 }} />
-          ) : (
-            <UserOutlined style={{ color: "var(--text-muted)", fontSize: 14 }} />
-          )}
-          <span className="text-xs font-medium" style={{ color: isAdmin ? "var(--acadia-primary)" : "var(--text-muted)" }}>
-            {isAdmin ? "Admin" : "User"}
-          </span>
-        </div>
-        <Switch
-          checked={isAdmin}
-          onChange={handleRoleToggle}
-          size="small"
-          style={{
-            backgroundColor: isAdmin ? "var(--acadia-primary)" : undefined,
-          }}
-        />
+        {isAdmin ? (
+          <SettingOutlined style={{ color: "var(--acadia-primary)", fontSize: 14 }} />
+        ) : (
+          <UserOutlined style={{ color: "var(--text-muted)", fontSize: 14 }} />
+        )}
+        <span className="text-xs font-medium" style={{ color: isAdmin ? "var(--acadia-primary)" : "var(--text-muted)" }}>
+          {isAdmin ? "Admin" : "Member"}
+        </span>
       </div>
 
       {/* User Profile (Clerk) */}

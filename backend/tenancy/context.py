@@ -19,7 +19,7 @@ import logging
 import uuid
 from typing import Optional
 
-from fastapi import HTTPException, Request, status
+from fastapi import Depends, HTTPException, Request, status
 
 from backend.clerk_auth import (
     extract_bearer_token,
@@ -213,4 +213,36 @@ async def get_request_context(request: Request) -> RequestContext:
         org_slug=org_slug,
         org_role=org_role,
         platform_role=platform_role,
+    )
+
+
+async def require_org_admin(
+    ctx: RequestContext = Depends(get_request_context),
+) -> RequestContext:
+    """
+    FastAPI dependency that admits ONLY organization admins (or platform
+    super-admins). Used to gate write operations on the document corpus —
+    file upload and delete — so org members get read-only access.
+
+    Admits the request when:
+      * Clerk is disabled (local dev / no-auth mode), OR
+      * the caller is a platform super_admin, OR
+      * the caller's role in the ACTIVE org is 'admin'.
+
+    Otherwise raises 403. This is the SERVER-SIDE enforcement — the
+    frontend also hides the upload/delete affordances for members, but
+    that is only cosmetic; this dependency is the real access control.
+    """
+    if not is_clerk_enabled():
+        return ctx
+    if ctx.platform_role == PLATFORM_ROLE_SUPER_ADMIN:
+        return ctx
+    if (ctx.org_role or "").lower() == "admin":
+        return ctx
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail={
+            "error_code": "admin_required",
+            "message": "Only organization admins can upload or delete files.",
+        },
     )

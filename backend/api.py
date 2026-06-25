@@ -800,6 +800,7 @@ app.add_middleware(RequestContextMiddleware)
 # tables — exactly what we want for unauth requests.
 # ─────────────────────────────────────────────────────────────
 from backend.tenancy.middleware import TenancyContextMiddleware
+from backend.tenancy.context import require_org_admin
 app.add_middleware(TenancyContextMiddleware)
 logger.info("[tenancy] TenancyContextMiddleware registered (Phase 1 RLS plumbing)")
 
@@ -2495,6 +2496,7 @@ async def upload(
     # wins after whitelist validation below.
     doc_kind: str = Form(default=""),
     user_id: Optional[str] = Depends(auth_dependency),
+    _admin=Depends(require_org_admin),   # admins only — members are read-only
 ):
     ext = Path(file.filename).suffix[1:].lower() if file.filename else ""
     if not ext or ext not in settings.ALLOWED_FILE_TYPES:
@@ -2645,6 +2647,7 @@ async def upload_presign(
     request: Request,
     payload: PresignUploadRequest,
     user_id: Optional[str] = Depends(auth_dependency),
+    _admin=Depends(require_org_admin),   # admins only — members are read-only
 ):
     """Issue a one-shot presigned PUT URL for a single file.
 
@@ -2667,6 +2670,7 @@ async def upload_finalize(
     payload: FinalizeUploadRequest,
     background_tasks: BackgroundTasks,
     user_id: Optional[str] = Depends(auth_dependency),
+    _admin=Depends(require_org_admin),   # admins only — members are read-only
 ):
     """Verify the S3 object exists and schedule background ingestion.
 
@@ -2894,7 +2898,11 @@ async def list_files(user_id: Optional[str] = Depends(auth_dependency)):
 
 
 @app.delete("/files/{file_id}")
-async def delete_file(file_id: str, user_id: Optional[str] = Depends(auth_dependency)):
+async def delete_file(
+    file_id: str,
+    user_id: Optional[str] = Depends(auth_dependency),
+    _admin=Depends(require_org_admin),   # admins only — members are read-only
+):
     files = {f["id"]: f for f in list_active_files_all()}
     if file_id not in files:
         raise HTTPException(404, "File not found")
