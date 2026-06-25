@@ -151,94 +151,32 @@ def find_source_pdf() -> Optional[Path]:
     return matches[0]
 
 
-def ensure_kb_loaded(user_id: Optional[str] = None) -> dict:
-    """Make sure ``kb.json`` exists; build it from disk or S3 if not.
+def ensure_kb_loaded(org_id: Optional[str], user_id: Optional[str] = None) -> dict:
+    """Return the escalation KB status FOR ONE ORG.
 
-    Returns the status dict (same shape as :func:`store.kb_status`).
-    On failure the status dict carries an ``error`` field so the route
-    layer can surface a friendly message to the user instead of 500ing.
+    Per-tenant isolation: the KB is populated ONLY by that org's own
+    ``POST /escalation/upload`` (saved under ``escalation/{org_id}/``).
+    We deliberately NO LONGER auto-bootstrap by scanning UPLOAD_DIR / S3
+    for any matching PDF — that recursive scan crossed tenant boundaries
+    (it would load Acadia's PDF for US Pharma). If an org hasn't uploaded
+    its own KB, the modal shows the upload step.
 
-    ``user_id`` (when provided) lets us scope the S3 fallback to the
-    caller's tenant prefix first, which is the common case in EC2
-    deployments where ``STORAGE_TYPE=s3``.
+    Returns the status dict (same shape as :func:`store.kb_status`), with
+    an ``error`` field when the KB isn't ready so the route can surface a
+    friendly "upload required" message.
     """
-    status = kb_status()
+    if not org_id:
+        # No active org on the request → nothing to scope to. Treat as
+        # not-ready rather than leaking a shared KB.
+        return {
+            "ready": False,
+            "filename": None,
+            "sections": {},
+            "updated_at": None,
+            "error": "No active organization. Pick an organization first.",
+        }
+
+    status = kb_status(org_id)
     if status.get("ready"):
         return status
-
-    with _BOOTSTRAP_LOCK:
-        # Re-check inside the lock so two concurrent requests don't
-        # both re-ingest the PDF.
-        status = kb_status()
-        if status.get("ready"):
-            return status
-
-        pdf_bytes: Optional[bytes] = None
-        source_filename = KB_FILENAME
-        source_label = ""
-
-        pdf_path = find_source_pdf()
-        if pdf_path:
-            try:
-                pdf_bytes = pdf_path.read_bytes()
-                source_filename = pdf_path.name
-                source_label = str(pdf_path)
-            except OSError as exc:
-                logger.warning("[escalation] failed to read %s: %s", pdf_path, exc)
-
-        if pdf_bytes is None:
-            s3_hit = find_in_s3(user_id=user_id)
-            if s3_hit:
-                pdf_bytes, source_filename = s3_hit
-                source_label = f"s3://{source_filename}"
-
-        if pdf_bytes is None:
-            report = scan_report()
-            return {
-                **status,
-                "error": "No document is uploaded.",
-                "upload_dir": report.get("upload_dir"),
-                "pdfs_seen": [p["name"] for p in report.get("pdfs_seen", [])],
-            }
-
-        try:
-            chunks, sections_summary = parse_pdf(pdf_bytes)
-        except Exception as exc:
-            logger.warning(
-                "[escalation] parse_pdf failed for %s: %s", source_label, exc,
-            )
-            return {**status, "error": f"Failed to parse {source_filename}: {exc}"}
-
-        if not chunks:
-            return {**status, "error": "No content extracted from the PDF."}
-
-        embedded = []
-        for chunk in chunks:
-            try:
-                vector = embed_text(chunk.text)
-            except Exception as exc:
-                logger.warning(
-                    "[escalation] embedding failed (section=%s page=%s): %s",
-                    chunk.section, chunk.page, exc,
-                )
-                return {**status, "error": f"Embedding failed: {exc}"}
-            embedded.append({
-                "section": chunk.section,
-                "page": chunk.page,
-                "text": chunk.text,
-                "embedding": vector,
-            })
-
-        save_kb(
-            filename=source_filename,
-            sections=sections_summary,
-            chunks=embedded,
-        )
-        logger.info(
-            "[escalation] bootstrapped KB from %s (%d chunks, sections=%s)",
-            source_label or source_filename,
-            len(embedded),
-            {sid: meta.get("chunks", 0) for sid, meta in sections_summary.items()},
-        )
-
-    return kb_status()
+    return {**status, "error": "No document is uploaded."}

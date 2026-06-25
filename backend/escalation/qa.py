@@ -27,12 +27,13 @@ def _top_k(
 
 def answer(
     *,
+    org_id: str,
     section_id: str,
     question: str,
     history: Optional[List[Dict]] = None,
     top_k: int = 5,
 ) -> Dict:
-    section_chunks = chunks_for_section(section_id)
+    section_chunks = chunks_for_section(org_id, section_id)
     if not section_chunks:
         return {
             "answer": (

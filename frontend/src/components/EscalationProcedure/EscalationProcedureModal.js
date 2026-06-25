@@ -37,6 +37,7 @@ import {
   getEscalationStatus,
   uploadEscalationPdf,
 } from "./escalationApi";
+import { useOrg } from "../../hooks/OrgContext";
 
 
 const { Paragraph, Text } = Typography;
@@ -64,6 +65,14 @@ export default function EscalationProcedureModal({ open, onClose }) {
   const [uploading, setUploading] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [selectedCategory, setSelectedCategory] = useState(null);
+
+  // Only org admins may upload / delete the escalation KB. Members get a
+  // read-only experience (use the picker if a KB exists, otherwise a
+  // "ask your admin" message). The backend enforces this too.
+  const { activeOrg, platformRole } = useOrg();
+  const isAdmin =
+    (activeOrg?.role || "").toLowerCase() === "admin" ||
+    platformRole === "super_admin";
 
   const refreshStatus = async () => {
     setLoadingStatus(true);
@@ -156,11 +165,20 @@ export default function EscalationProcedureModal({ open, onClose }) {
 
   const renderUploadStep = () => (
     <div>
+      {!isAdmin ? (
+        <Alert
+          type="info"
+          showIcon
+          message="No escalation procedures available yet"
+          description="Your organization's escalation knowledge base hasn't been set up. Please ask an organization admin to upload it."
+        />
+      ) : (
+      <>
       <Alert
         type="info"
         showIcon
         message={`Upload ${ESCALATION_KB_FILENAME} to activate the four scoped chatbots.`}
-        description="This is a one-time step. Once uploaded, every user lands straight in the picker on subsequent visits."
+        description="This is a one-time step. Once uploaded, every user in your organization lands straight in the picker on subsequent visits."
         style={{ marginBottom: 16 }}
       />
       <Dragger
@@ -198,6 +216,8 @@ export default function EscalationProcedureModal({ open, onClose }) {
           message={error}
           style={{ marginTop: 16 }}
         />
+      )}
+      </>
       )}
     </div>
   );
@@ -297,21 +317,23 @@ export default function EscalationProcedureModal({ open, onClose }) {
             · Sections detected:{" "}
             <Text code>{Object.keys(sectionsReady).length}</Text>
           </Text>
-          <Tooltip title="Delete KB file">
-            <Button
-              type="text"
-              size="small"
-              danger
-              onClick={handleDelete}
-              loading={deleting}
-              aria-label="Delete KB file"
-              style={{ fontSize: 16, lineHeight: 1, padding: "0 6px" }}
-            >
-              <span role="img" aria-hidden>
-                🗑️
-              </span>
-            </Button>
-          </Tooltip>
+          {isAdmin && (
+            <Tooltip title="Delete KB file">
+              <Button
+                type="text"
+                size="small"
+                danger
+                onClick={handleDelete}
+                loading={deleting}
+                aria-label="Delete KB file"
+                style={{ fontSize: 16, lineHeight: 1, padding: "0 6px" }}
+              >
+                <span role="img" aria-hidden>
+                  🗑️
+                </span>
+              </Button>
+            </Tooltip>
+          )}
         </div>
       </div>
     );

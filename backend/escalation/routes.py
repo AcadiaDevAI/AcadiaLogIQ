@@ -25,9 +25,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from backend._lazy_auth import lazy_auth_dependency
 from backend.observability.rate_limit import limiter
+from backend.tenancy.context import get_request_context, require_org_admin
 
 from .bedrock_client import embed_text
-from .bootstrap import _iter_pdfs, _name_matches_kb, _upload_root, ensure_kb_loaded, scan_report
+from .bootstrap import ensure_kb_loaded, scan_report
 from .parser import parse_pdf
 from .qa import answer as answer_question
 from .sections import KB_FILENAME, SECTION_IDS
@@ -101,8 +102,10 @@ class DeleteResponse(BaseModel):
 async def status(
     request: Request,
     user_id: Optional[str] = Depends(lazy_auth_dependency),
+    ctx=Depends(get_request_context),
 ) -> StatusResponse:
-    return StatusResponse(**ensure_kb_loaded(user_id=user_id))
+    org_key = str(ctx.org_id) if ctx.org_id else None
+    return StatusResponse(**ensure_kb_loaded(org_id=org_key, user_id=user_id))
 
 
 @router.post("/upload", response_model=UploadResponse)
@@ -111,10 +114,16 @@ async def upload(
     request: Request,
     file: UploadFile = File(...),
     user_id: Optional[str] = Depends(lazy_auth_dependency),
+    ctx=Depends(get_request_context),
+    _admin=Depends(require_org_admin),   # admins only — members are read-only
 ) -> UploadResponse:
-    """One-shot ingest. Parses + embeds + persists ``kb.json`` so the
-    very next ``/status`` call reports ready and the modal jumps to the
-    picker without a refresh."""
+    """One-shot ingest. Parses + embeds + persists this org's ``kb.json``
+    so the very next ``/status`` call reports ready and the modal jumps to
+    the picker without a refresh. Admin-only and scoped to the active org."""
+    if not ctx.org_id:
+        raise HTTPException(400, "No active organization. Pick an organization first.")
+    org_key = str(ctx.org_id)
+
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(400, "Only PDF uploads are accepted.")
 
@@ -151,6 +160,7 @@ async def upload(
         })
 
     saved = save_kb(
+        org_id=org_key,
         filename=file.filename or KB_FILENAME,
         sections=sections_summary,
         chunks=embedded,
@@ -175,41 +185,28 @@ async def upload(
 async def delete_kb_route(
     request: Request,
     user_id: Optional[str] = Depends(lazy_auth_dependency),
+    ctx=Depends(get_request_context),
+    _admin=Depends(require_org_admin),   # admins only — members are read-only
 ) -> DeleteResponse:
-    """Wipe the indexed KB JSON and any matching source PDF on disk so
-    the modal goes back to the upload step. S3-backed copies are left
-    alone — operators should manage those out of band."""
+    """Wipe THIS ORG's indexed KB JSON so the modal goes back to the
+    upload step. Admin-only and strictly org-scoped — we only touch
+    ``escalation/{org_id}/kb.json`` and never scan the shared upload tree
+    (that scan crossed tenant boundaries)."""
+    if not ctx.org_id:
+        raise HTTPException(400, "No active organization.")
+    org_key = str(ctx.org_id)
+
     deleted_index = False
     try:
-        deleted_index = delete_kb()
+        deleted_index = delete_kb(org_key)
     except OSError as exc:
         raise HTTPException(500, f"Failed to delete kb.json: {exc}")
 
-    deleted_files: List[str] = []
-    try:
-        root = _upload_root()
-        if root.is_dir():
-            for pdf in _iter_pdfs(root):
-                if _name_matches_kb(pdf.name):
-                    try:
-                        pdf.unlink()
-                        deleted_files.append(str(pdf))
-                    except OSError as exc:
-                        logger.warning(
-                            "[escalation] failed to delete source PDF %s: %s",
-                            pdf, exc,
-                        )
-    except OSError as exc:
-        logger.warning("[escalation] upload-dir scan failed during delete: %s", exc)
-
-    logger.info(
-        "[escalation] KB deleted (index=%s, files=%d)",
-        deleted_index, len(deleted_files),
-    )
+    logger.info("[escalation] KB deleted org=%s (index=%s)", org_key, deleted_index)
     return DeleteResponse(
         ok=True,
         deleted_index=deleted_index,
-        deleted_files=deleted_files,
+        deleted_files=[],
     )
 
 
@@ -217,6 +214,7 @@ async def delete_kb_route(
 async def debug(
     request: Request,
     user_id: Optional[str] = Depends(lazy_auth_dependency),
+    _admin=Depends(require_org_admin),   # lists disk filenames — admins only
 ) -> dict:
     """Diagnostic view of what the backend sees in UPLOAD_DIR.
 
@@ -234,20 +232,26 @@ async def ask(
     request: Request,
     payload: AskRequest,
     user_id: Optional[str] = Depends(lazy_auth_dependency),
+    ctx=Depends(get_request_context),
 ) -> AskResponse:
     if payload.section not in SECTION_IDS:
         raise HTTPException(400, "Unknown section.")
 
-    state = ensure_kb_loaded(user_id=user_id)
+    if not ctx.org_id:
+        raise HTTPException(400, "No active organization. Pick an organization first.")
+    org_key = str(ctx.org_id)
+
+    state = ensure_kb_loaded(org_id=org_key, user_id=user_id)
     if not state.get("ready"):
         raise HTTPException(
             503,
             state.get("error")
-            or "Escalation Procedures KB is not loaded on the server.",
+            or "Escalation Procedures KB is not loaded for your organization.",
         )
 
     try:
         result = answer_question(
+            org_id=org_key,
             section_id=payload.section,
             question=payload.question,
             history=[t.model_dump() for t in payload.history],
