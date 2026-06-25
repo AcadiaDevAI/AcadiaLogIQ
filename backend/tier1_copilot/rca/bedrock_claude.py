@@ -49,6 +49,50 @@ from typing import Any, Dict
 logger = logging.getLogger("acadia-log-iq")
 
 
+# Dedicated Bedrock client for RCA report generation. Built once, lazily.
+# We do NOT reuse backend.api.bedrock: that client is tuned for
+# interactive chat (read_timeout=45s), but RCA is a heavy non-streaming
+# generation whose full response read routinely exceeds 45s — surfacing
+# as "Read timeout on endpoint URL" and then burning ~4×45s on adaptive
+# retries before failing. This client uses REPORT_LLM_READ_TIMEOUT_S
+# (default 180s) and fewer attempts so the report finishes in one shot.
+_report_bedrock = None
+
+
+def _get_report_bedrock():
+    global _report_bedrock
+    if _report_bedrock is not None:
+        return _report_bedrock
+
+    import boto3
+    from botocore.config import Config as BotoConfig
+    from backend.config import settings
+
+    cfg = BotoConfig(
+        retries={
+            "max_attempts": getattr(settings, "REPORT_LLM_MAX_ATTEMPTS", 2),
+            "mode": "adaptive",
+        },
+        read_timeout=getattr(settings, "REPORT_LLM_READ_TIMEOUT_S", 180),
+        connect_timeout=getattr(settings, "LLM_CONNECT_TIMEOUT_S", 10),
+        tcp_keepalive=True,
+    )
+
+    kwargs: Dict[str, Any] = {
+        "service_name": "bedrock-runtime",
+        "region_name": settings.AWS_REGION,
+        "config": cfg,
+    }
+    if settings.AWS_ACCESS_KEY_ID and settings.AWS_SECRET_ACCESS_KEY:
+        kwargs["aws_access_key_id"] = settings.AWS_ACCESS_KEY_ID
+        kwargs["aws_secret_access_key"] = settings.AWS_SECRET_ACCESS_KEY
+        if settings.AWS_SESSION_TOKEN:
+            kwargs["aws_session_token"] = settings.AWS_SESSION_TOKEN
+
+    _report_bedrock = boto3.client(**kwargs)
+    return _report_bedrock
+
+
 # Sprint 13.32.9 — model id is no longer hard-coded. Read it from
 # settings at call time so the operator's .env (BEDROCK_HAIKU_MODEL)
 # is the single source of truth. Today that env points at
@@ -111,11 +155,10 @@ def invoke(prompt: str, max_tokens: int = _DEFAULT_MAX_TOKENS, *, temperature: f
     if not isinstance(prompt, str) or not prompt.strip():
         raise ValueError("empty prompt")
 
-    # Lazy import — keeps test environments without boto3 (or without
-    # the app shell loaded) happy. The bedrock client itself is built
-    # once at api.py import time and shared across the app, so we don't
-    # pay any extra cost reusing it here.
-    from backend.api import bedrock  # type: ignore
+    # Dedicated long-timeout client (see _get_report_bedrock). We do NOT
+    # reuse backend.api.bedrock — its 45s chat read_timeout is too tight
+    # for these large RCA generations and causes read timeouts.
+    bedrock = _get_report_bedrock()
 
     model_id = _resolve_model_id()
 

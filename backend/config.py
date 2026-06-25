@@ -593,6 +593,17 @@ class Settings(BaseSettings):
     LLM_READ_TIMEOUT_S: int = 45               # per-attempt socket read timeout
     LLM_CONNECT_TIMEOUT_S: int = 10            # TCP connect timeout
     LLM_MAX_ATTEMPTS: int = 3                  # boto3 max_attempts (down from 10)
+
+    # Report generation (Gap Analysis / Post-Mortem / RCA) is a heavy,
+    # NON-streaming invoke_model call with a large output budget
+    # (max_tokens up to 16384). The whole response is read on one socket
+    # read, which routinely exceeds the 45s chat timeout above and
+    # surfaces as "Read timeout on endpoint URL". These reports run in the
+    # background, not on the interactive chat path, so they get a much
+    # larger per-attempt read budget and FEWER retries (a generous timeout
+    # makes stacked retries pointless and only multiplies wasted wall-time).
+    REPORT_LLM_READ_TIMEOUT_S: int = 180       # per-attempt read timeout for reports
+    REPORT_LLM_MAX_ATTEMPTS: int = 2           # don't stack 4×45s on a slow gen
     LLM_HAIKU_FALLBACK_MAX_TOKENS: int = 2048  # output budget on fallback path
     LLM_FALLBACK_DECLINE_MESSAGE: str = (
         "- The system is taking longer than expected to respond. Please "
