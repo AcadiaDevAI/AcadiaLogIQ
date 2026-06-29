@@ -29,6 +29,9 @@ python-docx>=1.1.0
 
 # XLSX Extraction (Sprint 3-PREP-C — etl_excel_contacts.py)
 openpyxl>=3.1.0
+# Legacy .xls reading for the tabular ingest parser (xlsx_parser._read_xls_sheets).
+# xlrd>=2.0 supports .xls only; .xlsx is handled by openpyxl above.
+xlrd>=2.0.1
 
 # Clerk JWT Verification
 PyJWT[crypto]>=2.8.0

@@ -193,6 +193,50 @@ def _fallback_chunk_metadata(
     }
 
 
+# Chunk types emitted by the tabular parsers (csv_parser / xlsx_parser).
+# These rows already carry exact, structured metadata (raw_row + mapped
+# canonical fields), so they take the zero-LLM fast path below.
+_TABULAR_CHUNK_TYPES = frozenset({"csv_row", "xlsx_row", "xlsx_context"})
+
+
+def _tabular_chunk_metadata(
+    chunk: ParsedChunk,
+    document_name: str,
+    source_type: str,
+) -> Dict[str, Any]:
+    """Synthesize chunk metadata for a tabular row WITHOUT calling the LLM.
+
+    Row chunks from csv_parser/xlsx_parser already hold the source columns
+    (``raw_row``) and the heuristic canonical-field mapping. Running each row
+    through the Haiku metadata extractor is wasteful and lower-fidelity than
+    the exact values we already have — and on a 1000+-row workbook it costs
+    minutes. We build a valid metadata dict (same shape as the LLM/_fallback
+    path) directly from the parser output, so NO column data is lost and
+    large spreadsheets ingest in seconds.
+    """
+    meta = _fallback_chunk_metadata(chunk, document_name, source_type)
+
+    pm = chunk.metadata or {}
+    raw_row = pm.get("raw_row") or {}
+
+    if raw_row:
+        meta["keywords"] = [str(k) for k in list(raw_row.keys())[:8] if str(k).strip()]
+
+    parser_summary = pm.get("summary")
+    if parser_summary:
+        meta["summary"] = str(parser_summary)[: settings.MAX_CONTEXT_SUMMARY_CHARS]
+
+    entities = []
+    for canonical, etype in (("customer", "customer"), ("component", "component")):
+        val = pm.get(canonical)
+        if val:
+            entities.append({"name": str(val)[:80], "type": etype})
+    if entities:
+        meta["entities"] = entities
+
+    return meta
+
+
 def _normalize_chunk_metadata(
     item: Dict[str, Any],
     document_meta: Dict[str, Any],
@@ -1729,12 +1773,18 @@ def process_document(
                 )
                 break
 
-    # CSV/TSV: use column-aware parser that emits one ParsedChunk per row.
-    # Short-circuits the generic parse_file/build_chunks path (which would
-    # treat the file as flat text). Gated by CSV_COLUMN_AWARE_PARSING_ENABLED
-    # inside parse_csv; when disabled it falls back to a single flat-text chunk.
+    # Tabular formats emit one ParsedChunk per row (short-circuiting the
+    # generic parse_file/build_chunks path, which would treat the file as
+    # flat text or fail outright on binary Excel). Routing is by EXTENSION
+    # (not doc_kind), so re-mapping these to doc_kind=kb doesn't change which
+    # parser runs.
     ext = local_path.suffix.lower()
-    if ext in (".csv", ".tsv"):
+    if ext in (".xlsx", ".xls"):
+        # Excel gets its own lossless parser: all sheets, header auto-detect,
+        # full column width, numbers/dates preserved.
+        from backend.ingestion.xlsx_parser import parse_excel
+        chunks = parse_excel(local_path)
+    elif ext in (".csv", ".tsv"):
         from backend.ingestion.csv_parser import parse_csv
         org_schema_mapping: Optional[Dict[str, str]] = None
         if getattr(settings, "DYNAMIC_SCHEMA_INFERENCE_ENABLED", False):
@@ -1785,30 +1835,53 @@ def process_document(
 
     all_chunk_meta: Dict[int, Dict[str, Any]] = {}
 
-    # Build batches — adaptive sizing when enabled, fixed stride otherwise
-    batches: List[List[ParsedChunk]] = []
-    if settings.ADAPTIVE_INGESTION_BATCHING_ENABLED and chunks:
-        adaptive_size = _compute_adaptive_batch_size(chunks)
-        avg_out = sum(_estimate_output_tokens_per_chunk(c) for c in chunks) // max(1, len(chunks))
-        logger.info(
-            "[adaptive_batch] doc=%s chunks=%d avg_out_tok/chunk=%d batch_size=%d (min=%d max=%d target=%d)",
-            filename,
-            len(chunks),
-            avg_out,
-            adaptive_size,
-            settings.ADAPTIVE_BATCH_SIZE_MIN,
-            settings.ADAPTIVE_BATCH_SIZE_MAX,
-            settings.ADAPTIVE_TARGET_OUTPUT_TOKENS,
-        )
-        stride = adaptive_size
-    else:
-        stride = settings.CHUNK_BATCH_SIZE
-    for start in range(0, len(chunks), stride):
-        batches.append(chunks[start : start + stride])
+    # ── Tabular fast-path ──────────────────────────────────────────────
+    # Rows from csv_parser/xlsx_parser already carry exact structured
+    # metadata, so we synthesize their chunk metadata locally and SKIP the
+    # per-batch LLM extraction. Only prose chunks (PDF/DOCX/text/JSON) go
+    # through the Haiku enrichment below. On a 1000-row workbook this turns
+    # ~60 LLM calls (minutes) into zero (milliseconds) — no data is lost,
+    # because the full row is still persisted via parser_metadata.
+    tabular_chunks = [c for c in chunks if c.chunk_type in _TABULAR_CHUNK_TYPES]
+    llm_chunks = [c for c in chunks if c.chunk_type not in _TABULAR_CHUNK_TYPES]
 
-    # Extract metadata concurrently across batches
-    max_workers = min(settings.METADATA_CONCURRENCY, len(batches))
-    if max_workers <= 1 or not settings.ENABLE_METADATA_EXTRACTION:
+    for c in tabular_chunks:
+        all_chunk_meta[c.chunk_index] = _tabular_chunk_metadata(c, filename, file_type)
+    if tabular_chunks:
+        logger.info(
+            "[ingest] tabular fast-path: synthesized metadata for %d row chunk(s) "
+            "without LLM (doc=%s); %d prose chunk(s) remain for enrichment",
+            len(tabular_chunks), filename, len(llm_chunks),
+        )
+
+    # Build batches over the PROSE chunks only — adaptive sizing when
+    # enabled, fixed stride otherwise.
+    batches: List[List[ParsedChunk]] = []
+    if llm_chunks:
+        if settings.ADAPTIVE_INGESTION_BATCHING_ENABLED:
+            adaptive_size = _compute_adaptive_batch_size(llm_chunks)
+            avg_out = sum(_estimate_output_tokens_per_chunk(c) for c in llm_chunks) // max(1, len(llm_chunks))
+            logger.info(
+                "[adaptive_batch] doc=%s chunks=%d avg_out_tok/chunk=%d batch_size=%d (min=%d max=%d target=%d)",
+                filename,
+                len(llm_chunks),
+                avg_out,
+                adaptive_size,
+                settings.ADAPTIVE_BATCH_SIZE_MIN,
+                settings.ADAPTIVE_BATCH_SIZE_MAX,
+                settings.ADAPTIVE_TARGET_OUTPUT_TOKENS,
+            )
+            stride = adaptive_size
+        else:
+            stride = settings.CHUNK_BATCH_SIZE
+        for start in range(0, len(llm_chunks), stride):
+            batches.append(llm_chunks[start : start + stride])
+
+    # Extract metadata concurrently across the (prose) batches
+    max_workers = min(settings.METADATA_CONCURRENCY, len(batches)) if batches else 0
+    if not batches:
+        pass  # pure tabular file — nothing to LLM-enrich
+    elif max_workers <= 1 or not settings.ENABLE_METADATA_EXTRACTION:
         # Sequential fallback
         for batch in batches:
             all_chunk_meta.update(

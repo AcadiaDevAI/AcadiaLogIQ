@@ -33,7 +33,7 @@ class Settings(BaseSettings):
 
     MAX_FILE_SIZE_MB: int = 100
     ALLOWED_FILE_TYPES: List[str] = [
-        "log", "txt", "md", "json", "pdf", "docx",
+        "log", "txt", "md", "json", "pdf", "docx", "csv", "xlsx", "xls",
     ]
 
     # ----------------------------------------------------------------

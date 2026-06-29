@@ -831,56 +831,60 @@ def insert_document_and_chunks(
             for batch_start in range(0, len(chunk_rows), BATCH_SIZE):
                 batch = chunk_rows[batch_start : batch_start + BATCH_SIZE]
 
-                # Insert chunks batch
-                for row in batch:
-                    db.execute(
-                        text(
-                            """
-                            INSERT INTO chunks(
-                                id, document_id, document_version_id, chunk_index, content, created_at,
-                                chunk_type, section_heading, page_number, token_estimate,
-                                summary, contextualized_content, labels_json, metadata_json, source_order
-                            )
-                            VALUES (
-                                :chunk_id, :document_id, :version_id, :chunk_index, :content, CURRENT_TIMESTAMP,
-                                :chunk_type, :section_heading, :page_number, :token_estimate,
-                                :summary, :contextualized_content, CAST(:labels_json AS JSONB),
-                                CAST(:metadata_json AS JSONB), :source_order
-                            )
-                            """
-                        ),
-                        {
-                            "chunk_id": row["id"],
-                            "document_id": document_id,
-                            "version_id": version_id,
-                            "chunk_index": row["chunk_index"],
-                            "content": row["content"],
-                            "chunk_type": row.get("chunk_type"),
-                            "section_heading": row.get("section_heading"),
-                            "page_number": row.get("page_number"),
-                            "token_estimate": row.get("token_estimate"),
-                            "summary": row.get("summary"),
-                            "contextualized_content": row.get("contextualized_content"),
-                            "labels_json": json.dumps(row.get("labels_json", {})),
-                            "metadata_json": json.dumps(row.get("metadata_json", {})),
-                            "source_order": row.get("source_order"),
-                        },
+                # ── Multi-row INSERT for chunks ───────────────────────
+                # One statement per batch instead of one round-trip per row.
+                # Network round-trips to RDS dominate insert time, so this
+                # collapses ~2*N round-trips into ~2 per batch. Identical
+                # columns/values/transaction semantics — purely a batching
+                # change. Param count per batch (50*15=750) is far under
+                # Postgres' 65535 bind-param limit.
+                chunk_values = []
+                chunk_params = {"document_id": document_id, "version_id": version_id}
+                for j, row in enumerate(batch):
+                    chunk_values.append(
+                        f"(:id_{j}, :document_id, :version_id, :cidx_{j}, :content_{j}, CURRENT_TIMESTAMP, "
+                        f":ctype_{j}, :sh_{j}, :pn_{j}, :te_{j}, :sum_{j}, :cc_{j}, "
+                        f"CAST(:lj_{j} AS JSONB), CAST(:mj_{j} AS JSONB), :so_{j})"
                     )
+                    chunk_params[f"id_{j}"] = row["id"]
+                    chunk_params[f"cidx_{j}"] = row["chunk_index"]
+                    chunk_params[f"content_{j}"] = row["content"]
+                    chunk_params[f"ctype_{j}"] = row.get("chunk_type")
+                    chunk_params[f"sh_{j}"] = row.get("section_heading")
+                    chunk_params[f"pn_{j}"] = row.get("page_number")
+                    chunk_params[f"te_{j}"] = row.get("token_estimate")
+                    chunk_params[f"sum_{j}"] = row.get("summary")
+                    chunk_params[f"cc_{j}"] = row.get("contextualized_content")
+                    chunk_params[f"lj_{j}"] = json.dumps(row.get("labels_json", {}))
+                    chunk_params[f"mj_{j}"] = json.dumps(row.get("metadata_json", {}))
+                    chunk_params[f"so_{j}"] = row.get("source_order")
 
-                # Insert embeddings batch
-                for row in batch:
-                    db.execute(
-                        text(
-                            """
-                            INSERT INTO embeddings(chunk_id, embedding, created_at)
-                            VALUES (:chunk_id, CAST(:embedding AS vector), CURRENT_TIMESTAMP)
-                            """
-                        ),
-                        {
-                            "chunk_id": row["id"],
-                            "embedding": _vector_literal(row["embedding"]),
-                        },
-                    )
+                db.execute(
+                    text(
+                        "INSERT INTO chunks("
+                        "id, document_id, document_version_id, chunk_index, content, created_at, "
+                        "chunk_type, section_heading, page_number, token_estimate, "
+                        "summary, contextualized_content, labels_json, metadata_json, source_order"
+                        ") VALUES " + ", ".join(chunk_values)
+                    ),
+                    chunk_params,
+                )
+
+                # ── Multi-row INSERT for embeddings ───────────────────
+                emb_values = []
+                emb_params = {}
+                for j, row in enumerate(batch):
+                    emb_values.append(f"(:ecid_{j}, CAST(:emb_{j} AS vector), CURRENT_TIMESTAMP)")
+                    emb_params[f"ecid_{j}"] = row["id"]
+                    emb_params[f"emb_{j}"] = _vector_literal(row["embedding"])
+
+                db.execute(
+                    text(
+                        "INSERT INTO embeddings(chunk_id, embedding, created_at) VALUES "
+                        + ", ".join(emb_values)
+                    ),
+                    emb_params,
+                )
 
                 inserted += len(batch)
 

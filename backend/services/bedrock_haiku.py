@@ -22,6 +22,11 @@ def _make_bedrock_runtime():
         read_timeout=settings.LLM_READ_TIMEOUT_S,
         connect_timeout=settings.LLM_CONNECT_TIMEOUT_S,
         tcp_keepalive=True,
+        # Pool sized to the concurrent Haiku/embedding fan-out + headroom so
+        # workers reuse warm connections instead of churning them.
+        max_pool_connections=max(
+            settings.METADATA_CONCURRENCY, settings.EMBED_CONCURRENCY
+        ) + 4,
     )
 
     kwargs = {

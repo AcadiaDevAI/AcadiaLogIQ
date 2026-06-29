@@ -358,6 +358,14 @@ def _make_bedrock_client():
         read_timeout=settings.LLM_READ_TIMEOUT_S,
         connect_timeout=settings.LLM_CONNECT_TIMEOUT_S,
         tcp_keepalive=True,
+        # Size the HTTPS pool to the max concurrent Bedrock callers sharing
+        # this client (embedding fan-out at EMBED_CONCURRENCY is heaviest).
+        # The default of 10 < EMBED_CONCURRENCY=12 caused workers to discard
+        # warm connections ("Connection pool is full") and pay fresh TLS
+        # handshakes. Wired to the concurrency settings so it can't drift.
+        max_pool_connections=max(
+            settings.EMBED_CONCURRENCY, settings.METADATA_CONCURRENCY
+        ) + 4,
     )
     kwargs = {
         "service_name": "bedrock-runtime",

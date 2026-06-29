@@ -73,6 +73,8 @@ _EXT_TO_FORMAT = {
     ".json": "json",
     ".csv": "csv",
     ".tsv": "tsv",
+    ".xlsx": "xlsx",
+    ".xls": "xls",
     ".txt": "txt",
     ".md": "md",
     ".log": "txt",
@@ -81,6 +83,11 @@ _EXT_TO_FORMAT = {
 
 # Detected format → doc_kind. Anything not in this map defaults to
 # "kb" (see module-level docstring for the rationale).
+#
+# ONLY JSON maps to ticket history. CSV/TSV/Excel are tabular reference
+# data (contacts, inventories, mappings) far more often than ticket
+# exports, so they default to "kb". A user with a CSV/Excel ticket export
+# can still pick doc_kind=ticket explicitly on the upload.
 _FORMAT_TO_DOC_KIND = {
     "pdf":  "kb",
     "docx": "kb",
@@ -88,8 +95,10 @@ _FORMAT_TO_DOC_KIND = {
     "txt":  "kb",
     "md":   "kb",
     "json": "ticket",
-    "csv":  "ticket",
-    "tsv":  "ticket",
+    "csv":  "kb",
+    "tsv":  "kb",
+    "xlsx": "kb",
+    "xls":  "kb",
 }
 
 

@@ -249,49 +249,68 @@ def persist(learned: Dict[str, List[str]], file_id: str) -> int:
     (RAGPotencyMetadata / RAG_Potency_Metadata / rag_potency_metadata) share
     a single canonical key and can be cross-matched at query time.
     """
-    rows = 0
     type_map = {
         "identifiers": "identifier",
         "field_names": "field_name",
         "enum_values": "enum_value",
     }
+
+    # Flatten all learned tokens, deduping by token. ON CONFLICT DO UPDATE
+    # cannot affect the same (organization_id, token) twice within ONE
+    # multi-row INSERT, and organization_id is constant per call — so a
+    # token appearing in two types collapses to one row. First type wins,
+    # which matches the original behavior: the old per-row upsert set
+    # token_type only on insert and never overwrote it on conflict.
+    seen: set = set()
+    items = []  # (token, token_type, canonical_form)
+    for plural, singular in type_map.items():
+        for token in learned.get(plural, []):
+            if token in seen:
+                continue
+            seen.add(token)
+            items.append((token, singular, canonicalize_token(token)))
+
+    if not items:
+        return 0
+
+    # Migration 060 widened the PK to (organization_id, token); org flows in
+    # via current_setting('app.current_org') with a zero-uuid fallback.
+    _ORG_EXPR = (
+        "COALESCE(CAST(current_setting('app.current_org', true) AS uuid), "
+        "'00000000-0000-0000-0000-000000000000'::uuid)"
+    )
+    # Multi-row INSERT in batches — collapses ~N network round-trips to RDS
+    # (the dominant cost) into ~N/BATCH. 200 rows * 3 params = 600 binds,
+    # far under Postgres' 65535 limit.
+    BATCH = 200
+    rows = 0
     try:
         with engine.begin() as conn:
-            for plural, singular in type_map.items():
-                for token in learned.get(plural, []):
-                    canonical = canonicalize_token(token)
-                    # Migration 060 widened the PK from (token) to
-                    # (organization_id, token) so different tenants can
-                    # have the same token without colliding. The
-                    # organization_id flows in via the column DEFAULT or
-                    # via the org-scoped session var current_setting()
-                    # used here as an explicit override.
-                    conn.execute(
-                        text(
-                            """
-                            INSERT INTO learned_vocabulary
-                                (organization_id, token, token_type, canonical_form, first_seen_file)
-                            VALUES (
-                                COALESCE(CAST(current_setting('app.current_org', true) AS uuid),
-                                         '00000000-0000-0000-0000-000000000000'::uuid),
-                                :tok, :type, :canon, :fid
-                            )
-                            ON CONFLICT (organization_id, token) DO UPDATE SET
-                                occurrence_count = learned_vocabulary.occurrence_count + 1,
-                                canonical_form = COALESCE(
-                                    learned_vocabulary.canonical_form, EXCLUDED.canonical_form
-                                ),
-                                last_seen_at = NOW()
-                            """
-                        ),
-                        {
-                            "tok": token,
-                            "type": singular,
-                            "canon": canonical,
-                            "fid": file_id,
-                        },
+            for start in range(0, len(items), BATCH):
+                batch = items[start : start + BATCH]
+                values_clauses = []
+                params = {"fid": file_id}
+                for j, (tok, typ, canon) in enumerate(batch):
+                    values_clauses.append(
+                        f"({_ORG_EXPR}, :tok_{j}, :type_{j}, :canon_{j}, :fid)"
                     )
-                    rows += 1
+                    params[f"tok_{j}"] = tok
+                    params[f"type_{j}"] = typ
+                    params[f"canon_{j}"] = canon
+                conn.execute(
+                    text(
+                        "INSERT INTO learned_vocabulary "
+                        "(organization_id, token, token_type, canonical_form, first_seen_file) "
+                        "VALUES " + ", ".join(values_clauses) +
+                        " ON CONFLICT (organization_id, token) DO UPDATE SET "
+                        "occurrence_count = learned_vocabulary.occurrence_count + 1, "
+                        "canonical_form = COALESCE("
+                        "learned_vocabulary.canonical_form, EXCLUDED.canonical_form), "
+                        "last_seen_at = NOW()"
+                    ),
+                    params,
+                )
+                rows += len(batch)
     except Exception as exc:
         logger.warning("[vocab_learner] persist failed for %s: %s", file_id, exc)
         return 0

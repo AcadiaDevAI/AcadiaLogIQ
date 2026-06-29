@@ -19,7 +19,7 @@ const USE_S3_UPLOAD =
 
 const { Dragger } = Upload;
 
-const DOC_ACCEPT = ".txt,.md,.json,.pdf,.docx,.log";
+const DOC_ACCEPT = ".txt,.md,.json,.pdf,.docx,.log,.csv,.xlsx,.xls";
 
 // Sprint 3-PREP-B — doc_kind dropdown options. Values MUST match the
 // backend VALID_DOC_KINDS frozenset in backend/config.py. When the
@@ -153,7 +153,7 @@ export default function UploadPanel({ onUploadComplete }) {
         <div className="flex items-center gap-2 mb-2">
           <BookOutlined style={{ color: "#6366f1" }} />
           <span className="text-xs font-semibold t-text-secondary">Upload Documents</span>
-          <Tag color="blue" className="text-[10px] ml-auto">.pdf .docx .txt .md .log .json</Tag>
+          <Tag color="blue" className="text-[10px] ml-auto">.pdf .docx .txt .md .log .json .csv .xlsx .xls</Tag>
         </div>
         {/* Sprint 3-PREP-B — doc_kind picker. Disabled until
             REACT_APP_LOGIQ_BULK_INGEST_FRONTEND=true; flag-off state keeps
