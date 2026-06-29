@@ -640,13 +640,15 @@ def insert_document_and_chunks(
                 text(
                     """
                     INSERT INTO documents(
-                        id, owner_id, name, normalized_name, file_type, source_type,
+                        id, organization_id, owner_id, name, normalized_name, file_type, source_type,
                         status, current_version_id, created_at, updated_at,
                         version_family_key, duplicate_status, latest_effective_at,
                         doc_kind, doc_kind_confidence
                     )
                     VALUES (
-                        :document_id, :owner_id, :filename, :normalized_name, :file_type, 'file',
+                        :document_id,
+                        current_setting('app.current_org', true)::uuid,
+                        :owner_id, :filename, :normalized_name, :file_type, 'file',
                         'active', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
                         :version_family_key, 'unique', :latest_effective_at,
                         :doc_kind, :doc_kind_confidence
@@ -677,14 +679,16 @@ def insert_document_and_chunks(
                 text(
                     """
                     INSERT INTO document_versions(
-                        id, document_id, version_number, fingerprint, storage_uri,
+                        id, organization_id, document_id, version_number, fingerprint, storage_uri,
                         file_size_mb, is_active, uploaded_at, created_at,
                         version_label, version_rank, document_date, effective_date, created_date,
                         extraction_model, contextualization_model, parse_strategy,
                         duplicate_decision_json, enrichment_json
                     )
                     VALUES (
-                        :version_id, :document_id, 1, :fingerprint, :storage_uri,
+                        :version_id,
+                        current_setting('app.current_org', true)::uuid,
+                        :document_id, 1, :fingerprint, :storage_uri,
                         :file_size_mb, TRUE, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
                         :version_label, :version_rank, :document_date, :effective_date, :created_date,
                         'phase2_parser', :contextualization_model, 'structure_aware',
@@ -726,11 +730,12 @@ def insert_document_and_chunks(
                 text(
                     """
                     INSERT INTO document_metadata(
-                        document_id, metadata_json, created_at, updated_at, title, section_count, chunk_count,
+                        organization_id, document_id, metadata_json, created_at, updated_at, title, section_count, chunk_count,
                         metadata_version, extracted_at, vendor, product, domain, document_type,
                         version_label, document_date, effective_date, created_date
                     )
                     VALUES (
+                        current_setting('app.current_org', true)::uuid,
                         :document_id, CAST(:metadata_json AS JSONB), CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
                         :title, :section_count, :chunk_count, :metadata_version, :extracted_at,
                         :vendor, :product, :domain, :document_type, :version_label,
@@ -838,11 +843,16 @@ def insert_document_and_chunks(
                 # columns/values/transaction semantics — purely a batching
                 # change. Param count per batch (50*15=750) is far under
                 # Postgres' 65535 bind-param limit.
+                # organization_id is stamped from the session GUC the RLS
+                # policy checks against (current_setting('app.current_org')),
+                # so the row can never violate RLS and is correctly tenant-
+                # scoped — instead of falling back to the Acadia column DEFAULT.
+                _ORG = "current_setting('app.current_org', true)::uuid"
                 chunk_values = []
                 chunk_params = {"document_id": document_id, "version_id": version_id}
                 for j, row in enumerate(batch):
                     chunk_values.append(
-                        f"(:id_{j}, :document_id, :version_id, :cidx_{j}, :content_{j}, CURRENT_TIMESTAMP, "
+                        f"(:id_{j}, {_ORG}, :document_id, :version_id, :cidx_{j}, :content_{j}, CURRENT_TIMESTAMP, "
                         f":ctype_{j}, :sh_{j}, :pn_{j}, :te_{j}, :sum_{j}, :cc_{j}, "
                         f"CAST(:lj_{j} AS JSONB), CAST(:mj_{j} AS JSONB), :so_{j})"
                     )
@@ -862,7 +872,7 @@ def insert_document_and_chunks(
                 db.execute(
                     text(
                         "INSERT INTO chunks("
-                        "id, document_id, document_version_id, chunk_index, content, created_at, "
+                        "id, organization_id, document_id, document_version_id, chunk_index, content, created_at, "
                         "chunk_type, section_heading, page_number, token_estimate, "
                         "summary, contextualized_content, labels_json, metadata_json, source_order"
                         ") VALUES " + ", ".join(chunk_values)
@@ -874,13 +884,15 @@ def insert_document_and_chunks(
                 emb_values = []
                 emb_params = {}
                 for j, row in enumerate(batch):
-                    emb_values.append(f"(:ecid_{j}, CAST(:emb_{j} AS vector), CURRENT_TIMESTAMP)")
+                    emb_values.append(
+                        f"(:ecid_{j}, {_ORG}, CAST(:emb_{j} AS vector), CURRENT_TIMESTAMP)"
+                    )
                     emb_params[f"ecid_{j}"] = row["id"]
                     emb_params[f"emb_{j}"] = _vector_literal(row["embedding"])
 
                 db.execute(
                     text(
-                        "INSERT INTO embeddings(chunk_id, embedding, created_at) VALUES "
+                        "INSERT INTO embeddings(chunk_id, organization_id, embedding, created_at) VALUES "
                         + ", ".join(emb_values)
                     ),
                     emb_params,
@@ -1658,13 +1670,15 @@ def insert_rejected_document_row(
             text(
                 """
                 INSERT INTO documents(
-                    id, owner_id, name, normalized_name, file_type, source_type,
+                    id, organization_id, owner_id, name, normalized_name, file_type, source_type,
                     status, current_version_id, created_at, updated_at,
                     version_family_key, duplicate_status,
                     ingestion_status, ingestion_error
                 )
                 VALUES (
-                    :document_id, :owner_id, :filename, :filename, :file_type, 'file',
+                    :document_id,
+                    current_setting('app.current_org', true)::uuid,
+                    :owner_id, :filename, :filename, :file_type, 'file',
                     'active', NULL, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP,
                     :filename, 'unique',
                     :ingestion_status, :ingestion_error
@@ -1804,6 +1818,7 @@ def get_cached_expert_answer(chunk_id: str) -> Optional[str]:
                     SELECT cached_expert_answer
                     FROM chunks
                     WHERE id = :cid
+                      AND organization_id = current_setting('app.current_org', true)::uuid
                       AND cached_expert_answer IS NOT NULL
                     """
                 ),
@@ -1834,6 +1849,7 @@ def set_cached_expert_answer(chunk_id: str, answer: str) -> bool:
                     SET cached_expert_answer = :a,
                         cached_expert_answer_at = NOW()
                     WHERE id = :cid
+                      AND organization_id = current_setting('app.current_org', true)::uuid
                     """
                 ),
                 {"a": answer, "cid": chunk_id},
