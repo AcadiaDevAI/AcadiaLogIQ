@@ -94,6 +94,16 @@ def confidence_band(score: float) -> str:
     return "None"
 
 
+def _store_filter_sql(store_id: Optional[str], col: str = "metadata_json") -> str:
+    """SQL fragment that hard-scopes matches to one store (US Pharma).
+
+    Returns an empty string when store_id is absent (Acadia) so the shared
+    matcher SQL is emitted byte-identically. `col` is the metadata_json
+    column reference (bare in Stage 1, `c.` aliased in Stage 2).
+    """
+    return f" AND ({col}->'Metadata'->>'store_id') = :store_id" if store_id else ""
+
+
 def retrieve_top_matches(
     *,
     normalized: Dict[str, Any],
@@ -155,8 +165,11 @@ def _exact_lookup(
     alert_type = (alert_input.get("alert_type") or "").lower()
     signature = normalized.get("alert_signature") or ""
 
+    store_id = (alert_input.get("store_id") or "").strip()
+    store_filter = _store_filter_sql(store_id, "metadata_json")
+
     sql = text(
-        """
+        f"""
         SELECT
             id,
             metadata_json,
@@ -179,7 +192,7 @@ def _exact_lookup(
               alert_signature ILIKE '%' || :asset || '%'
               OR fingerprints_text ILIKE '%' || :alert_type || '%'
               OR alert_signature = :sig
-          )
+          ){store_filter}
         ORDER BY score DESC,
                  COALESCE(
                      (metadata_json->'Metadata'->>'Resolution_Quality_Score')::int,
@@ -191,10 +204,10 @@ def _exact_lookup(
 
     try:
         with engine.connect() as conn:
-            rows = conn.execute(
-                sql,
-                {"sig": signature, "asset": asset, "alert_type": alert_type},
-            ).mappings().all()
+            _params = {"sig": signature, "asset": asset, "alert_type": alert_type}
+            if store_id:
+                _params["store_id"] = store_id
+            rows = conn.execute(sql, _params).mappings().all()
     except Exception as exc:
         logger.warning("[tier1_copilot] stage1 SQL failed: %s", exc)
         return []
@@ -237,6 +250,11 @@ def _hybrid_candidates(
     search_text = normalized.get("search_text") or ""
     candidates: Dict[str, Dict[str, Any]] = {}
 
+    # US Pharma store scope — hard-filter both hybrid passes to this store.
+    # Empty for Acadia → SQL byte-identical.
+    store_id = (alert_input.get("store_id") or "").strip()
+    store_filter = _store_filter_sql(store_id, "c.metadata_json")
+
     # ---- pgvector cosine (optional: only if we can embed) -----------------
     if embed_fn is not None and search_text:
         try:
@@ -247,7 +265,7 @@ def _hybrid_candidates(
         if query_vec:
             _vec_literal = "[" + ",".join(f"{v:.6f}" for v in query_vec) + "]"
             vec_sql = text(
-                """
+                f"""
                 SELECT
                     c.id AS id,
                     c.metadata_json AS metadata_json,
@@ -258,14 +276,17 @@ def _hybrid_candidates(
                 FROM embeddings e
                 JOIN chunks c ON c.id = e.chunk_id
                 WHERE (c.metadata_json->>'doc_kind' IS NULL
-                       OR c.metadata_json->>'doc_kind' = 'ticket')
+                       OR c.metadata_json->>'doc_kind' = 'ticket'){store_filter}
                 ORDER BY e.embedding <=> CAST(:qv AS vector)
                 LIMIT 30
                 """
             )
             try:
+                _vparams = {"qv": _vec_literal}
+                if store_id:
+                    _vparams["store_id"] = store_id
                 with engine.connect() as conn:
-                    vec_rows = conn.execute(vec_sql, {"qv": _vec_literal}).mappings().all()
+                    vec_rows = conn.execute(vec_sql, _vparams).mappings().all()
                 for r in vec_rows:
                     sim = max(0.0, 1.0 - float(r["distance"] or 1.0))
                     candidates.setdefault(r["id"], {
@@ -282,7 +303,7 @@ def _hybrid_candidates(
     # ---- tsvector rank on chunks.content ---------------------------------
     if search_text:
         ts_sql = text(
-            """
+            f"""
             SELECT
                 c.id AS id,
                 c.metadata_json AS metadata_json,
@@ -297,14 +318,17 @@ def _hybrid_candidates(
             WHERE (c.metadata_json->>'doc_kind' IS NULL
                    OR c.metadata_json->>'doc_kind' = 'ticket')
               AND to_tsvector('english', COALESCE(c.content, ''))
-                  @@ plainto_tsquery('english', :q)
+                  @@ plainto_tsquery('english', :q){store_filter}
             ORDER BY rank DESC
             LIMIT 30
             """
         )
         try:
+            _tsparams = {"q": search_text}
+            if store_id:
+                _tsparams["store_id"] = store_id
             with engine.connect() as conn:
-                ts_rows = conn.execute(ts_sql, {"q": search_text}).mappings().all()
+                ts_rows = conn.execute(ts_sql, _tsparams).mappings().all()
             for r in ts_rows:
                 entry = candidates.setdefault(r["id"], {
                     "chunk_id": r["id"],
@@ -335,6 +359,14 @@ def _weighted_rank(
     asset_toks = set(_tokens(alert_input.get("asset_name")))
     tech_toks = set(_tokens(alert_input.get("technology")))
     fp_toks = set(_tokens(alert_input.get("error_code")))
+    # US-Pharma-only fingerprint matching, gated on store_id (the US Pharma
+    # intake signature) so Acadia's ranking stays byte-identical. US Pharma
+    # tickets have an EMPTY fingerprints_text column and put the fingerprint in
+    # the symptom (alert_type), so let the symptom drive fingerprint_match; the
+    # ticket's real Metadata.Fingerprints array is folded in inside the loop.
+    _store_scoped = bool((alert_input.get("store_id") or "").strip())
+    if _store_scoped:
+        fp_toks |= alert_type_toks
 
     alert_customer = (alert_input.get("customer") or "").strip().lower()
     alert_asset_family = derive_asset_family(alert_input.get("asset_name"))
@@ -349,15 +381,29 @@ def _weighted_rank(
         ssm = md.get("Symptom_Solution_Mapping") if isinstance(md, dict) else {}
         ssm = ssm if isinstance(ssm, dict) else {}
 
-        ticket_alert_toks = set(
-            _tokens((ssm.get("Detected_Symptom") or ""))
-        ) | set(_tokens(c.get("fingerprints_text")))
+        # Real Fingerprints from the gold-ticket JSON (Metadata.Fingerprints).
+        # US-Pharma-ONLY (gated on _store_scoped): their fingerprints_text
+        # column is EMPTY, so without this the symptom↔fingerprint match never
+        # fires and the wrong ticket ranks #1 (the 0.163 "no-evidence" case).
+        # For Acadia (_store_scoped False) this stays an empty set, so the
+        # token sets below are byte-identical to the pre-change behavior.
+        _fp_list = meta.get("Fingerprints") if _store_scoped else None
+        _fp_joined = (
+            " ".join(str(f) for f in _fp_list) if isinstance(_fp_list, list) else ""
+        )
+        _fp_meta_toks = set(_tokens(_fp_joined))
+
+        ticket_alert_toks = (
+            set(_tokens((ssm.get("Detected_Symptom") or "")))
+            | set(_tokens(c.get("fingerprints_text")))
+            | _fp_meta_toks
+        )
         ticket_asset_toks = set(_tokens(meta.get("Target_Service"))) | set(
             _tokens(" ".join(str(a) for a in (meta.get("Affected_Assets") or [])))
         )
         ticket_component_toks = set(_tokens(c.get("component_category"))) \
             | set(_tokens(meta.get("component_category")))
-        ticket_fp_toks = set(_tokens(c.get("fingerprints_text")))
+        ticket_fp_toks = set(_tokens(c.get("fingerprints_text"))) | _fp_meta_toks
 
         comps: Dict[str, float] = {}
         comps["alert_type_match"] = _overlap(alert_type_toks, ticket_alert_toks)

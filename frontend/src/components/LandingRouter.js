@@ -1,15 +1,22 @@
-import React, { useEffect, useState } from "react";
-import { Button, Card, message } from "antd";
+import React, { Suspense, useEffect, useState } from "react";
+import { Button, Card, Spin, message } from "antd";
 import { useChat } from "../hooks/ChatContext";
+import { useOrg } from "../hooks/OrgContext";
+import { useOrgModule } from "../orgs/registry";
 // Fingerprint landing disabled — Tier-1 Copilot is now the default entry.
 // Keep import commented so it can be re-enabled in a single line if needed.
 // import FingerprintInputScreen from "./FingerprintInputScreen";
 import LandingPage from "./LandingPage";
-import Tier1IntakeForm from "./Tier1Copilot/Tier1IntakeForm";
 import Tier1AnswerCard from "./Tier1Copilot/Tier1AnswerCard";
 import Tier1FollowupChips from "./Tier1Copilot/Tier1FollowupChips";
-import Tier1Workspace from "./Tier1Copilot/Tier1Workspace";
 import { analyzeAlert } from "./Tier1Copilot/tier1Api";
+
+// Suspense fallback while an org's lazy module chunk loads.
+const OrgModuleFallback = (
+  <div className="flex-1 flex items-center justify-center py-16">
+    <Spin />
+  </div>
+);
 
 /**
  * LandingRouter — Sprint 4 entry flow.
@@ -35,6 +42,12 @@ export default function LandingRouter({
   onOpenServiceNow,
 } = {}) {
   const { state, dispatch } = useChat();
+  // Per-org module resolution: the active org's slug selects which intake +
+  // workspace to render. US Pharma gets its own; every other org (incl.
+  // Acadia + unknown) falls back to the shared Acadia screens. Components are
+  // lazy — rendered inside <Suspense> below.
+  const { activeOrg } = useOrg();
+  const { IntakeForm, Workspace } = useOrgModule(activeOrg?.slug);
   // Default landing is the LandingPage entry-tile view ("Resolve
   // incidents like your best engineer on her best day."). Picking
   // Proactive / Reactive + Continue advances to "tier1"
@@ -156,24 +169,26 @@ export default function LandingRouter({
 
     if (!tier1Result) {
       return (
-        <Tier1IntakeForm
-          sessionId={tier1SessionId}
-          busy={tier1Busy}
-          onSubmit={handleTier1Submit}
-          onBack={() => {
-            // Fingerprint screen is disabled — fall back to mode picker.
-            setTier1Result(null);
-            setScreen("modes");
-          }}
-          // Premium revamp — quick-action pills at the top of the
-          // intake landing. Optional; the bar hides itself if no
-          // handlers are passed.
-          onOpenRca={onOpenRca}
-          onOpenGapAnalysis={onOpenGapAnalysis}
-          onOpenEscalationProcedure={onOpenEscalationProcedure}
-          onOpenTicketFilter={onOpenTicketFilter}
-          onOpenServiceNow={onOpenServiceNow}
-        />
+        <Suspense fallback={OrgModuleFallback}>
+          <IntakeForm
+            sessionId={tier1SessionId}
+            busy={tier1Busy}
+            onSubmit={handleTier1Submit}
+            onBack={() => {
+              // Fingerprint screen is disabled — fall back to mode picker.
+              setTier1Result(null);
+              setScreen("modes");
+            }}
+            // Premium revamp — quick-action pills at the top of the
+            // intake landing. Optional; the bar hides itself if no
+            // handlers are passed.
+            onOpenRca={onOpenRca}
+            onOpenGapAnalysis={onOpenGapAnalysis}
+            onOpenEscalationProcedure={onOpenEscalationProcedure}
+            onOpenTicketFilter={onOpenTicketFilter}
+            onOpenServiceNow={onOpenServiceNow}
+          />
+        </Suspense>
       );
     }
 
@@ -182,19 +197,21 @@ export default function LandingRouter({
     // + chips layout when session_id is missing.
     if (tier1Result.session_id) {
       return (
-        <Tier1Workspace
-          result={tier1Result}
-          onNewAlert={() => setTier1Result(null)}
-          // Premium revamp — surface the top pill bar inside the
-          // journey too. Handlers come from AppLayout via this
-          // router's props (already forwarded for LandingPage /
-          // Tier1IntakeForm).
-          onOpenRca={onOpenRca}
-          onOpenGapAnalysis={onOpenGapAnalysis}
-          onOpenEscalationProcedure={onOpenEscalationProcedure}
-          onOpenTicketFilter={onOpenTicketFilter}
-          onOpenServiceNow={onOpenServiceNow}
-        />
+        <Suspense fallback={OrgModuleFallback}>
+          <Workspace
+            result={tier1Result}
+            onNewAlert={() => setTier1Result(null)}
+            // Premium revamp — surface the top pill bar inside the
+            // journey too. Handlers come from AppLayout via this
+            // router's props (already forwarded for LandingPage /
+            // intake).
+            onOpenRca={onOpenRca}
+            onOpenGapAnalysis={onOpenGapAnalysis}
+            onOpenEscalationProcedure={onOpenEscalationProcedure}
+            onOpenTicketFilter={onOpenTicketFilter}
+            onOpenServiceNow={onOpenServiceNow}
+          />
+        </Suspense>
       );
     }
 

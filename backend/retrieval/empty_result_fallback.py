@@ -131,6 +131,7 @@ def generate_query_rewrites(
             system=system,
             prompt=prompt,
             max_tokens=512,
+            context="retrieval_fallback",
         )
     except Exception as exc:
         logger.warning("[fallback_chain] haiku rewrite failed: %s", exc)

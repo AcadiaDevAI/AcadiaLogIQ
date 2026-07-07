@@ -33,6 +33,8 @@ import json
 import logging
 from typing import Any, Dict
 
+from backend.services.token_usage import record_token_usage, extract_bedrock_usage
+
 logger = logging.getLogger("acadia-log-iq")
 
 
@@ -219,6 +221,7 @@ def invoke(prompt: str, max_tokens: int = _DEFAULT_MAX_TOKENS, *, temperature: f
 
     stop_reason = payload.get("stop_reason")
     usage = payload.get("usage") or {}
+    record_token_usage("gap_analysis", model_id, int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0))
     logger.info(
         "[gap_analysis.claude] model=%s stop=%s in_toks=%s out_toks=%s "
         "out_chars=%d",

@@ -25,8 +25,14 @@ class Tier1AnalyzeRequest(BaseModel):
     # Previous (severity-mandatory) definition kept for reference:
     # severity: Literal["P1", "P2", "P3", "P4"]
     severity: Optional[Literal["P1", "P2", "P3", "P4"]] = None
-    asset_name: str = Field(..., min_length=1, max_length=200)
+    # asset_name is optional so US Pharma's intake (Store ID + symptom, no
+    # asset) can submit. Acadia's form still always sends it → unchanged.
+    asset_name: Optional[str] = Field(None, max_length=200)
     alert_type: str = Field(..., min_length=1, max_length=200)
+    # US Pharma store-scoped matching. When present, the matcher hard-filters
+    # historic tickets to this store (metadata_json->'Metadata'->>'store_id').
+    # Absent for Acadia → matcher SQL is byte-identical.
+    store_id: Optional[str] = Field(None, max_length=40)
     # Optional (6)
     customer: Optional[str] = Field(None, max_length=200)
     location: Optional[str] = Field(None, max_length=200)

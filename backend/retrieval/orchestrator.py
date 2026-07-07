@@ -110,6 +110,19 @@ _HOTFIX_IDENTIFIER_PATTERNS: List[Tuple[str, str]] = [
     (r"\b([A-Z]{2,6})[- ]?(\d{3,})\b", "ticket_like"),
 ]
 
+# Common English words that the space-tolerant `ticket_like` pattern would
+# otherwise glue onto a following number, fabricating a bogus identifier:
+# "store details of 3006" -> "OF 3006", "and 3012" -> "AND 3012". A real
+# ticket prefix (INC, CHG, PRB, REQ, RITM, ...) is never one of these, so
+# dropping these matches removes the false identifier and lets the number
+# reach the hybrid search instead of a false "identifier_not_found".
+_TICKET_PREFIX_STOPWORDS: Set[str] = {
+    "OF", "AND", "THE", "FOR", "TO", "IN", "ON", "AT", "BY", "ME", "MY",
+    "IS", "IT", "AS", "OR", "IF", "AN", "SO", "NO", "US", "WE", "BE", "DO",
+    "STORE", "STORES", "TICKET", "TICKETS", "NUMBER", "ROW", "ITEM", "ID",
+    "PLEASE", "DETAIL", "DETAILS", "PROVIDE", "GET", "SHOW", "GIVE",
+}
+
 _HOTFIX_TOKEN_STRIP_RE = re.compile(r"^[\W_]+|[\W_]+$")
 
 
@@ -162,6 +175,21 @@ def _extract_identifiers_hotfix(query: str) -> List[Tuple[str, str]]:
             if any(s <= span[0] < e or s < span[1] <= e for s, e in covered):
                 continue
             canonical = m.group(0)
+            # Guard: the space-tolerant `ticket_like` pattern can glue a
+            # leading English word onto a number ("of 3006" -> "OF 3006").
+            # If the letter prefix is a common word, this isn't a real
+            # identifier — drop it so the number falls through to hybrid
+            # search instead of triggering a false identifier_not_found.
+            if id_type == "ticket_like":
+                prefix = (m.group(1) or "").strip()
+                if prefix in _TICKET_PREFIX_STOPWORDS:
+                    logger.info(
+                        "[id_extract] dropping %r — %r is a common word, not "
+                        "an identifier prefix",
+                        canonical, prefix,
+                    )
+                    covered.append(span)
+                    continue
             key = (canonical, id_type)
             if key in seen:
                 continue
@@ -500,6 +528,7 @@ def retrieve(
     vector_search_fn: Callable = None,
     raw_query: Optional[str] = None,
     doc_kinds: Optional[List[str]] = None,   # Sprint 3-PREP-A
+    force_fallthrough_on_identifier_miss: bool = False,
 ) -> RetrievalResult:
     """
     Main retrieval entry point. Runs the full Phase 3 pipeline:
@@ -776,15 +805,27 @@ def retrieve(
                     "explain", "describe", "list", "show", "tell me", "find",
                     "summarize", "summarise", "compare", "propose", "sop",
                     "warning", "procedure", "steps", "guide",
+                    # Data-request phrasing ("could you provide me the store
+                    # details of 3006") is a real query too — not a bare
+                    # identifier lookup — so it should fall through to hybrid
+                    # rather than hard-fail with identifier_not_found.
+                    "provide", "give", "get", "need", "want", "detail",
+                    "details", "information", "info", "store", "pull",
+                    "fetch", "lookup", "look up", "about",
                 )
                 looks_like_question = any(hint in lowered for hint in _NL_HINTS)
 
-                if looks_like_question:
+                # force_fallthrough_on_identifier_miss is an org-level policy
+                # (set via the org profile — US Pharma) meaning "KB is a
+                # search-everything surface; never hard-fail on an identifier
+                # miss, always run the hybrid pipeline across all doc types".
+                if looks_like_question or force_fallthrough_on_identifier_miss:
                     logger.info(
-                        "[retrieve] identifier(s) %s not found, but query "
-                        "reads as natural language — falling through to "
-                        "hybrid pipeline instead of declaring not_found",
-                        requested_identifiers,
+                        "[retrieve] identifier(s) %s not found — falling "
+                        "through to hybrid pipeline (natural_language=%s, "
+                        "org_force=%s) instead of declaring not_found",
+                        requested_identifiers, looks_like_question,
+                        force_fallthrough_on_identifier_miss,
                     )
                     # Wipe the extracted identifiers so downstream channels
                     # (vector, BM25, keyword, metadata) get the original

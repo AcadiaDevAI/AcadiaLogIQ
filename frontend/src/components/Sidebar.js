@@ -15,6 +15,7 @@ import {
   UserOutlined,
   FileSearchOutlined,
   ApiOutlined,
+  ThunderboltOutlined,
 } from "@ant-design/icons";
 import { useChat } from "../hooks/ChatContext";
 import { useTheme } from "../hooks/ThemeContext";
@@ -29,6 +30,7 @@ import {
   resetSessionContext,
 } from "../services/api";
 import UploadPanel from "./UploadPanel";
+import TokenUsagePanel from "./TokenUsage/TokenUsagePanel";
 import UserProfile from "./UserProfile";
 import VersionGroup from "./VersionGroup";
 
@@ -410,6 +412,14 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
             key: "upload",
             label: <span className="flex items-center gap-1.5 text-xs"><CloudUploadOutlined /> Upload</span>,
             children: <UploadPanel onUploadComplete={fetchFiles} />,
+          },
+          // Usage tab — Admin only. Shows THIS org's Bedrock token
+          // consumption (RLS-scoped server-side). Backend enforces
+          // require_org_admin on the endpoint.
+          {
+            key: "usage",
+            label: <span className="flex items-center gap-1.5 text-xs"><ThunderboltOutlined /> Usage</span>,
+            children: <TokenUsagePanel />,
           },
         ]
       : []),

@@ -39,6 +39,11 @@ import traceback
 import uuid
 from typing import Optional
 
+from backend.services.token_usage import (
+    flush as flush_token_usage,
+    get_usage_totals,
+    reset_usage_totals,
+)
 from .handlers import HANDLERS, NonRetryableJobError
 from .queue import claim_next as claim_next_report
 from .queue import mark_done as mark_done_report
@@ -250,6 +255,10 @@ def run_one(*, worker_id: Optional[str] = None, kinds: Optional[set] = None) -> 
     ctx_token = current_org_id_var.set(job_org_uuid)
     try:
         started = time.perf_counter()
+        # Zero the Haiku token counters so the summary below reflects THIS
+        # job's Bedrock spend only. (Per-process, so accurate as long as one
+        # worker processes one job at a time — which this loop guarantees.)
+        reset_usage_totals()
         try:
             result_kind, result_incident = handler(key_value, job.payload)
         except NonRetryableJobError as exc:
@@ -280,10 +289,13 @@ def run_one(*, worker_id: Optional[str] = None, kinds: Optional[set] = None) -> 
             return True
 
         elapsed = time.perf_counter() - started
+        _u = get_usage_totals()
         logger.info(
-            "[worker] done id=%s kind=%s key=%s org=%s table=%s elapsed=%.1fs result=%s/%s",
+            "[worker] done id=%s kind=%s key=%s org=%s table=%s elapsed=%.1fs result=%s/%s "
+            "| haiku_calls=%d in_toks=%d out_toks=%d cost=$%.4f",
             job.id, job.kind, key_value, job_org_uuid, table_tag, elapsed,
             result_kind, result_incident,
+            _u["calls"], _u["input_tokens"], _u["output_tokens"], _u["cost_usd"],
         )
         # ingestion-side mark_done doesn't take result_* pointers — the
         # work product lives in chunks/embeddings, not report_cache.
@@ -297,6 +309,13 @@ def run_one(*, worker_id: Optional[str] = None, kinds: Optional[set] = None) -> 
             )
         return True
     finally:
+        # Persist this job's buffered Bedrock token usage while the org
+        # ContextVar is still set (flush stamps app.current_org from it so
+        # RLS accepts the rows). Must run BEFORE the reset below.
+        try:
+            flush_token_usage()
+        except Exception:  # noqa: BLE001 — accounting must never fail a job
+            logger.debug("[worker] token-usage flush failed", exc_info=True)
         # Always restore — even if mark_done / mark_failed raise. The
         # ContextVar leaking to the next loop iteration would silently
         # mis-tag every subsequent job until shutdown.

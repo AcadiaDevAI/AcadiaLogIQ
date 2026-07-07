@@ -55,6 +55,12 @@ def normalize_alert(req: Tier1AnalyzeRequest, alias_dict: Any) -> Dict[str, Any]
         _clean(req.ip_or_device_id or ""),
         _clean(req.error_code or ""),
     )
+    # Store scope (US Pharma) — same symptom at different stores must not
+    # collide in the cache. Appended ONLY when store_id is present so
+    # Acadia's cache key stays byte-identical.
+    _store = _clean(getattr(req, "store_id", None) or "")
+    if _store:
+        hash_parts = hash_parts + (_store,)
     signature_hash = hashlib.sha1(
         "||".join(hash_parts).encode("utf-8")
     ).hexdigest()

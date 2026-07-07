@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from backend.config import settings
+from backend.services.token_usage import record_token_usage, extract_bedrock_usage
 from backend.routing.complexity_classifier import ComplexityResult, classify_complexity
 from backend.routing.context_builder import build_prompt
 
@@ -282,6 +283,7 @@ def _invoke_claude(
     )
 
     payload = json.loads(response["body"].read().decode("utf-8"))
+    record_token_usage("router", model_id, *extract_bedrock_usage(payload, response))
     content = payload.get("content", [])
     text_parts = [
         item.get("text", "")

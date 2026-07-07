@@ -128,6 +128,11 @@ api.interceptors.response.use(
 export const healthCheck = () => api.get("/health");
 export const getCurrentUser = () => api.get("/me");
 
+// Admin-only per-org Bedrock token consumption. RLS scopes it server-side to
+// the caller's active org. period ∈ today | week | month | all.
+export const getTokenConsumption = (period = "month") =>
+  api.get(`/admin/token-consumption?period=${period}`, { timeout: 30000 });
+
 export const uploadFile = (file, fileType, onProgress, docKind) => {
   const form = new FormData();
   form.append("file", file);

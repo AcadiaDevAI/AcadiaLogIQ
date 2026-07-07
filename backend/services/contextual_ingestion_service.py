@@ -342,6 +342,7 @@ def _extract_chunk_metadata_once(
         system=CHUNK_METADATA_SYSTEM,
         prompt=prompt,
         max_tokens=adaptive_max_tokens,
+        context="ingestion_metadata",
     )
 
     if not result or "chunks" not in result or not isinstance(result.get("chunks"), list):
@@ -483,7 +484,9 @@ def decide_version(
         incoming_json=_safe_json(incoming),
         candidates_json=_safe_json(candidates),
     )
-    result = haiku_client.invoke_json(system=VERSION_DECISION_SYSTEM, prompt=prompt)
+    result = haiku_client.invoke_json(
+        system=VERSION_DECISION_SYSTEM, prompt=prompt, context="version_detect"
+    )
 
     if not result:
         return {

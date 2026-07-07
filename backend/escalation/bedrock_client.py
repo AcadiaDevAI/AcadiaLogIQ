@@ -17,6 +17,7 @@ import boto3
 from botocore.config import Config as BotoConfig
 
 from backend.config import settings
+from backend.services.token_usage import record_token_usage, extract_bedrock_usage
 
 
 logger = logging.getLogger("acadia-log-iq")
@@ -64,6 +65,7 @@ def embed_text(text: str) -> List[float]:
         contentType="application/json",
     )
     payload = json.loads(resp["body"].read().decode("utf-8"))
+    record_token_usage("embeddings", settings.BEDROCK_EMBED_MODEL, *extract_bedrock_usage(payload, resp))
     vector = payload.get("embedding") or []
     if not vector:
         raise RuntimeError("Titan returned an empty embedding")
@@ -180,6 +182,7 @@ def answer_with_excerpts(
         contentType="application/json",
     )
     payload = json.loads(resp["body"].read().decode("utf-8"))
+    record_token_usage("escalation", settings.BEDROCK_HAIKU_MODEL, *extract_bedrock_usage(payload, resp))
     parts = payload.get("content", [])
     return "\n".join(
         item.get("text", "") for item in parts if item.get("type") == "text"

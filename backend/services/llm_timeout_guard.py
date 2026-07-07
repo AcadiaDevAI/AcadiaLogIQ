@@ -154,6 +154,7 @@ def generate_with_fallback(
         fallback_text = haiku_client.invoke_text(
             prompt=prompt,
             max_tokens=settings.LLM_HAIKU_FALLBACK_MAX_TOKENS,
+            context="chat_fallback",
         )
     except Exception as exc:
         # Even the Haiku call construction blew up (e.g. boto3 missing

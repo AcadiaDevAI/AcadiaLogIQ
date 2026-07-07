@@ -208,6 +208,7 @@ Section headings (JSON array only):"""
             system=system,
             prompt=prompt,
             max_tokens=1024,
+            context="structured_parse",
         )
 
         # The result might be a dict with a key, or a raw list

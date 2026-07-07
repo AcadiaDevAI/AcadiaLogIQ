@@ -51,6 +51,11 @@ function Tier1WorkspaceInner({
   onOpenEscalationProcedure,
   onOpenTicketFilter,
   onOpenServiceNow,
+  // Multi-tenant — injectable journey component. Defaults to the
+  // shared (Acadia) ResolutionJourney so Acadia's render is
+  // byte-identical; US Pharma's Workspace passes its own cloned
+  // journey via this prop.
+  JourneyComponent = ResolutionJourney,
 }) {
   const tier1 = useTier1Session(result);
   const [whatTried, setWhatTried] = useState([]);
@@ -259,7 +264,7 @@ function Tier1WorkspaceInner({
               <Button onClick={onNewAlert}>Start a new alert</Button>
             </Space>
           </div>
-          <ResolutionJourney
+          <JourneyComponent
             sessionId={result.session_id}
             onNewAlert={onNewAlert}
             onOpenRca={onOpenRca}

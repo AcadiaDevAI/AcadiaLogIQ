@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from backend._lazy_auth import lazy_auth_dependency
 from backend.config import settings
+from backend.services.token_usage import record_token_usage, extract_bedrock_usage
 from backend.tier1_copilot.alias_dictionary import get_alias_dictionary
 from backend.tier1_copilot.cache import (
     cache_size,
@@ -83,6 +84,19 @@ async def analyze(
     req: Tier1AnalyzeRequest,
     user_id: Optional[str] = Depends(lazy_auth_dependency),
 ) -> Tier1AnalyzeResponse:
+    # Org policy: US Pharma's tier-1 intake requires a Store ID (historic
+    # matches are hard-scoped to that store). Resolved from the org profile so
+    # Acadia is never gated. Defense-in-depth — the US Pharma form also makes
+    # Store ID required client-side.
+    try:
+        from backend.orgs.context import resolve_current_profile
+
+        _profile = resolve_current_profile()
+    except Exception:  # pragma: no cover - never break analyze on profile lookup
+        _profile = None
+    if getattr(_profile, "tier1_requires_store_id", False) and not (req.store_id or "").strip():
+        raise HTTPException(status_code=400, detail="store_id is required")
+
     alias_dict = get_alias_dictionary()
     normalized = normalize_alert(req, alias_dict)
     signature_hash = normalized["signature_hash"]
@@ -681,6 +695,7 @@ def _lazy_embed_fn() -> Optional[Callable[[str], list]]:
                 contentType="application/json",
             )
             payload = json.loads(resp["body"].read().decode("utf-8"))
+            record_token_usage("embeddings", settings.BEDROCK_EMBED_MODEL, *extract_bedrock_usage(payload, resp))
             return list(payload.get("embedding") or [])
         except Exception as exc:
             logger.warning("[tier1_copilot] embed call failed: %s", exc)

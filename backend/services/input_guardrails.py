@@ -302,6 +302,7 @@ def _layer2_classifier(query: str) -> GuardrailResult:
             system=_LAYER2_SYSTEM,
             prompt=f"Query: {query!r}\n\nJSON:",
             max_tokens=settings.INPUT_GUARDRAIL_CLASSIFIER_MAX_TOKENS,
+            context="guardrails",
         )
         if not parsed:
             raise ValueError("classifier returned no JSON")

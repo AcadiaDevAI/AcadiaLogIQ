@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from backend.config import settings
 from backend.services.bedrock_haiku import haiku_client, _extract_json_object
+from backend.services.token_usage import record_token_usage, extract_bedrock_usage
 from backend.retrieval.orchestrator import _extract_identifiers
 
 logger = logging.getLogger("acadia-log-iq")
@@ -362,6 +363,7 @@ def _invoke_haiku(prompt: str, max_tokens: int, timeout_s: float) -> str:
             contentType="application/json",
         )
         payload = json.loads(resp["body"].read().decode("utf-8"))
+        record_token_usage("clarifier", settings.INTERACTIVE_CLARIFIER_MODEL, *extract_bedrock_usage(payload, resp))
         content = payload.get("content", [])
         return "\n".join(
             item.get("text", "") for item in content if item.get("type") == "text"

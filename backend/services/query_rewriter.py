@@ -23,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from backend.config import settings
 from backend.services.bedrock_haiku import haiku_client, _extract_json_object
+from backend.services.token_usage import record_token_usage, extract_bedrock_usage
 
 logger = logging.getLogger("acadia-log-iq")
 
@@ -498,6 +499,7 @@ def _invoke_bedrock(prompt: str, max_tokens: int, temperature: float) -> str:
         contentType="application/json",
     )
     payload = json.loads(response["body"].read().decode("utf-8"))
+    record_token_usage("query_rewrite", settings.QUERY_REWRITER_MODEL, *extract_bedrock_usage(payload, response))
     content = payload.get("content", [])
     return "\n".join(
         item.get("text", "") for item in content if item.get("type") == "text"

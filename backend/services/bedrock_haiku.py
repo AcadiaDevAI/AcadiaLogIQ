@@ -3,14 +3,36 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import boto3
 from botocore.config import Config as BotoConfig
 
 from backend.config import settings
+from backend.services.token_usage import (
+    record_token_usage,
+    get_usage_totals,      # re-exported for backward-compat callers
+    reset_usage_totals,    # re-exported for backward-compat callers
+)
 
 logger = logging.getLogger("acadia-log-iq")
+
+
+def _record_usage(usage: Dict[str, Any], context: str) -> None:
+    """Adapter: every Bedrock invoke_model response carries a `usage` block
+    with the exact input/output tokens billed. Hand it to the central
+    per-org token-usage service, which logs + buffers + persists it. The
+    `context` string doubles as the feature label (retry suffix stripped
+    downstream). Never raises."""
+    try:
+        record_token_usage(
+            feature=context or "haiku",
+            model_id=settings.BEDROCK_HAIKU_MODEL,
+            input_tokens=int(usage.get("input_tokens") or 0),
+            output_tokens=int(usage.get("output_tokens") or 0),
+        )
+    except Exception as exc:  # pragma: no cover - accounting must never break calls
+        logger.debug("[haiku.usage] failed to record usage: %s", exc)
 
 
 def _make_bedrock_runtime():
@@ -88,7 +110,9 @@ class BedrockHaikuClient:
     def __init__(self):
         self.client = _make_bedrock_runtime()
 
-    def _invoke_text(self, *, system: str, prompt: str, max_tokens: int) -> tuple[str, Optional[str]]:
+    def _invoke_text(
+        self, *, system: str, prompt: str, max_tokens: int, context: str = ""
+    ) -> Tuple[str, Optional[str]]:
         body = {
             "anthropic_version": "bedrock-2023-05-31",
             "system": system,
@@ -116,6 +140,8 @@ class BedrockHaikuClient:
             for item in content
             if item.get("type") == "text"
         ).strip()
+        # Capture the exact token counts Bedrock billed for this call.
+        _record_usage(payload.get("usage") or {}, context)
         return raw, payload.get("stop_reason")
 
     def invoke_json(
@@ -124,6 +150,7 @@ class BedrockHaikuClient:
         system: str,
         prompt: str,
         max_tokens: Optional[int] = None,
+        context: str = "invoke_json",
     ) -> Optional[Dict[str, Any]]:
         base_max_tokens = max_tokens or settings.HAIKU_MAX_TOKENS
 
@@ -137,6 +164,7 @@ class BedrockHaikuClient:
                     system=system,
                     prompt=prompt,
                     max_tokens=token_limit,
+                    context=f"{context}#a{attempt}",
                 )
 
                 if not raw:
@@ -192,6 +220,7 @@ class BedrockHaikuClient:
         prompt: str,
         system: str = "You are a helpful assistant.",
         max_tokens: Optional[int] = None,
+        context: str = "invoke_text",
     ) -> str:
         """
         Public free-form text invoke. Companion to invoke_json for callers
@@ -208,6 +237,7 @@ class BedrockHaikuClient:
                 system=system,
                 prompt=prompt,
                 max_tokens=budget,
+                context=context,
             )
             return (raw or "").strip()
         except Exception as exc:

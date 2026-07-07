@@ -77,6 +77,15 @@ class TenancyContextMiddleware(BaseHTTPMiddleware):
         try:
             return await call_next(request)
         finally:
+            # Persist any Bedrock token usage this request buffered while the
+            # org ContextVar is still set (flush stamps app.current_org from
+            # it so RLS accepts the rows). Runs BEFORE the reset below.
+            try:
+                from backend.services.token_usage import flush as _flush_token_usage
+
+                _flush_token_usage()
+            except Exception:  # pragma: no cover — accounting must never break a response
+                logger.debug("[tenancy.middleware] token-usage flush failed", exc_info=True)
             current_org_id_var.reset(token)
 
 

@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
 
 from backend.config import settings
+from backend.services.token_usage import record_token_usage, extract_bedrock_usage
 
 logger = logging.getLogger("acadia-log-iq")
 
@@ -202,6 +203,7 @@ def _invoke_claude(
     )
 
     payload = json.loads(response["body"].read().decode("utf-8"))
+    record_token_usage("agent", model_id, *extract_bedrock_usage(payload, response))
     content = payload.get("content", [])
     return "\n".join(
         item.get("text", "") for item in content if item.get("type") == "text"

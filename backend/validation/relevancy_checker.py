@@ -161,6 +161,7 @@ def check_relevancy(*, query: str, answer: str) -> RelevancyResult:
             system=system,
             prompt=prompt,
             max_tokens=settings.RELEVANCY_MAX_TOKENS,
+            context="relevancy",
         )
     except Exception as exc:
         # haiku_client.invoke_json already logs internally on retries.

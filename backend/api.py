@@ -101,6 +101,7 @@ from backend.routing.intent_detector import detect_intent, INTENT_GENERAL
 from backend.services.trivial_responder import match_trivial_response
 from backend.services.query_rewriter import rewrite_query
 from backend.services.triage_classifier import classify_triage
+from backend.services.token_usage import record_token_usage, extract_bedrock_usage
 from backend.routing.answer_cache import ANSWER_CACHE
 from backend.routing.chunk_limiter import limit_chunks, DEFAULT_MAX_CHUNKS
 from backend.routing.input_guard import check_input, GUARD_REASON_OK
@@ -710,6 +711,16 @@ except Exception as _tenancy_exc:
         _tenancy_exc,
     )
 
+# Per-org module system (backend/orgs) — resolves the active org to an
+# OrgProfile and exposes GET /orgs/me/config. US Pharma and future orgs
+# override behavior in their profile instead of `if org == ...` branches.
+try:
+    from backend.orgs.routes import router as _orgs_router
+    app.include_router(_orgs_router)
+    logger.info("[orgs] org-profile router mounted (/orgs/me/config)")
+except Exception as _orgs_exc:
+    logger.warning("[orgs] failed to mount router (module disabled): %s", _orgs_exc)
+
 # Phase 4 — shared per-user rate limiter (see
 # backend/observability/rate_limit.py). The Limiter is now defined
 # in a separate module so sub-routers (RCA, Gap Analysis, jobs) can
@@ -809,6 +820,7 @@ app.add_middleware(RequestContextMiddleware)
 # ─────────────────────────────────────────────────────────────
 from backend.tenancy.middleware import TenancyContextMiddleware
 from backend.tenancy.context import require_org_admin
+from backend.tenancy.models import RequestContext
 app.add_middleware(TenancyContextMiddleware)
 logger.info("[tenancy] TenancyContextMiddleware registered (Phase 1 RLS plumbing)")
 
@@ -1095,6 +1107,7 @@ def safe_embed(text: str) -> Optional[List[float]]:
             contentType="application/json",
         )
         payload = json.loads(resp["body"].read().decode("utf-8"))
+        record_token_usage("embeddings", settings.BEDROCK_EMBED_MODEL, *extract_bedrock_usage(payload, resp))
         emb = payload.get("embedding")
         return emb if isinstance(emb, list) else None
     except Exception as e:
@@ -1150,6 +1163,7 @@ def _invoke_primary_llm(prompt: str, max_tokens: int) -> str:
         contentType="application/json",
     )
     payload = json.loads(resp["body"].read().decode("utf-8"))
+    record_token_usage("chat", settings.BEDROCK_LLM_MODEL, *extract_bedrock_usage(payload, resp))
 
     if isinstance(payload, dict):
         if "outputs" in payload and payload["outputs"]:
@@ -2415,6 +2429,170 @@ async def admin_verify_ingestion(
         "issues": issues,
         "healthy": len(issues) == 0,
     }
+
+
+# ─────────────────────────────────────────────────────────────
+# Admin — per-org Bedrock token consumption dashboard.
+#
+# Aggregates token_usage_daily (populated by backend/services/token_usage.py
+# from every Bedrock call). RLS scopes the rows to the caller's active org
+# automatically — an Acadia admin sees only Acadia, a US Pharma admin only
+# US Pharma. require_org_admin gates it to admins + platform super-admins.
+# ─────────────────────────────────────────────────────────────
+class TokenUsageTotals(BaseModel):
+    call_count: int
+    input_tokens: int
+    output_tokens: int
+    total_tokens: int
+    cost_usd: float
+
+
+class TokenUsageFeatureRow(BaseModel):
+    feature: str
+    call_count: int
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+
+
+class TokenUsageModelRow(BaseModel):
+    model_id: str
+    call_count: int
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+
+
+class TokenUsageDailyRow(BaseModel):
+    usage_date: str
+    input_tokens: int
+    output_tokens: int
+    cost_usd: float
+
+
+class TokenConsumptionResponse(BaseModel):
+    org_id: Optional[str] = None
+    org_name: Optional[str] = None
+    period: str
+    totals: TokenUsageTotals
+    by_feature: List[TokenUsageFeatureRow]
+    by_model: List[TokenUsageModelRow]
+    daily: List[TokenUsageDailyRow]
+
+
+@app.get("/admin/token-consumption", response_model=TokenConsumptionResponse)
+async def admin_token_consumption(
+    period: str = Query("month", pattern="^(today|week|month|all)$"),
+    ctx: RequestContext = Depends(require_org_admin),  # admins only; returns the context
+):
+    import datetime as _dt
+    from sqlalchemy import text
+    from backend.db.connection import SessionLocal
+
+    today = _dt.datetime.now(_dt.timezone.utc).date()
+    if period == "today":
+        cutoff = today
+    elif period == "week":
+        cutoff = today - _dt.timedelta(days=6)
+    elif period == "month":
+        cutoff = today.replace(day=1)
+    else:  # all
+        cutoff = None
+
+    where = "" if cutoff is None else "WHERE usage_date >= :cutoff"
+    params = {} if cutoff is None else {"cutoff": cutoff}
+
+    # RLS on token_usage_daily restricts every one of these to ctx.org_id.
+    with SessionLocal() as db:
+        totals_row = db.execute(text(
+            f"""SELECT COALESCE(SUM(call_count),0) AS calls,
+                       COALESCE(SUM(input_tokens),0) AS in_t,
+                       COALESCE(SUM(output_tokens),0) AS out_t,
+                       COALESCE(SUM(cost_usd),0) AS cost
+                FROM token_usage_daily {where}"""
+        ), params).mappings().first()
+
+        feat_rows = db.execute(text(
+            f"""SELECT feature,
+                       COALESCE(SUM(call_count),0) AS calls,
+                       COALESCE(SUM(input_tokens),0) AS in_t,
+                       COALESCE(SUM(output_tokens),0) AS out_t,
+                       COALESCE(SUM(cost_usd),0) AS cost
+                FROM token_usage_daily {where}
+                GROUP BY feature ORDER BY cost DESC"""
+        ), params).mappings().all()
+
+        model_rows = db.execute(text(
+            f"""SELECT model_id,
+                       COALESCE(SUM(call_count),0) AS calls,
+                       COALESCE(SUM(input_tokens),0) AS in_t,
+                       COALESCE(SUM(output_tokens),0) AS out_t,
+                       COALESCE(SUM(cost_usd),0) AS cost
+                FROM token_usage_daily {where}
+                GROUP BY model_id ORDER BY cost DESC"""
+        ), params).mappings().all()
+
+        daily_rows = db.execute(text(
+            f"""SELECT usage_date,
+                       COALESCE(SUM(input_tokens),0) AS in_t,
+                       COALESCE(SUM(output_tokens),0) AS out_t,
+                       COALESCE(SUM(cost_usd),0) AS cost
+                FROM token_usage_daily {where}
+                GROUP BY usage_date ORDER BY usage_date"""
+        ), params).mappings().all()
+
+    org_name = None
+    try:
+        if ctx.org_id:
+            from backend.tenancy.repository import get_organization_by_id
+            org = get_organization_by_id(ctx.org_id)
+            org_name = org.name if org else None
+    except Exception:  # noqa: BLE001 — name is cosmetic; never fail the dashboard
+        org_name = None
+
+    tin = int(totals_row["in_t"])
+    tout = int(totals_row["out_t"])
+    return TokenConsumptionResponse(
+        org_id=str(ctx.org_id) if ctx.org_id else None,
+        org_name=org_name,
+        period=period,
+        totals=TokenUsageTotals(
+            call_count=int(totals_row["calls"]),
+            input_tokens=tin,
+            output_tokens=tout,
+            total_tokens=tin + tout,
+            cost_usd=round(float(totals_row["cost"]), 6),
+        ),
+        by_feature=[
+            TokenUsageFeatureRow(
+                feature=r["feature"],
+                call_count=int(r["calls"]),
+                input_tokens=int(r["in_t"]),
+                output_tokens=int(r["out_t"]),
+                cost_usd=round(float(r["cost"]), 6),
+            )
+            for r in feat_rows
+        ],
+        by_model=[
+            TokenUsageModelRow(
+                model_id=r["model_id"],
+                call_count=int(r["calls"]),
+                input_tokens=int(r["in_t"]),
+                output_tokens=int(r["out_t"]),
+                cost_usd=round(float(r["cost"]), 6),
+            )
+            for r in model_rows
+        ],
+        daily=[
+            TokenUsageDailyRow(
+                usage_date=str(r["usage_date"]),
+                input_tokens=int(r["in_t"]),
+                output_tokens=int(r["out_t"]),
+                cost_usd=round(float(r["cost"]), 6),
+            )
+            for r in daily_rows
+        ],
+    )
 
 
 @app.post("/admin/reindex/{file_id}")
@@ -4150,6 +4328,11 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             allowed_file_ids=active_file_ids,
         )
     else:
+        # Org-level KB policy: US Pharma treats KB as a search-everything
+        # surface (never hard-fail on an identifier miss). Resolved from the
+        # org profile so shared code stays free of per-org branches.
+        from backend.orgs.context import resolve_current_profile
+        _org_profile = resolve_current_profile()
         retrieval = orchestrator_retrieve(
             query=bm25_query_text,
             raw_query=req.q,
@@ -4161,6 +4344,9 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             bm25_search_fn=bm25.search if bm25 and bm25.size > 0 else None,
             vector_search_fn=pgvector_search,
             doc_kinds=_effective_doc_kinds,
+            force_fallthrough_on_identifier_miss=(
+                _org_profile.kb_search_all_on_identifier_miss
+            ),
         )
 
     # ── Clean "not found" short-circuit when an identifier was asked for

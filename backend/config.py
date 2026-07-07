@@ -184,6 +184,20 @@ class Settings(BaseSettings):
     HAIKU_TEMPERATURE: float = 0.0
     HAIKU_MAX_TOKENS: int = 4096
 
+    # Bedrock token-usage tracking. Every Haiku invoke_model call returns a
+    # `usage` block ({input_tokens, output_tokens}); we log it per call plus
+    # a running per-process total so cost is traceable instead of estimated.
+    # Rates are USD per 1M tokens (Claude Haiku 4.5 list price on Bedrock);
+    # override per-env if your negotiated rate differs.
+    HAIKU_LOG_TOKEN_USAGE: bool = True
+    HAIKU_PRICE_INPUT_PER_MTOK: float = 1.00
+    HAIKU_PRICE_OUTPUT_PER_MTOK: float = 5.00
+
+    # Master switch for the per-org token-usage accounting service
+    # (backend/services/token_usage.py) that records EVERY Bedrock call
+    # into token_usage_daily. Off => no logging, no buffering, no DB writes.
+    TOKEN_USAGE_TRACKING_ENABLED: bool = True
+
     # ----------------------------------------------------------------
     # Adaptive ingestion batching — sizes Haiku batches by estimated
     # output tokens so verbose PDFs do not truncate JSON mid-response.
