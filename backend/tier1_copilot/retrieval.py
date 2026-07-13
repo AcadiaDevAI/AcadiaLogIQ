@@ -104,6 +104,57 @@ def _store_filter_sql(store_id: Optional[str], col: str = "metadata_json") -> st
     return f" AND ({col}->'Metadata'->>'store_id') = :store_id" if store_id else ""
 
 
+def _fingerprint_hit(
+    candidate: Dict[str, Any], alert_input: Dict[str, Any], min_frac: float = 0.6
+) -> bool:
+    """True when the query symptom (alert_type) matches one of the ticket's
+    Fingerprints — i.e. >= min_frac of the symptom's tokens appear in a single
+    Metadata.Fingerprints entry (or the denormalized fingerprints_text).
+    Used to narrow US Pharma results to the specific store+fingerprint ticket."""
+    symptom_toks = set(_tokens(alert_input.get("alert_type")))
+    if not symptom_toks:
+        return False
+
+    def _frac_in(target_toks: set) -> float:
+        return (len(symptom_toks & target_toks) / len(symptom_toks)) if target_toks else 0.0
+
+    md = candidate.get("metadata_json") or {}
+    meta = md.get("Metadata") if isinstance(md, dict) else {}
+    meta = meta if isinstance(meta, dict) else {}
+    fps = meta.get("Fingerprints") if isinstance(meta.get("Fingerprints"), list) else []
+
+    best = 0.0
+    for fp in fps:
+        best = max(best, _frac_in(set(_tokens(str(fp)))))
+    best = max(best, _frac_in(set(_tokens(candidate.get("fingerprints_text")))))
+    return best >= min_frac
+
+
+def _apply_store_fingerprint_filter(
+    ranked: List[Dict[str, Any]], alert_input: Dict[str, Any]
+) -> List[Dict[str, Any]]:
+    """US Pharma (store-scoped) ONLY: narrow the store cohort to tickets whose
+    Fingerprints actually match the query symptom, so store_id + fingerprint
+    pinpoints the specific ticket(s) instead of returning every ticket at the
+    store. Falls back to the full ranked cohort when nothing matches (never
+    empty). Gated on store_id → Acadia is untouched."""
+    store_id = (alert_input.get("store_id") or "").strip()
+    if not store_id or not ranked:
+        return ranked
+    hits = [r for r in ranked if _fingerprint_hit(r, alert_input)]
+    if hits:
+        logger.info(
+            "[tier1_copilot] store=%s fingerprint filter: kept %d/%d tickets",
+            store_id, len(hits), len(ranked),
+        )
+        return hits
+    logger.info(
+        "[tier1_copilot] store=%s no fingerprint match — showing full ranked cohort",
+        store_id,
+    )
+    return ranked
+
+
 def retrieve_top_matches(
     *,
     normalized: Dict[str, Any],
@@ -128,6 +179,7 @@ def retrieve_top_matches(
             "[tier1_copilot] stage1 hit score=%.3f chunk_id=%s",
             ranked[0]["final_score"], ranked[0].get("chunk_id"),
         )
+        ranked = _apply_store_fingerprint_filter(ranked, alert_input)
         return ranked[:k]
 
     # ---- Stage 2: hybrid ---------------------------------------------------
@@ -140,6 +192,7 @@ def retrieve_top_matches(
         candidates = exact_hits
 
     ranked = _weighted_rank(candidates, alert_input, normalized)
+    ranked = _apply_store_fingerprint_filter(ranked, alert_input)
     if ranked:
         logger.info(
             "[tier1_copilot] stage2 top score=%.3f chunk_id=%s total_cands=%d",

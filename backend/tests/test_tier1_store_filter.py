@@ -136,5 +136,50 @@ class TestFingerprintRerank(unittest.TestCase):
         )
 
 
+class TestStoreFingerprintFilter(unittest.TestCase):
+    """US Pharma (store-scoped) narrows the store cohort to tickets whose
+    Fingerprints match the symptom — so store_id + fingerprint pinpoints the
+    ticket. Falls back to the full cohort when nothing matches; Acadia (no
+    store_id) is never filtered."""
+
+    @staticmethod
+    def _cand(chunk_id, fingerprints):
+        return {
+            "chunk_id": chunk_id,
+            "metadata_json": {
+                "Metadata": {"Fingerprints": fingerprints, "Incident_Number": chunk_id}
+            },
+            "fingerprints_text": "",
+            "final_score": 0.5,
+        }
+
+    def test_filters_to_fingerprint_match_when_store_scoped(self):
+        from backend.tier1_copilot.retrieval import _apply_store_fingerprint_filter
+
+        alert = {"alert_type": "LOS Alarm on WAN1", "store_id": "3001"}
+        match = self._cand("TKT-3001-01", ["%BGP-5-ADJCHANGE: neighbor Down", "LOS Alarm on WAN1"])
+        other = self._cand("TKT-3001-05", ["DHCP Discover drops", "No IP addresses available in pool"])
+        out = _apply_store_fingerprint_filter([match, other], alert)
+        self.assertEqual([c["chunk_id"] for c in out], ["TKT-3001-01"])
+
+    def test_fallback_to_full_cohort_when_no_fingerprint_match(self):
+        from backend.tier1_copilot.retrieval import _apply_store_fingerprint_filter
+
+        alert = {"alert_type": "completely unrelated zzz qqq", "store_id": "3001"}
+        a = self._cand("A", ["LOS Alarm on WAN1"])
+        b = self._cand("B", ["DHCP drops"])
+        out = _apply_store_fingerprint_filter([a, b], alert)
+        self.assertEqual(len(out), 2)  # never empty — fall back to ranked cohort
+
+    def test_acadia_no_store_id_is_never_filtered(self):
+        from backend.tier1_copilot.retrieval import _apply_store_fingerprint_filter
+
+        alert = {"alert_type": "LOS Alarm on WAN1"}  # no store_id → Acadia
+        a = self._cand("A", ["LOS Alarm on WAN1"])
+        b = self._cand("B", ["DHCP drops"])
+        out = _apply_store_fingerprint_filter([a, b], alert)
+        self.assertEqual(len(out), 2)  # both kept — Acadia cohort untouched
+
+
 if __name__ == "__main__":
     unittest.main()

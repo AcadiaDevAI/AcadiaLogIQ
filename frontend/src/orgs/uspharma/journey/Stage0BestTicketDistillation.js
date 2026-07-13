@@ -204,8 +204,8 @@ function buildHeadline(data) {
     ? data.top5_incident_summaries.length
     : 0;
   const n = visible || data.cohort_size || 0;
-  const noun = n === 1 ? "instance" : "instances";
-  return `We found ${n} similar ${noun} for this issue.`;
+  const noun = n === 1 ? "incident" : "incidents";
+  return `We found ${n} matching ${noun} for this store & fingerprint.`;
 }
 
 
@@ -339,11 +339,11 @@ export default function Stage0BestTicketDistillation({
             ? data.top5_incident_summaries.length
             : 0;
           const n = visibleCount || data.cohort_size || 0;
-          const noun = n === 1 ? "match" : "matches";
+          const noun = n === 1 ? "incident" : "incidents";
           return (
             <h2 className="b01-display">
-              We found {n} similar{" "}
-              <em className="b01-accent">{noun}</em> for this issue.
+              We found {n} matching{" "}
+              <em className="b01-accent">{noun}</em> for this store &amp; fingerprint.
             </h2>
           );
         })()}
@@ -364,7 +364,7 @@ export default function Stage0BestTicketDistillation({
           return (
             <p className="b01-subhead">
               Drawn from {corpus.toLocaleString("en-US")} resolved tickets in
-              the Acadia knowledge base.
+              the US Pharma knowledge base.
             </p>
           );
         })()}

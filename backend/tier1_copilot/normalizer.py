@@ -60,7 +60,11 @@ def normalize_alert(req: Tier1AnalyzeRequest, alias_dict: Any) -> Dict[str, Any]
     # Acadia's cache key stays byte-identical.
     _store = _clean(getattr(req, "store_id", None) or "")
     if _store:
-        hash_parts = hash_parts + (_store,)
+        # The trailing token is a cache-logic version. Bump it whenever the
+        # store-scoped retrieval changes (e.g. the fingerprint filter) so stale
+        # US Pharma cache entries computed under the old logic are bypassed —
+        # without touching Acadia's cache (no store_id → this branch is skipped).
+        hash_parts = hash_parts + (_store, "fpfilter_v1")
     signature_hash = hashlib.sha1(
         "||".join(hash_parts).encode("utf-8")
     ).hexdigest()
