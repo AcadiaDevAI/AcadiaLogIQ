@@ -215,6 +215,10 @@ export default function Stage4SearchKBHandoff({
         position: "relative",
         overflow: "hidden",
       }}
+      // US Pharma — pale-red panel fill (matches Preliminary Tier 1
+      // Checks). --usp-panel-bg is defined only under .org-uspharma, so
+      // every other org falls back to transparent (unchanged glass card).
+      bodyStyle={{ background: "var(--usp-panel-bg, transparent)" }}
     >
       <CardWatermark />
       {/* ─── Block 03 — premium heading replacement (heading only) ───

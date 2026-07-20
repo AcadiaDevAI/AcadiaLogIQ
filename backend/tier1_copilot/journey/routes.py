@@ -404,6 +404,7 @@ async def get_stage_4(
 
     # Pull the engineer's original alert from tier1_sessions.alert_payload
     severity = asset = alert = notes = None
+    store_id = None
     try:
         from sqlalchemy import text
         from backend.db.connection import engine
@@ -420,6 +421,9 @@ async def get_stage_4(
             asset = ap.get("asset_name")
             alert = ap.get("alert_type")
             notes = ap.get("notes")
+            # US Pharma — drives the "Give me details about <store_id>"
+            # pre-filled message (build_stage4). Acadia payloads have none.
+            store_id = ap.get("store_id")
     except Exception as exc:
         logger.warning("[journey.stage4] alert_payload read failed: %s", exc)
 
@@ -434,6 +438,7 @@ async def get_stage_4(
         alert_type=alert,
         notes=notes,
         dominant_root_cause=dominant,
+        store_id=store_id,
     )
 
 
@@ -745,6 +750,7 @@ async def search_kb_handoff(
 
     # Read the engineer's intake-form alert from tier1_sessions.alert_payload.
     severity = asset = alert = notes = None
+    store_id = None
     try:
         from sqlalchemy import text as _text
         from backend.db.connection import engine as _engine
@@ -759,6 +765,9 @@ async def search_kb_handoff(
             asset = ap.get("asset_name")
             alert = ap.get("alert_type")
             notes = ap.get("notes")
+            # US Pharma intake carries a Store ID; used below to store-scope
+            # the KB chat (migration 065). Acadia payloads have none → NULL.
+            store_id = ap.get("store_id")
     except Exception as exc:
         logger.warning("[journey.stage4.handoff] alert_payload read failed: %s", exc)
 
@@ -768,6 +777,7 @@ async def search_kb_handoff(
         alert_type=alert,
         notes=notes,
         dominant_root_cause=dominant,
+        store_id=store_id,
     )
 
     # Sprint 10.6 §4.4 — owner_id MUST match the authenticated user's
@@ -797,6 +807,14 @@ async def search_kb_handoff(
         (req.scope_incident_id or "").strip() if req else ""
     ) or None
 
+    # Migration 065 — US Pharma store scope. The Stage 4 "KB SOP" handoff
+    # restricts the whole KB chat to the intake Store ID. Skip when this is
+    # a per-bullet Ask-in-Chat (already scoped to one incident) or when no
+    # store id is present (Acadia / non-store orgs).
+    scope_store_id = None
+    if store_id and not scope_incident_id:
+        scope_store_id = str(store_id).strip() or None
+
     try:
         result = create_chat_session_with_handoff(
             journey_session_id=session_id,
@@ -805,6 +823,7 @@ async def search_kb_handoff(
             engine=_engine,
             ask_fn=None,  # frontend fires /ask after SET_SESSION lands
             scope_incident_id=scope_incident_id,
+            scope_store_id=scope_store_id,
         )
     except Exception as exc:
         logger.error(

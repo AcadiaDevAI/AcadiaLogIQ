@@ -44,6 +44,7 @@ def create_chat_session_with_handoff(
     ask_fn: Optional[Callable[..., Dict[str, Any]]] = None,
     save_message_fn: Optional[Callable[..., str]] = None,
     scope_incident_id: Optional[str] = None,
+    scope_store_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Sprint 10.6 — orchestrate the Stage 4 handoff.
 
@@ -129,6 +130,31 @@ def create_chat_session_with_handoff(
                 "[journey.stage4] failed to persist scope_incident_id "
                 "chat=%s scope=%s err=%s",
                 chat_session_id, scope_incident_id, exc,
+            )
+
+    # Migration 065 — US Pharma store scope. When the Stage 4 "KB SOP"
+    # handoff carries the intake Store ID, persist it on the chat_sessions
+    # row so every /ask in this KB chat is restricted (in retrieval) to
+    # that one store's indexed content. NULL = no store scope (Acadia,
+    # per-bullet incident scope, regular chat). Same additive-UPDATE +
+    # demo-safe try/except stance as scope_incident_id above.
+    if scope_store_id and chat_session_id:
+        try:
+            from sqlalchemy import text as _store_text
+            from backend.db.connection import engine as _store_engine
+            with _store_engine.begin() as _conn:
+                _conn.execute(
+                    _store_text(
+                        "UPDATE chat_sessions SET scope_store_id = :sid "
+                        "WHERE id = :cid"
+                    ),
+                    {"sid": str(scope_store_id), "cid": chat_session_id},
+                )
+        except Exception as exc:
+            logger.warning(
+                "[journey.stage4] failed to persist scope_store_id "
+                "chat=%s store=%s err=%s",
+                chat_session_id, scope_store_id, exc,
             )
 
     # Sprint 10 follow-up — when this handoff is NOT scope-locked to a

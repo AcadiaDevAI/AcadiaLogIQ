@@ -69,6 +69,21 @@ const QUICK_ACTIONS = [
     },
     handlerProp: "onOpenEscalationProcedure",
   },
+  {
+    // US Pharma — "KB SOP" surfaced as a top pill beside RCA / Gap /
+    // Escalation. Renders only when `onOpenKbSop` is wired (US Pharma's
+    // ResolutionJourney), so Acadia never shows it.
+    key: "kb_sop",
+    label: "Discuss Store Specific with LogIQ",
+    icon: <FileSearchOutlined />,
+    accent: {
+      c: "#0BA89F",
+      soft: "rgba(124, 237, 229, 0.18)",
+      hoverFill: "rgba(124, 237, 229, 0.34)",
+      ring: "rgba(11, 168, 159, 0.45)",
+    },
+    handlerProp: "onOpenKbSop",
+  },
   // Sprint 13.36 — Ticket Filter and Connect to ServiceNow pills
   // suppressed at the user's request. Code preserved so the entries
   // can be reinstated by un-commenting this block.

@@ -568,6 +568,9 @@ export default function ResolutionJourney({
           onOpenEscalationProcedure={onOpenEscalationProcedure}
           onOpenTicketFilter={onOpenTicketFilter}
           onOpenServiceNow={onOpenServiceNow}
+          // US Pharma — KB SOP pill beside RCA / Gap / Escalation. Advances
+          // to Stage 4 (Search KB / SOP), same as the Stage 0 footer button.
+          onOpenKbSop={() => reveal("stage_4")}
           marginBottom={20}
         />
 

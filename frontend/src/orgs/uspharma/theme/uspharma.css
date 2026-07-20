@@ -1,0 +1,129 @@
+/* ═══════════════════════════════════════════════════════════════════
+   US Pharma — Theme Override (Walgreens Red)
+   ═══════════════════════════════════════════════════════════════════
+   The shared "premium" (Aurora Operations) theme routes every accent
+   through CSS variables (--brand-accent, --aurora, --aurora-glow, …).
+   This file simply REBINDS those variables to a Walgreens-red palette
+   under the `.org-uspharma` scope, so the entire US Pharma surface —
+   buttons, tabs, links, gradient text, glows — repaints red WITHOUT
+   editing a single shared component.
+
+   Scoping:
+     • `.org-uspharma` is applied (by UsPharmaThemeScope / AppLayout)
+       on a DIV that sits INSIDE the root `.theme-premium` div. Because
+       CSS custom properties inherit, redefining them here overrides the
+       inherited premium values for this subtree only.
+     • Acadia (no `.org-uspharma` ancestor) is never affected.
+     • Light vs dark is distinguished by the `.theme-premium-dark`
+       companion class that the theme toggle adds to the root div. The
+       dark rule carries one more class than the light rule, so it wins
+       when dark mode is active.
+
+   Values are kept in sync with src/orgs/uspharma/theme/palette.js
+   (JS can't be imported into CSS, so the hexes are mirrored here).
+   ═══════════════════════════════════════════════════════════════════ */
+
+
+/* ─── LIGHT (default premium surface) ─────────────────────────────── */
+.theme-premium .org-uspharma {
+  /* App background stays white/near-white (premium default). The pale
+     red now lives on the JOURNEY PANEL cards (Preliminary Tier 1 Checks,
+     Best Historical Match, KB, Escalation) via --preflight-card-bg /
+     --usp-panel-bg below — not as a full-screen wash. */
+
+  /* Pale-red fill shared by the journey stage panels (Best Historical
+     Match / KB / Escalation). Matches the Preliminary Tier 1 Checks card
+     (--preflight-card-bg). Consumed via `bodyStyle` on each panel's Card;
+     the FALLBACK in those components is transparent, so any org without
+     `.org-uspharma` keeps the default glass card. */
+  --usp-panel-bg: #FDE8EA;
+
+  /* Brand primary — Walgreens red family (deep → base). */
+  --acadia-primary:        #A50E27;
+  --acadia-primary-hover:  #C4132F;
+  --acadia-primary-light:  #E31837;
+
+  /* Aurora accent — was teal → iris → violet; now a red family so the
+     gradient buttons and gradient text read Walgreens-red. */
+  --aurora-1: #FF8A9B;   /* soft red */
+  --aurora-2: #E31837;   /* Walgreens red (tab ink bar, etc.) */
+  --aurora-3: #B00E24;   /* deep red */
+  --aurora: linear-gradient(135deg, #FF8A9B 0%, #E31837 55%, #B00E24 100%);
+  --aurora-soft:
+    linear-gradient(135deg,
+      rgba(255, 138, 155, 0.14) 0%,
+      rgba(227, 24, 55, 0.14) 55%,
+      rgba(176, 14, 36, 0.14) 100%);
+
+  /* Legacy brand-accent alias — red reads as primary on white. */
+  --brand-accent: #E31837;
+  --brand-light:  rgba(227, 24, 55, 0.10);
+
+  /* Code / inline surfaces — red-tinted. */
+  --code-bg:     rgba(227, 24, 55, 0.06);
+  --code-border: rgba(227, 24, 55, 0.18);
+  --code-text:   #A50E27;
+
+  /* Scrollbar hover accent. */
+  --scrollbar-hover: rgba(227, 24, 55, 0.55);
+
+  /* Aurora glow / brand shadow — retint from iris to red so primary
+     buttons and glowing panels match. */
+  --shadow-lg:
+    0 14px 32px -8px rgba(227, 24, 55, 0.22),
+    0 4px 12px rgba(10, 16, 24, 0.06);
+  --aurora-glow:
+    0 14px 32px -8px rgba(227, 24, 55, 0.45),
+    0 0 0 1px rgba(255, 138, 155, 0.35) inset;
+  --shadow-glow-teal:
+    0 0 0 1px rgba(227, 24, 55, 0.30),
+    0 8px 24px -4px rgba(227, 24, 55, 0.35);
+
+  /* "Preliminary Tier 1 Checks" pre-flight card (shared component reads
+     these vars; blue is its fallback default, red here for US Pharma). */
+  --preflight-card-bg: #FDE8EA;  /* light pale red (matches --usp-panel-bg) */
+  --preflight-accent:  #E31837;  /* Walgreens red left-rail + chevrons */
+}
+
+
+/* ─── DARK (Acadia-navy companion) ────────────────────────────────── */
+.theme-premium.theme-premium-dark .org-uspharma {
+  /* Dark-mode panel fill — a deep red-tinted surface for the journey
+     stage cards (mirrors --usp-panel-bg on the light theme). */
+  --usp-panel-bg: rgba(255, 77, 103, 0.12);
+
+  /* Brighter red so CTAs stay legible on deep navy. */
+  --acadia-primary:        #FF4D67;
+  --acadia-primary-hover:  #FF7488;
+  --acadia-primary-light:  #FF9AAA;
+
+  --aurora-1: #FF8A9B;
+  --aurora-2: #FF4D67;
+  --aurora-3: #C4132F;
+  --aurora: linear-gradient(135deg, #FF8A9B 0%, #FF4D67 55%, #C4132F 100%);
+  --aurora-soft:
+    linear-gradient(135deg,
+      rgba(255, 138, 155, 0.16) 0%,
+      rgba(255, 77, 103, 0.16) 55%,
+      rgba(196, 19, 47, 0.16) 100%);
+
+  --brand-accent: #FF4D67;
+  --brand-light:  rgba(255, 77, 103, 0.18);
+
+  --code-bg:     rgba(255, 77, 103, 0.10);
+  --code-border: rgba(255, 77, 103, 0.28);
+  --code-text:   #FF9AAA;
+
+  --scrollbar-hover: rgba(255, 77, 103, 0.55);
+
+  --aurora-glow:
+    0 14px 32px -8px rgba(255, 77, 103, 0.45),
+    0 0 0 1px rgba(255, 138, 155, 0.35) inset;
+  --shadow-glow-teal:
+    0 0 0 1px rgba(255, 77, 103, 0.30),
+    0 8px 24px -4px rgba(255, 77, 103, 0.35);
+
+  /* Pre-flight card — red wash on the dark navy surface. */
+  --preflight-card-bg: rgba(255, 77, 103, 0.14);
+  --preflight-accent:  #FF4D67;
+}

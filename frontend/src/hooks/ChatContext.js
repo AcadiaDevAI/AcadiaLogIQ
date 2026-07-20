@@ -58,6 +58,12 @@ const initialState = {
   // window.location.href = `/tier1/journey/<id>` navigation, which
   // never worked because the React app has no URL routing.
   journeyResumeSessionId: null,
+
+  // US Pharma — true when the current chat was opened via the "KB SOP"
+  // quick action from the landing / intake screen (NEW_CHAT with this flag).
+  // ChatArea shows a "Back to screen" button while it's set so the engineer
+  // can return to the landing screen. Journey Stage 4 chats never set it.
+  kbSearchFromLanding: false,
 };
 
 function reducer(state, action) {
@@ -117,6 +123,9 @@ function reducer(state, action) {
         // journey_session_id) so ChatArea can render the back-to-
         // journey banner. Default to {} when the backend omits it.
         sessionMetadata: action.payload.metadata ?? {},
+        // Loading a specific chat from history is never the landing KB SOP
+        // chat — clear the flag so its "Back to screen" button doesn't leak.
+        kbSearchFromLanding: false,
       };
 
     case "NEW_CHAT":
@@ -150,6 +159,27 @@ function reducer(state, action) {
         // Sprint 10.4 — clear journey-session linkage on NEW_CHAT so
         // the "Back to Resolution Journey" banner doesn't carry over
         // from a prior journey-originated chat.
+        sessionMetadata: {},
+        // US Pharma — set when the KB SOP quick action opens this chat
+        // (dispatch NEW_CHAT with payload.kbSearchFromLanding). A plain
+        // "New Chat" click sends no payload, so the flag clears.
+        kbSearchFromLanding: !!(action.payload && action.payload.kbSearchFromLanding),
+      };
+
+    // US Pharma — leave the landing-opened KB SOP chat and return to the
+    // landing screen. Clearing selectedMode makes AppLayout fall back to
+    // LandingRouter (its `!selectedMode` gate). Also wipes the transient
+    // chat so the landing starts clean.
+    case "EXIT_KB_SEARCH":
+      return {
+        ...state,
+        selectedMode: null,
+        subMode: null,
+        conversationContextActive: false,
+        kbSearchFromLanding: false,
+        sessionId: null,
+        messages: [],
+        pendingContextBreak: null,
         sessionMetadata: {},
       };
 
@@ -295,6 +325,7 @@ function reducer(state, action) {
         issueSummary: null,
         formData: null,
         pendingContextBreak: null,
+        kbSearchFromLanding: false,
       };
 
     // ── Sprint 2 ──────────────────────────────────────

@@ -5,6 +5,8 @@ import { TECHNOLOGY_OPTIONS } from "../../components/Tier1Copilot/tier1Constants
 import SeverityChipSelector from "../../components/Tier1Copilot/SeverityChipSelector";
 import UniversalIntakePanel from "../../components/Tier1Copilot/intake/UniversalIntakePanel";
 import QuickActionsBar from "../../components/QuickActionsBar";
+import { useChat } from "../../hooks/ChatContext";
+import { USP_RED, uspRedAlpha } from "./theme/palette";
 
 /**
  * US Pharma intake — Store ID + symptom.
@@ -25,6 +27,13 @@ import QuickActionsBar from "../../components/QuickActionsBar";
 export default function USPharmaIntakeForm(props) {
   const [prefill, setPrefill] = useState(null);
   const [activeTab, setActiveTab] = useState("proactive");
+  const { dispatch } = useChat();
+
+  // KB SOP on the intake screen — no Store ID entered yet, so this opens a
+  // fresh general chat that searches EVERYTHING (all JSON + all files),
+  // unscoped. NEW_CHAT flips the app to a blank troubleshooting chat.
+  const handleOpenKbSop = () =>
+    dispatch({ type: "NEW_CHAT", payload: { kbSearchFromLanding: true } });
 
   const handleCardPicked = (filled) => {
     // Reactive → Proactive handoff. We can only reliably pre-fill the symptom
@@ -42,6 +51,9 @@ export default function USPharmaIntakeForm(props) {
           onOpenEscalationProcedure={props.onOpenEscalationProcedure}
           onOpenTicketFilter={props.onOpenTicketFilter}
           onOpenServiceNow={props.onOpenServiceNow}
+          // US Pharma — KB SOP pill on the intake screen. Opens a general
+          // chat over all files (no store scope, since none is entered yet).
+          onOpenKbSop={handleOpenKbSop}
           marginBottom={16}
         />
 
@@ -55,9 +67,9 @@ export default function USPharmaIntakeForm(props) {
               gap: 8,
               padding: "5px 13px",
               borderRadius: 9999,
-              background: "rgba(11, 114, 133, 0.08)",
-              border: "1px solid rgba(11, 114, 133, 0.25)",
-              color: "#0b7285",
+              background: uspRedAlpha(0.08),
+              border: `1px solid ${uspRedAlpha(0.25)}`,
+              color: USP_RED.primary,
               fontFamily:
                 "var(--font-mono, 'Geist Mono', 'JetBrains Mono', Consolas, monospace)",
               fontSize: 10.5,
@@ -91,9 +103,9 @@ export default function USPharmaIntakeForm(props) {
               color: "var(--text, #0f172a)",
             }}
           >
-            <span>Find a store&apos;s </span>
-            <em style={{ fontStyle: "italic", fontWeight: 400, color: "#0b7285" }}>
-              incident history
+            <span>Welcome to Log</span>
+            <em style={{ fontStyle: "italic", fontWeight: 400, color: USP_RED.primary }}>
+              IQ
             </em>
           </h1>
         </div>
@@ -272,7 +284,7 @@ function USPharmaProactiveForm({ sessionId, busy, onSubmit, onBack, prefill }) {
               htmlType="submit"
               disabled={!canSubmit || busy}
               loading={busy}
-              style={{ minWidth: 200, borderRadius: 12, background: "#0b7285", borderColor: "#0b7285" }}
+              style={{ minWidth: 200, borderRadius: 12, background: USP_RED.primary, borderColor: USP_RED.primary }}
             >
               {busy ? "Searching…" : "Find store incidents →"}
             </Button>

@@ -3116,6 +3116,65 @@ async def delete_file(
     }
 
 
+@app.get("/files/{file_id}/download")
+async def download_file(
+    file_id: str,
+    user_id: Optional[str] = Depends(auth_dependency),
+    _admin=Depends(require_org_admin),   # admins only — mirrors delete_file
+):
+    """Download the ORIGINAL uploaded file. Admin-only (same gate as
+    delete). Streams the bytes from the file's current version storage_uri,
+    whether that's S3 (``s3://``) or local (``local://``)."""
+    from fastapi.responses import Response
+
+    files = {f["id"]: f for f in list_active_files_all()}
+    if file_id not in files:
+        raise HTTPException(404, "File not found")
+    fname = files[file_id].get("name") or file_id
+
+    # The original bytes live on the current document version's storage_uri.
+    from sqlalchemy import text as _dl_text
+    from backend.db.connection import engine as _dl_engine
+    with _dl_engine.connect() as _conn:
+        row = _conn.execute(
+            _dl_text(
+                "SELECT dv.storage_uri FROM documents d "
+                "JOIN document_versions dv ON dv.id = d.current_version_id "
+                "WHERE d.id = :id"
+            ),
+            {"id": file_id},
+        ).mappings().first()
+    storage_uri = (row or {}).get("storage_uri")
+    if not storage_uri:
+        raise HTTPException(404, "Original file is not available for download")
+
+    try:
+        if storage_uri.startswith("s3://"):
+            if s3_upload_provider is None:
+                raise HTTPException(503, "S3 storage is not configured")
+            data = s3_upload_provider.read_bytes(storage_uri)
+        else:
+            local_path = storage.resolve_local_path(storage_uri)
+            if not local_path or not local_path.exists():
+                raise HTTPException(404, "Stored file not found on disk")
+            data = local_path.read_bytes()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.error(
+            "[download] failed file=%s uri=%s err=%s", file_id, storage_uri, exc,
+        )
+        raise HTTPException(500, "Failed to read file for download")
+
+    # Strip characters that would break the Content-Disposition header.
+    safe_name = (fname or "download").replace('"', "").replace("\r", " ").replace("\n", " ")
+    return Response(
+        content=data,
+        media_type="application/octet-stream",
+        headers={"Content-Disposition": f'attachment; filename="{safe_name}"'},
+    )
+
+
 @app.get("/chat/sessions")
 async def list_sessions(user_id: Optional[str] = Depends(auth_dependency)):
     owner_id = _normalize_owner_id(user_id)
@@ -3610,6 +3669,36 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
                 "[interactive_clarifier] selection expansion failed (%s) - using raw q",
                 _clarify_exc,
             )
+
+    # ── US Pharma store scope — bias the query to ONE store (migration 065) ──
+    # A store-scoped KB chat retrieves the store-config file, which is a single
+    # blob spanning ALL stores. If the question doesn't name a store, the model
+    # answers about whichever store appears first in the blob (Store 3000), and
+    # the answer cache — keyed purely on query text — even serves a different
+    # store's cached answer to a different store's chat. Prepending the store to
+    # the query makes the cache key, retrieval embedding, and generation all
+    # store-specific. Skipped when the chat is incident-scoped (single ticket)
+    # or the store id is already present in the question. Failure-open.
+    try:
+        from sqlalchemy import text as _store_bias_text
+        from backend.db.connection import engine as _store_bias_engine
+        with _store_bias_engine.connect() as _sb_conn:
+            _sb_row = _sb_conn.execute(
+                _store_bias_text(
+                    "SELECT scope_incident_id, scope_store_id "
+                    "FROM chat_sessions WHERE id = :sid"
+                ),
+                {"sid": session_id},
+            ).mappings().first()
+        _sb_store = str((_sb_row or {}).get("scope_store_id") or "").strip()
+        _sb_incident = (_sb_row or {}).get("scope_incident_id")
+        if _sb_store and not _sb_incident and _sb_store.lower() not in (req.q or "").lower():
+            req = req.model_copy(update={"q": f"For Store {_sb_store} only: {req.q}"})
+            logger.info(
+                "[scope] query biased to store=%s (session=%s)", _sb_store, session_id,
+            )
+    except Exception as _store_bias_exc:
+        logger.warning("[scope] store-query-bias skipped: %s", _store_bias_exc)
 
     # ── Trivial input short-circuit (greetings / thanks / ack / bye / small-talk) ──
     trivial = match_trivial_response(req.q)
@@ -4222,13 +4311,17 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     # Failure-open: any read error leaves scope as None — chat falls
     # back to today's behavior rather than breaking the demo.
     _scope_incident_ids = None
+    # Migration 065 — US Pharma store scope. When set (and no incident
+    # scope), the KB chat is restricted to one Store ID's indexed content.
+    _scope_store_id = None
     try:
         from sqlalchemy import text as _scope_sql_text
         from backend.db.connection import engine as _scope_engine
         with _scope_engine.connect() as _conn:
             _row = _conn.execute(
                 _scope_sql_text(
-                    "SELECT scope_incident_id FROM chat_sessions WHERE id = :sid"
+                    "SELECT scope_incident_id, scope_store_id "
+                    "FROM chat_sessions WHERE id = :sid"
                 ),
                 {"sid": session_id},
             ).mappings().first()
@@ -4238,6 +4331,15 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
                 "[scope] chat=%s scoped to incident=%s",
                 session_id, _scope_incident_ids[0],
             )
+        # Incident scope (a single ticket) is narrower and wins; only honor
+        # a store scope when the chat isn't already incident-locked.
+        if (not _scope_incident_ids) and _row and _row.get("scope_store_id"):
+            _scope_store_id = str(_row["scope_store_id"]).strip() or None
+            if _scope_store_id:
+                logger.info(
+                    "[scope] chat=%s scoped to store=%s",
+                    session_id, _scope_store_id,
+                )
     except Exception as _scope_exc:
         logger.warning(
             "[scope] lookup failed for chat=%s err=%s — falling back to global",
@@ -4327,12 +4429,36 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             query_embedding=q_emb,
             allowed_file_ids=active_file_ids,
         )
+    elif _scope_store_id:
+        # ── Migration 065 — store-scoped KB chat (US Pharma) ──
+        # The KB conversation answers strictly from ONE store's indexed
+        # content. A dedicated SQL-level store filter mirrors the
+        # single-incident path so the store's chunks are never crowded
+        # out of a global top-N. Empty result → strict polite-no-answer
+        # below (never widens to other stores).
+        from backend.retrieval.scoped_retrieval import retrieve_within_store
+        retrieval = retrieve_within_store(
+            scope_store_id=_scope_store_id,
+            query_embedding=q_emb,
+            allowed_file_ids=active_file_ids,
+        )
     else:
         # Org-level KB policy: US Pharma treats KB as a search-everything
         # surface (never hard-fail on an identifier miss). Resolved from the
         # org profile so shared code stays free of per-org branches.
         from backend.orgs.context import resolve_current_profile
         _org_profile = resolve_current_profile()
+
+        # Org KB policy: fold the org's extra doc_kinds into a doc-kind-scoped
+        # KB search (US Pharma adds "ticket" so JSON ticket docs are searchable
+        # from the KB step). Only widens an ALREADY-scoped search; an
+        # unrestricted (None) search already sees every kind, so leave it be.
+        _extra_kinds = getattr(_org_profile, "kb_search_extra_doc_kinds", ()) or ()
+        if _effective_doc_kinds and _extra_kinds:
+            _effective_doc_kinds = list(
+                dict.fromkeys([*_effective_doc_kinds, *_extra_kinds])
+            )
+
         retrieval = orchestrator_retrieve(
             query=bm25_query_text,
             raw_query=req.q,
@@ -4481,6 +4607,41 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
             context_stats={
                 "scoped_no_answer": True,
                 "scope_incident_id": _scoped_id,
+                "cache_hit": False,
+                **retrieval.stats,
+            },
+        )
+
+    # ── Migration 065 — strict store-scope no-answer ──
+    # When the KB chat is store-scoped and the store has no indexed
+    # content, say so plainly. Strict isolation: NEVER widen to other
+    # stores (matches the "restricted to that store only" requirement).
+    if _scope_store_id and not retrieval.ranked:
+        _store_no_answer = (
+            f"No KB/SOP content was found for Store {_scope_store_id}. "
+            f"Nothing is indexed for this store yet — upload this store's "
+            f"documents, or use Escalate to Tier 2."
+        )
+        save_message_to_session(
+            session_id=session_id,
+            role="assistant",
+            content=_store_no_answer,
+            owner_id=owner_id,
+            sources={"docs": []},
+        )
+        logger.info(
+            "[scope_no_answer] chat=%s store=%s — returned strict no-answer",
+            session_id, _scope_store_id,
+        )
+        return AnswerResponse(
+            answer=_store_no_answer,
+            sources=[],
+            confidence=1.0,
+            processing_time_ms=int((time.perf_counter() - start) * 1000),
+            session_id=session_id,
+            context_stats={
+                "scoped_no_answer": True,
+                "scope_store_id": _scope_store_id,
                 "cache_hit": False,
                 **retrieval.stats,
             },

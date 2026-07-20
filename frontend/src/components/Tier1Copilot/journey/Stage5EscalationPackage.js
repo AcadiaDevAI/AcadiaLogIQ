@@ -1357,6 +1357,10 @@ export default function Stage5EscalationPackage({
         position: "relative",
         overflow: "hidden",
       }}
+      // US Pharma — pale-red panel fill (matches Preliminary Tier 1
+      // Checks). --usp-panel-bg is defined only under .org-uspharma, so
+      // every other org falls back to transparent (unchanged glass card).
+      bodyStyle={{ background: "var(--usp-panel-bg, transparent)" }}
     >
       {/* Sprint 13.35 — reverted to the original centered Acadia
           watermark at the user's request. The smaller top-right

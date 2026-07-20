@@ -1,5 +1,6 @@
 import React, { useRef, useEffect, useCallback, useState } from "react";
-import { message } from "antd";
+import { message, Button } from "antd";
+import { ArrowLeftOutlined } from "@ant-design/icons";
 import { useChat } from "../hooks/ChatContext";
 import { askQuestion, listSessions } from "../services/api";
 import ChatMessage from "./ChatMessage";
@@ -246,6 +247,32 @@ export default function ChatArea() {
         >
           <span className="typing-dot" style={{ animationDelay: "0s" }} />
           <span>File upload in progress — you can keep chatting</span>
+        </div>
+      )}
+
+      {/* US Pharma — KB SOP chat opened from the landing / intake screen.
+          A "Back to screen" button returns the engineer to the landing
+          screen. Journey Stage 4 chats don't set this flag, so they never
+          show it. */}
+      {state.kbSearchFromLanding && (
+        <div
+          className="px-4 py-2 border-b flex items-center justify-between"
+          style={{
+            backgroundColor: "var(--bg-tertiary)",
+            borderColor: "var(--border-color)",
+            zIndex: 20,
+          }}
+        >
+          <span className="text-xs t-text-muted">
+            Knowledge Base &amp; SOP search — all files
+          </span>
+          <Button
+            size="small"
+            icon={<ArrowLeftOutlined />}
+            onClick={() => dispatch({ type: "EXIT_KB_SEARCH" })}
+          >
+            Back to screen
+          </Button>
         </div>
       )}
 

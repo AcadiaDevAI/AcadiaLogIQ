@@ -363,6 +363,9 @@ export default function LandingPage({
   onOpenEscalationProcedure,
   onOpenTicketFilter,
   onOpenServiceNow,
+  // US Pharma — KB SOP pill (renders only when this handler is passed,
+  // which LandingRouter does only for US Pharma).
+  onOpenKbSop,
   // Wired from LandingRouter — fires when the user picks the
   // "Proactive / Reactive" entry tile and clicks Continue. The
   // router switches to its Tier1IntakeForm screen (the intake form
@@ -405,7 +408,26 @@ export default function LandingPage({
     onOpenEscalationProcedure,
     onOpenTicketFilter,
     onOpenServiceNow,
+    onOpenKbSop,
   };
+
+  // US Pharma — add a "KB SOP" tile to the entry view. Only shown when the
+  // handler is wired (LandingRouter passes it for US Pharma only), inserted
+  // just before the "Proactive / Reactive" tile so it stays last.
+  const entryOptions = onOpenKbSop
+    ? [
+        ...ENTRY_OPTIONS.slice(0, -1),
+        {
+          value: "kb_sop",
+          label: "Discuss Store Specific with LogIQ",
+          sub: "Search the knowledge base & SOPs across all files",
+          icon: <FileSearchOutlined />,
+          accent: "var(--aurora-1)",
+          handlerProp: "onOpenKbSop",
+        },
+        ENTRY_OPTIONS[ENTRY_OPTIONS.length - 1],
+      ]
+    : ENTRY_OPTIONS;
   const handleEntrySelect = (opt) => {
     if (!opt) return;
     if (opt.value === "proactive_reactive") {
@@ -531,7 +553,7 @@ export default function LandingPage({
                   marginBottom: 24,
                 }}
               >
-                {ENTRY_OPTIONS.map((opt) => (
+                {entryOptions.map((opt) => (
                   <ModePill
                     key={opt.value}
                     option={opt}
@@ -592,6 +614,7 @@ export default function LandingPage({
           onOpenEscalationProcedure={onOpenEscalationProcedure}
           onOpenTicketFilter={onOpenTicketFilter}
           onOpenServiceNow={onOpenServiceNow}
+          onOpenKbSop={onOpenKbSop}
         />
 
         {/* Acadia watermark — sits above the eyebrow as the brand mark

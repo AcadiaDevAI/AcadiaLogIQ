@@ -1057,28 +1057,48 @@ def retrieve(
     # which uses it to stamp ``app.current_org`` on the worker thread's
     # transaction. Without this, every channel that touches a tenant
     # table would hit RLS' ``''::uuid`` cast and raise.
+    # Org-gated concurrency policy (OrgProfile.retrieval_per_channel_context).
+    # Default path: ONE copied context shared by every channel via ctx.run.
+    # That contends — a contextvars.Context can only be entered by one thread
+    # at a time, so concurrent channels raise "cannot enter context: ... is
+    # already entered" and BM25 / keyword silently drop out (only vector,
+    # entering first, survives). US Pharma opts into a per-channel copy: each
+    # channel gets its OWN snapshot of the request context, so all channels
+    # run without contending. copy_context() is evaluated HERE (main thread)
+    # per submit, so the tenancy ContextVar (→ RLS org stamp) propagates
+    # exactly like the shared path. Other orgs keep the legacy behavior.
+    try:
+        from backend.orgs.context import resolve_current_profile
+        _per_channel_ctx = bool(
+            getattr(resolve_current_profile(), "retrieval_per_channel_context", False)
+        )
+    except Exception:
+        _per_channel_ctx = False
+
     _request_ctx = contextvars.copy_context()
-    def _run(fn):
-        return _request_ctx.run(fn)
 
     tasks = {}
     with ThreadPoolExecutor(max_workers=4) as executor:
-        # Always run vector (it's the backbone)
-        if intent.strategy != "keyword":
-            tasks["vector"] = executor.submit(_run, _run_vector)
-        else:
-            # Even for keyword queries, run vector with reduced priority
-            tasks["vector"] = executor.submit(_run, _run_vector)
+        def _submit(fn):
+            if _per_channel_ctx:
+                # Fresh per-channel context copy (main-thread snapshot).
+                return executor.submit(contextvars.copy_context().run, fn)
+            # Legacy: all channels share one context (see note above).
+            return executor.submit(_request_ctx.run, fn)
+
+        # Always run vector (it's the backbone) — reduced priority for
+        # keyword-strategy queries, but always submitted either way.
+        tasks["vector"] = _submit(_run_vector)
 
         # Always run BM25 (fast, in-memory)
-        tasks["bm25"] = executor.submit(_run, _run_bm25)
+        tasks["bm25"] = _submit(_run_bm25)
 
         # Always run keyword search (Phase 3 addition)
-        tasks["keyword"] = executor.submit(_run, _run_keyword)
+        tasks["keyword"] = _submit(_run_keyword)
 
         # Run metadata filter if we have hints
         if intent.metadata_hints:
-            tasks["metadata"] = executor.submit(_run, _run_metadata)
+            tasks["metadata"] = _submit(_run_metadata)
 
         # Collect results
         for name, future in tasks.items():

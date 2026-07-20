@@ -86,18 +86,23 @@ export default function PreliminaryTier1ChecksHeader() {
   //   Dark : rgba(56, 189, 248, 0.22)     — sky-aurora wash that
   //          reads as the same accent against the deeper bg.
   const { isDark } = useTheme();
+  // The pale-blue accent is the shared/Acadia default. It is wrapped in
+  // CSS variables whose FALLBACK is exactly the original blue, so every
+  // org except US Pharma renders byte-identically (the vars are only
+  // defined under `.org-uspharma` in src/orgs/uspharma/theme/uspharma.css,
+  // where they flip to Walgreens red). Keeps this shared component
+  // org-agnostic — no org lookup needed here.
   const cardBackground = isDark
-    ? "rgba(56, 189, 248, 0.22)"
-    : "#BFDBFE"; // Tailwind blue-200 — clearly pale blue without
-                 // dominating the page. (Blue-100 #DBEAFE was too
-                 // faint to register against the page bg.)
+    ? "var(--preflight-card-bg, rgba(56, 189, 248, 0.22))"
+    : "var(--preflight-card-bg, #BFDBFE)"; // Tailwind blue-200 — pale blue
+  const accentColor = "var(--preflight-accent, #1F6FEB)";
 
   return (
     <Card
       style={{
         marginBottom: 16,
-        // Original left-rail blue restored.
-        borderLeft: "4px solid #1F6FEB",
+        // Left-rail accent (blue default; red under .org-uspharma).
+        borderLeft: `4px solid ${accentColor}`,
         // Outer background — works for legacy themes (where no
         // `!important` rule overrides it). On premium the bodyStyle
         // below carries the colour.
@@ -138,9 +143,9 @@ export default function PreliminaryTier1ChecksHeader() {
           Preliminary Tier 1 Checks
         </Title>
         {expanded ? (
-          <DownOutlined style={{ fontSize: 12, color: "#1F6FEB" }} />
+          <DownOutlined style={{ fontSize: 12, color: accentColor }} />
         ) : (
-          <RightOutlined style={{ fontSize: 12, color: "#1F6FEB" }} />
+          <RightOutlined style={{ fontSize: 12, color: accentColor }} />
         )}
       </div>
 

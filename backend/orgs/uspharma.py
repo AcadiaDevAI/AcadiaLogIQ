@@ -24,6 +24,18 @@ class USPharmaProfile(OrgProfile):
     # natural-language-gated behavior.)
     kb_search_all_on_identifier_miss = True
 
+    # US Pharma KB search ALSO includes JSON ticket documents. Stage 4 scopes
+    # KB search to ("sop", "kb"); JSON uploads auto-classify as
+    # doc_kind="ticket", so we fold "ticket" into the KB search scope to make
+    # that JSON corpus searchable from the KB step. (Acadia keeps SOP/KB-only.)
+    kb_search_extra_doc_kinds = ("ticket",)
+
+    # Run each hybrid retrieval channel in its OWN request-context copy so
+    # BM25 + keyword stop crashing with "cannot enter context: ... is already
+    # entered" (they share one Context on the default path). Restores true
+    # hybrid KB search for US Pharma. (Acadia keeps the legacy shared path.)
+    retrieval_per_channel_context = True
+
     # US Pharma tier-1 intake is Store ID + symptom; historic matches are
     # hard-scoped to that store. Store ID is mandatory.
     tier1_requires_store_id = True

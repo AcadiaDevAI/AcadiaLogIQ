@@ -976,6 +976,26 @@ def delete_document_and_chunks(document_id: str) -> int:
                 {"document_id": document_id},
             )
 
+            # Break the OTHER self-reference: documents.superseded_by_document_id
+            # (set when this file was re-uploaded / versioned). Any older row
+            # that points AT this document must have its pointer cleared, or
+            # the DELETE below fails with
+            # documents_superseded_by_document_id_fkey ("Key is still
+            # referenced from table documents"). Nulling the link is safe —
+            # the superseding target is going away, so the older row is simply
+            # no longer marked superseded.
+            db.execute(
+                text(
+                    """
+                    UPDATE documents
+                    SET superseded_by_document_id = NULL,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE superseded_by_document_id = :document_id
+                    """
+                ),
+                {"document_id": document_id},
+            )
+
             db.execute(
                 text(
                     """

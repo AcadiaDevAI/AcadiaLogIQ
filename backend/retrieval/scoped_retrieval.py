@@ -86,6 +86,19 @@ logger = logging.getLogger("acadia-log-iq")
 DEFAULT_SCOPED_TOP_K = 50
 
 
+# US Pharma store-scoped KB search — soft priority for KB/SOP over ticket
+# data. Ticket chunks get this constant ADDED to their cosine distance so
+# KB/SOP content leads whenever relevance is comparable, while a strongly
+# relevant ticket (much smaller distance) can still surface. This is a
+# deliberate SOFT preference, not a hard tier: a hard tier would let the
+# ~13 per-store KB chunks fill the entire downstream 8-chunk context cap and
+# exclude tickets outright — the opposite of the "keep tickets, just rank
+# them later" intent. On the Titan cosine-distance scale (~[0,1]) 0.15 is a
+# meaningful but non-absolute nudge. Only used by retrieve_within_store, so
+# Acadia's retrieval is untouched.
+_TICKET_RANK_PENALTY = 0.15
+
+
 # ─────────────────────────────────────────────────────────────
 # SQL templates
 # ─────────────────────────────────────────────────────────────
@@ -138,6 +151,57 @@ WHERE
 
 _SQL_FILE_IDS_CLAUSE = "    AND d.id::text = ANY(:file_ids)\n"
 
+# ── Store-scoped variant (migration 065, US Pharma) ──────────────────
+# Identical shape to _SQL_BASE but the WHERE filters on the store id the
+# chat session is locked to instead of a single incident. Store id lives
+# at metadata_json->'Metadata'->>'store_id' (the same nested path the
+# tier-1 historic retrieval uses — see tier1_copilot/retrieval.py
+# ::_store_filter_sql), stamped on JSON *ticket* chunks.
+#
+# Scope semantics: a chunk is eligible when EITHER
+#   (a) its Metadata.store_id equals the scoped store, OR
+#   (b) it carries NO store_id at all (store-agnostic reference material
+#       — e.g. the store-config file stores_corrected.json, whose chunks
+#       keep the store number in their TEXT, not in metadata, and SOP /
+#       KB PDFs that apply to every store).
+# This keeps other stores' TICKETS out (they carry a different store_id)
+# while still surfacing the store's config/SOP content, which vector
+# relevance pins to the right store. Without clause (b) the scoped chat
+# could not answer "applications/systems of store N" — that data lives
+# in a no-store_id file.
+_SQL_STORE_BASE = """
+SELECT
+    c.id::text                              AS id,
+    COALESCE(c.contextualized_content,
+             c.content)                     AS text,
+    c.metadata_json                         AS metadata_json,
+    c.section_heading                       AS section_heading,
+    c.chunk_type                            AS chunk_type,
+    c.summary                               AS summary,
+    c.labels_json                           AS labels_json,
+    d.id::text                              AS file_id,
+    d.owner_id                              AS owner_id,
+    d.name                                  AS source,
+    d.file_type                             AS file_type,
+    (e.embedding <=> CAST(:query_embedding AS vector)) AS distance,
+    (e.embedding IS NULL)                   AS missing_embedding
+FROM chunks c
+LEFT JOIN embeddings e
+  ON e.chunk_id = c.id
+JOIN documents d
+  ON d.id = c.document_id
+JOIN document_versions dv
+  ON dv.id = c.document_version_id
+WHERE
+    (
+        (c.metadata_json->'Metadata'->>'store_id') = :store_id
+        OR (c.metadata_json->'Metadata'->>'store_id') IS NULL
+    )
+    AND d.status = 'active'
+    AND dv.is_active = TRUE
+    AND d.current_version_id = dv.id
+"""
+
 # LEFT JOIN to embeddings means a chunk with no embedding row still
 # comes back — its `distance` is NULL. That's the right behaviour
 # for a scoped chat: when the universe is one ticket, having the
@@ -151,6 +215,29 @@ _SQL_TAIL = """
 ORDER BY
     CASE WHEN e.embedding IS NULL THEN 1 ELSE 0 END ASC,
     distance ASC NULLS LAST
+LIMIT :top_k
+"""
+
+# Store-scoped tail (US Pharma). Ranks KB/SOP content ABOVE ticket data
+# while keeping tickets in play (see _TICKET_RANK_PENALTY). Ordering:
+#   1. embedded chunks before un-embedded (so any ranking signal is used),
+#   2. by cosine distance with a fixed penalty ADDED to ticket chunks — so
+#      KB/SOP (incl. the per-store store_config chunks, doc_kind='kb') leads
+#      when relevance is comparable, but a strongly-matching ticket can still
+#      out-rank weakly-matching KB and reach the answer.
+# A chunk counts as "ticket" by its doc_kind stamp (metadata_json->>'doc_kind'
+# = 'ticket'); everything else (kb, sop, store_config, store-agnostic
+# reference) is treated as KB-tier with no penalty.
+_SQL_STORE_TAIL = """
+ORDER BY
+    CASE WHEN e.embedding IS NULL THEN 1 ELSE 0 END ASC,
+    (
+        COALESCE((e.embedding <=> CAST(:query_embedding AS vector)), 2.0)
+        + CASE
+            WHEN (c.metadata_json->>'doc_kind') = 'ticket'
+            THEN :ticket_penalty ELSE 0.0
+          END
+    ) ASC
 LIMIT :top_k
 """
 
@@ -367,4 +454,155 @@ def retrieve_within_incident(
         sid, len(ranked), missing_embeddings,
         ranked[0][3] if ranked else 0.0, elapsed_ms,
     )
+    return res
+
+
+# ─────────────────────────────────────────────────────────────
+# Store-scoped entry point (migration 065, US Pharma)
+# ─────────────────────────────────────────────────────────────
+def retrieve_within_store(
+    *,
+    scope_store_id: str,
+    query_embedding: List[float],
+    allowed_file_ids: Optional[Set[str]] = None,
+    top_k: int = DEFAULT_SCOPED_TOP_K,
+):
+    """Fetch and cosine-rank chunks belonging to a single Store ID.
+
+    US Pharma companion to :func:`retrieve_within_incident`. When a KB
+    chat session is store-scoped (``chat_sessions.scope_store_id``, set by
+    the Stage 4 "KB SOP" handoff), every /ask answers strictly from that
+    store's indexed content. The store filter matches
+    ``metadata_json->'Metadata'->>'store_id'`` — the same nested path the
+    tier-1 historic retrieval uses — so only that store's JSON ticket
+    chunks are eligible. Filtering happens IN the SQL (not post-fusion) so
+    the store's chunks are never crowded out of a global top-N.
+
+    Args mirror :func:`retrieve_within_incident`. Returns the same
+    ``RetrievalResult`` shape (``ranked`` tuples), with
+    ``stats["search_mode"] = "scoped_store"``. Returns empty ``ranked``
+    when the store has no indexed content (the caller's strict
+    polite-no-answer path then fires). Never raises.
+    """
+    t_start = time.perf_counter()
+    sid = (scope_store_id or "").strip()
+
+    if not sid:
+        logger.warning("[scoped_retrieval] retrieve_within_store without store_id")
+        return _empty_store_result(
+            None, int((time.perf_counter() - t_start) * 1000),
+        )
+
+    if not query_embedding:
+        logger.warning(
+            "[scoped_retrieval] retrieve_within_store without query_embedding "
+            "store=%s", sid,
+        )
+        return _empty_store_result(
+            sid, int((time.perf_counter() - t_start) * 1000),
+            no_embedding=True,
+        )
+
+    params: Dict[str, Any] = {
+        "store_id": sid,
+        "query_embedding": _vector_literal(query_embedding),
+        "top_k": int(top_k),
+        # Soft demotion for ticket chunks so KB/SOP leads (see
+        # _TICKET_RANK_PENALTY); tickets stay eligible, just ranked later.
+        "ticket_penalty": _TICKET_RANK_PENALTY,
+    }
+    if allowed_file_ids:
+        sql = _SQL_STORE_BASE + _SQL_FILE_IDS_CLAUSE + _SQL_STORE_TAIL
+        params["file_ids"] = [str(fid) for fid in allowed_file_ids]
+    else:
+        sql = _SQL_STORE_BASE + _SQL_STORE_TAIL
+
+    try:
+        with engine.connect() as conn:
+            rows = conn.execute(_sql_text(sql), params).mappings().all()
+    except Exception as exc:
+        logger.warning(
+            "[scoped_retrieval] store fetch failed store=%s err=%s", sid, exc,
+        )
+        return _empty_store_result(
+            sid, int((time.perf_counter() - t_start) * 1000),
+            fetch_failed=True,
+        )
+
+    from backend.retrieval.orchestrator import RetrievalResult
+    from backend.retrieval.query_classifier import QueryIntent
+
+    ranked = []
+    missing_embeddings = 0
+    for row in rows:
+        raw_dist = row.get("distance")
+        is_missing = bool(row.get("missing_embedding"))
+        if is_missing or raw_dist is None:
+            similarity = 0.5
+            missing_embeddings += 1
+        else:
+            similarity = max(0.0, 1.0 - float(raw_dist))
+        ranked.append((
+            str(row["id"]),
+            str(row.get("text") or ""),
+            _wrap_metadata(row),
+            similarity,
+        ))
+
+    elapsed_ms = int((time.perf_counter() - t_start) * 1000)
+    res = RetrievalResult()
+    res.intent = QueryIntent(
+        strategy="scoped_store",
+        reason=f"chat scoped to store {sid}",
+    )
+    res.ranked = ranked
+    res.stats = {
+        "search_mode": "scoped_store",
+        "scope_store_id": sid,
+        "matched_count": len(ranked),
+        "top_score": ranked[0][3] if ranked else 0.0,
+        "missing_embeddings": missing_embeddings,
+        "timing_total_ms": elapsed_ms,
+    }
+    logger.info(
+        "[scoped_retrieval] store=%s returned=%d "
+        "(missing_embeddings=%d) top_score=%.3f (%dms)",
+        sid, len(ranked), missing_embeddings,
+        ranked[0][3] if ranked else 0.0, elapsed_ms,
+    )
+    return res
+
+
+def _empty_store_result(
+    store_id: Optional[str],
+    elapsed_ms: int,
+    *,
+    fetch_failed: bool = False,
+    no_embedding: bool = False,
+):
+    """Empty RetrievalResult for the store-scoped path (see
+    :func:`_empty_result` for the incident equivalent)."""
+    from backend.retrieval.orchestrator import RetrievalResult
+    from backend.retrieval.query_classifier import QueryIntent
+
+    res = RetrievalResult()
+    res.intent = QueryIntent(
+        strategy="scoped_store",
+        reason=(
+            f"chat scoped to store {store_id}"
+            if store_id
+            else "chat store scope missing"
+        ),
+    )
+    res.ranked = []
+    res.stats = {
+        "search_mode": "scoped_store",
+        "scope_store_id": store_id,
+        "matched_count": 0,
+        "timing_total_ms": elapsed_ms,
+    }
+    if fetch_failed:
+        res.stats["fetch_failed"] = True
+    if no_embedding:
+        res.stats["no_embedding"] = True
     return res

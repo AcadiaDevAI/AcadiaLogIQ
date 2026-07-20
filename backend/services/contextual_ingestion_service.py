@@ -520,8 +520,35 @@ def decide_version(
 # deterministic path skips N Haiku calls per upload and produces strictly
 # correct metadata the retrieval layer (Fix 2 / Fix 6) can rely on.
 
+def _unwrap_ticket_list(data: Any) -> List[Any]:
+    """Return the flat list of ticket objects from either a bare array
+    (Acadia + legacy US Pharma uploads) or the US Pharma ticket envelope
+    ({doc_class:"ticket_history", schema, org, records:[...]}).
+
+    Envelope handling is gated on the explicit doc_class signature — which
+    only US Pharma's ticket exports emit — so bare-array behavior is
+    byte-identical for every existing file. An accidental array-of-arrays in
+    `records` is tolerated by flattening one level.
+    """
+    if isinstance(data, list):
+        return data
+    if isinstance(data, dict):
+        if str(data.get("doc_class") or "").strip().lower() == "ticket_history":
+            records = data.get("records")
+            if isinstance(records, list):
+                flat: List[Any] = []
+                for r in records:
+                    if isinstance(r, list):
+                        flat.extend(r)
+                    else:
+                        flat.append(r)
+                return flat
+    return []
+
+
 def _is_gold_ticket_json(file_bytes: bytes) -> bool:
-    """Return True only when `file_bytes` is our gold-ticket list format.
+    """Return True only when `file_bytes` is our gold-ticket format — a bare
+    ticket array OR the US Pharma ticket envelope (doc_class=ticket_history).
 
     Why these two markers: Metadata.Incident_Number is load-bearing for the
     ticket-ID exact-match path (Fix 2); Executive_Sharable_RCA OR ITIL_5_Why
@@ -532,9 +559,10 @@ def _is_gold_ticket_json(file_bytes: bytes) -> bool:
         data = json.loads(file_bytes.decode("utf-8", errors="replace"))
     except Exception:
         return False
-    if not isinstance(data, list) or not data:
+    tickets = _unwrap_ticket_list(data)
+    if not tickets:
         return False
-    first = data[0]
+    first = tickets[0]
     if not isinstance(first, dict):
         return False
     metadata = first.get("Metadata")
@@ -816,11 +844,15 @@ def _ingest_gold_ticket_json(
         }
 
     try:
-        tickets = json.loads(file_bytes.decode("utf-8", errors="replace"))
+        _parsed = json.loads(file_bytes.decode("utf-8", errors="replace"))
     except Exception as exc:
         # Detector already parsed once, so this should not happen. Fail safe
         # by raising so the caller sees a real error rather than silent drop.
         raise RuntimeError(f"Gold-ticket JSON re-parse failed: {exc}")
+
+    # Unwrap the US Pharma ticket envelope (doc_class=ticket_history) to the
+    # flat ticket list; bare arrays pass through unchanged (Acadia-safe).
+    tickets = _unwrap_ticket_list(_parsed)
 
     enriched_rows: List[Dict[str, Any]] = []
     latest_resolved: Optional[str] = None
@@ -1607,6 +1639,509 @@ def _ingest_contact_array(
 
 
 # ---------------------------------------------------------------------------
+# Store-config JSON (US Pharma) — an array of store objects, each with a
+# Store_ID. The legacy path dumped the WHOLE array into one prose chunk, so
+# no store could be isolated and nothing carried a store_id. This schema
+# emits ONE chunk per store and stamps metadata_json.Metadata.store_id, so
+# store-scoped KB retrieval (retrieve_within_store, migration 065) and the
+# tier-1 store filter can HARD-isolate a single store. Data-gated: fires
+# only on arrays whose records declare a Store_ID / store_id, so no other
+# org's uploads are affected.
+# ---------------------------------------------------------------------------
+
+def _store_id_of(rec: Dict[str, Any]) -> Optional[str]:
+    """Return the store id declared on a record (Store_ID / store_id /
+    StoreId, case-insensitive), stringified & trimmed, or None."""
+    if not isinstance(rec, dict):
+        return None
+    for k, v in rec.items():
+        if str(k).strip().lower() in ("store_id", "storeid"):
+            s = str(v).strip()
+            return s or None
+    return None
+
+
+def _is_store_config_json(file_bytes: bytes) -> bool:
+    """True when the payload is an array of objects and >=60% carry a store
+    id field. Kept strict so ordinary arrays aren't claimed here."""
+    try:
+        data = json.loads(file_bytes.decode("utf-8", errors="replace"))
+    except Exception:
+        return False
+    records = _extract_generic_array(data)
+    if not records:
+        return False
+    if _store_id_of(records[0]) is None:
+        return False
+    hits = sum(1 for r in records if _store_id_of(r) is not None)
+    return hits / len(records) >= 0.6
+
+
+def _ingest_store_config_array(
+    *,
+    file_bytes: bytes,
+    filename: str,
+    file_type: str,
+    owner_id: str,
+    fingerprint: str,
+    exact_duplicate_lookup,
+    version_candidate_lookup,
+) -> Dict[str, Any]:
+    """One-chunk-per-STORE ingestion. Each chunk's metadata_json carries a
+    nested Metadata.store_id (the exact path the store filters query), so
+    store-scoped retrieval can hard-isolate a store. Mirrors
+    _ingest_generic_array's return shape."""
+    exact = None
+    if settings.ENABLE_DUPLICATE_CHECK:
+        exact = exact_duplicate_lookup(owner_id=owner_id, fingerprint=fingerprint)
+    if exact:
+        return {
+            "status": "exact_duplicate",
+            "document_metadata": {},
+            "version_decision": {
+                "decision": "exact_duplicate",
+                "matched_document_id": exact["document_id"],
+                "reason": "same fingerprint already exists",
+                "confidence": 1.0,
+                "normalized_name": exact.get("normalized_name") or normalize_filename(filename),
+                "version_family_key": exact.get("version_family_key") or normalize_filename(filename),
+                "version_label": exact.get("version_label"),
+                "version_rank": float(exact.get("version_rank") or 0.0),
+                "document_date": exact.get("document_date"),
+                "effective_date": exact.get("effective_date"),
+                "created_date": exact.get("created_date"),
+            },
+            "chunk_rows": [],
+        }
+
+    try:
+        data = json.loads(file_bytes.decode("utf-8", errors="replace"))
+    except Exception as exc:
+        raise RuntimeError(f"Store-config JSON re-parse failed: {exc}")
+
+    records = _extract_generic_array(data)
+    enriched_rows: List[Dict[str, Any]] = []
+
+    for idx, record in enumerate(records):
+        store_id = _store_id_of(record)
+        if not store_id:
+            # No store id → can't be isolated; skip rather than emit an
+            # untagged chunk.
+            continue
+
+        header = f"STORE {store_id} CONFIGURATION"
+        # Lossless JSON body so every field (network components, VLANs,
+        # subnets, applications, systems, contacts) is embedded verbatim.
+        body = json.dumps(record, indent=2, ensure_ascii=False)
+        content = f"{header}\n\n{body}"
+        section_heading = (
+            f"Store {store_id} Configuration and Network Infrastructure"
+        )
+
+        row_metadata_json = {
+            "primary_id": store_id,
+            "id_type": "store_id",
+            "doc_kind": "kb",
+            # Nested Metadata.store_id — the exact path the store filters
+            # query (metadata_json->'Metadata'->>'store_id'); mirrors the
+            # ticket JSON shape so both corpora hard-scope identically.
+            "Metadata": {"store_id": store_id},
+            "store_id": store_id,
+            "title": filename,
+            "source_type": file_type,
+            "document_type": "Store Configuration",
+            "vendor": None,
+            "product": None,
+            "domain": "store_infrastructure",
+            "version": None,
+            "document_date": None,
+            "effective_date": None,
+            "created_date": None,
+            "purpose_description": None,
+            "operational_context": "store_configuration",
+        }
+
+        enriched_rows.append(
+            {
+                "chunk_index": idx,
+                "content": content,
+                "contextualized_content": content,
+                "summary": None,
+                "section_heading": section_heading,
+                "chunk_type": "store_config",
+                "page_number": None,
+                "token_estimate": max(1, len(content) // 4),
+                "source_order": idx,
+                "labels_json": {
+                    "tags": ["store_config"],
+                    "entities": [store_id],
+                    "keywords": [],
+                    "operational_context": "store_configuration",
+                },
+                "metadata_json": row_metadata_json,
+            }
+        )
+
+    logger.info(
+        "[ingest] structured fast-path: %d store(s), schema=StoreConfigSchema",
+        len(enriched_rows),
+    )
+
+    doc_metadata = {
+        "title": filename,
+        "document_type": "Store Configuration",
+        "file_type": "store_config",
+        "vendor": None,
+        "product": None,
+        "domain": "store_infrastructure",
+        "version_label": None,
+        "document_date": None,
+        "effective_date": None,
+        "created_date": None,
+        "section_count": len(enriched_rows),
+        "chunk_count": len(enriched_rows),
+        "metadata_version": "store-config-v1",
+        "extracted_at": datetime.now(timezone.utc).isoformat(),
+        "metadata_json": {
+            "title": filename,
+            "document_type": "Store Configuration",
+            "vendor": None,
+            "product": None,
+            "domain": "store_infrastructure",
+            "version": None,
+            "document_date": None,
+            "effective_date": None,
+            "created_date": None,
+            "glossary": {},
+            "doc_kind": "kb",
+        },
+    }
+
+    candidates = version_candidate_lookup(
+        owner_id=owner_id,
+        normalized_name=normalize_filename(filename),
+        title=filename,
+    )
+    version_decision = decide_version(
+        filename=filename,
+        owner_id=owner_id,
+        preliminary_doc_metadata={
+            "title": filename,
+            "version": None,
+            "document_date": None,
+            "effective_date": None,
+            "created_date": None,
+        },
+        candidates=candidates,
+    )
+
+    return {
+        "status": "ready",
+        "document_metadata": doc_metadata,
+        "version_decision": version_decision,
+        "chunk_rows": enriched_rows,
+        "doc_kind": "kb",
+    }
+
+
+# ---------------------------------------------------------------------------
+# US Pharma KB envelope (doc_class = "knowledge_base") — the signed KB
+# export. Shape:
+#     { "doc_class": "knowledge_base", "schema": "usp.store_kb.v1",
+#       "org": "us-pharma", "records": [ [ <store bundle> ], ... ] }
+#
+# `records` is an ARRAY OF ARRAYS: one sub-array ("bundle") per store. The
+# store id lives on the bundle element that carries a `site` object
+# (site.store_id, an integer). This differs from the flat StoreConfigSchema
+# (top-level store_id per record), so it needs its own reader.
+#
+# US-Pharma-ONLY by construction: detection is gated on the explicit
+# doc_class signature, which only US Pharma's KB exports emit — Acadia
+# uploads never match, so their ingestion path is untouched.
+#
+# Emits ONE chunk per store, stamped with a nested Metadata.store_id — the
+# exact path store-scoped KB retrieval (retrieve_within_store, migration
+# 065) and the tier-1 store filter query. Identical chunk shape to
+# _ingest_store_config_array so retrieval behaves the same.
+# ---------------------------------------------------------------------------
+
+def _usp_kb_store_id_of_bundle(bundle: List[Any]) -> Optional[str]:
+    """Resolve the store id for one US Pharma KB store bundle.
+
+    Primary source is the element carrying a `site` object (site.store_id);
+    falls back to a top-level store_id/Store_ID on any element. Coerced to a
+    trimmed string so it matches the TEXT store filter
+    (metadata_json->'Metadata'->>'store_id') — the source has it as an int.
+    """
+    for el in bundle:
+        if isinstance(el, dict) and isinstance(el.get("site"), dict):
+            site = el["site"]
+            sid = site.get("store_id") or site.get("Store_ID") or site.get("storeId")
+            if sid is not None and str(sid).strip():
+                return str(sid).strip()
+    for el in bundle:
+        if isinstance(el, dict):
+            sid = _store_id_of(el)
+            if sid:
+                return sid
+    return None
+
+
+def _usp_kb_bundles(data: Any) -> List[List[Dict[str, Any]]]:
+    """From a US Pharma KB envelope, return the per-store bundles.
+
+    `records` is an array of arrays (one sub-array per store). A dict element
+    is tolerated and wrapped as a single-element bundle so a flattened future
+    variant still ingests. Non-list/non-dict entries are ignored.
+    """
+    if not isinstance(data, dict):
+        return []
+    records = data.get("records")
+    if not isinstance(records, list):
+        return []
+    bundles: List[List[Dict[str, Any]]] = []
+    for rec in records:
+        if isinstance(rec, list):
+            bundle = [d for d in rec if isinstance(d, dict)]
+        elif isinstance(rec, dict):
+            bundle = [rec]
+        else:
+            continue
+        if bundle:
+            bundles.append(bundle)
+    return bundles
+
+
+def _usp_kb_element_label(el: Dict[str, Any]) -> str:
+    """Human/embedding-friendly label for one element of a store bundle.
+
+    Drives the chunk header + section_heading so component-specific queries
+    ("Managed Services Escalation Matrix for store 3000") embed and retrieve
+    against the exact section rather than a 96 KB whole-store blob.
+    """
+    if isinstance(el.get("site"), dict):
+        return "Site Profile & Network Configuration"
+    for key in ("Application", "Component"):
+        v = el.get(key)
+        if isinstance(v, str) and v.strip():
+            return f"{key}: {v.strip()}"
+    keys = list(el.keys())
+    if keys:
+        # Single-key wrappers (Managed_Services_Escalation_Matrix,
+        # Vendor_Escalation_Matrix, Email_Templates, …) → readable label.
+        return str(keys[0]).replace("_", " ").strip() or "Section"
+    return "Section"
+
+
+def _is_usp_kb_envelope(file_bytes: bytes) -> bool:
+    """True only for the US Pharma KB envelope: a root object declaring
+    doc_class == "knowledge_base" that yields at least one store bundle.
+    This signature is emitted only by US Pharma's KB exports, so the schema
+    is US-Pharma-scoped by construction."""
+    try:
+        data = json.loads(file_bytes.decode("utf-8", errors="replace"))
+    except Exception:
+        return False
+    if not isinstance(data, dict):
+        return False
+    if str(data.get("doc_class") or "").strip().lower() != "knowledge_base":
+        return False
+    return len(_usp_kb_bundles(data)) > 0
+
+
+def _ingest_usp_kb_envelope(
+    *,
+    file_bytes: bytes,
+    filename: str,
+    file_type: str,
+    owner_id: str,
+    fingerprint: str,
+    exact_duplicate_lookup,
+    version_candidate_lookup,
+) -> Dict[str, Any]:
+    """One-chunk-per-STORE ingestion for the US Pharma KB envelope.
+
+    Each store's sub-array is embedded verbatim into a single chunk stamped
+    with a nested Metadata.store_id. Mirrors _ingest_store_config_array's
+    return shape so the upload pipeline (embed → BM25 → insert) is unchanged.
+    Oversized bundles are safe: the embedding step truncates its input at
+    settings.MAX_CHARS while the full content is preserved for BM25/keyword
+    retrieval and LLM context.
+    """
+    exact = None
+    if settings.ENABLE_DUPLICATE_CHECK:
+        exact = exact_duplicate_lookup(owner_id=owner_id, fingerprint=fingerprint)
+    if exact:
+        return {
+            "status": "exact_duplicate",
+            "document_metadata": {},
+            "version_decision": {
+                "decision": "exact_duplicate",
+                "matched_document_id": exact["document_id"],
+                "reason": "same fingerprint already exists",
+                "confidence": 1.0,
+                "normalized_name": exact.get("normalized_name") or normalize_filename(filename),
+                "version_family_key": exact.get("version_family_key") or normalize_filename(filename),
+                "version_label": exact.get("version_label"),
+                "version_rank": float(exact.get("version_rank") or 0.0),
+                "document_date": exact.get("document_date"),
+                "effective_date": exact.get("effective_date"),
+                "created_date": exact.get("created_date"),
+            },
+            "chunk_rows": [],
+        }
+
+    try:
+        data = json.loads(file_bytes.decode("utf-8", errors="replace"))
+    except Exception as exc:
+        raise RuntimeError(f"US Pharma KB envelope re-parse failed: {exc}")
+
+    bundles = _usp_kb_bundles(data)
+    enriched_rows: List[Dict[str, Any]] = []
+    seen_stores: set = set()
+    idx = 0
+
+    for bundle in bundles:
+        store_id = _usp_kb_store_id_of_bundle(bundle)
+        if not store_id:
+            # No resolvable store id → can't be isolated; skip rather than
+            # emit an untagged chunk that store-scoped retrieval can't reach.
+            logger.warning("[ingest] USP KB: store bundle without store_id — skipped")
+            continue
+        if store_id in seen_stores:
+            # The source occasionally repeats a store bundle verbatim; keep
+            # the first, skip the rest so retrieval isn't served duplicates.
+            logger.info("[ingest] USP KB: duplicate store %s — skipped", store_id)
+            continue
+        seen_stores.add(store_id)
+
+        # ONE CHUNK PER TOP-LEVEL OBJECT in the store bundle (site, each
+        # application/component, and each matrix/template) — NOT one blob per
+        # store. Rationale: a whole-store bundle is ~96 KB, but the embedding
+        # step encodes only settings.MAX_CHARS (~8 KB); sections past that
+        # (e.g. Managed_Services_Escalation_Matrix at ~char 88 K) become
+        # invisible to vector search and get truncated out of the LLM prompt.
+        # Splitting per object makes each ~2-8 KB section fully embeddable and
+        # individually retrievable — while every chunk still carries the same
+        # Metadata.store_id, so store-scoped retrieval hard-isolation is
+        # unchanged.
+        for el in bundle:
+            label = _usp_kb_element_label(el)
+            header = f"STORE {store_id} — {label}"
+            body = json.dumps(el, indent=2, ensure_ascii=False)
+            content = f"{header}\n\n{body}"
+            section_heading = f"Store {store_id} — {label}"
+
+            row_metadata_json = {
+                "primary_id": store_id,
+                "id_type": "store_id",
+                "doc_kind": "kb",
+                # Nested Metadata.store_id — the exact path store filters
+                # query (metadata_json->'Metadata'->>'store_id'); mirrors the
+                # ticket + store-config shapes so all store corpora hard-scope
+                # identically.
+                "Metadata": {"store_id": store_id},
+                "store_id": store_id,
+                "component": label,
+                "title": filename,
+                "source_type": file_type,
+                "document_type": "Store Configuration",
+                "vendor": None,
+                "product": None,
+                "domain": "store_infrastructure",
+                "version": None,
+                "document_date": None,
+                "effective_date": None,
+                "created_date": None,
+                "purpose_description": None,
+                "operational_context": "store_configuration",
+            }
+
+            enriched_rows.append(
+                {
+                    "chunk_index": idx,
+                    "content": content,
+                    "contextualized_content": content,
+                    "summary": None,
+                    "section_heading": section_heading,
+                    "chunk_type": "store_config",
+                    "page_number": None,
+                    "token_estimate": max(1, len(content) // 4),
+                    "source_order": idx,
+                    "labels_json": {
+                        "tags": ["store_config"],
+                        "entities": [store_id],
+                        "keywords": [],
+                        "operational_context": "store_configuration",
+                    },
+                    "metadata_json": row_metadata_json,
+                }
+            )
+            idx += 1
+
+    logger.info(
+        "[ingest] structured fast-path: %d store(s), schema=USPharmaKBEnvelopeSchema",
+        len(enriched_rows),
+    )
+
+    doc_metadata = {
+        "title": filename,
+        "document_type": "Store Configuration",
+        "file_type": "store_config",
+        "vendor": None,
+        "product": None,
+        "domain": "store_infrastructure",
+        "version_label": None,
+        "document_date": None,
+        "effective_date": None,
+        "created_date": None,
+        "section_count": len(enriched_rows),
+        "chunk_count": len(enriched_rows),
+        "metadata_version": "usp-kb-envelope-v1",
+        "extracted_at": datetime.now(timezone.utc).isoformat(),
+        "metadata_json": {
+            "title": filename,
+            "document_type": "Store Configuration",
+            "vendor": None,
+            "product": None,
+            "domain": "store_infrastructure",
+            "version": None,
+            "document_date": None,
+            "effective_date": None,
+            "created_date": None,
+            "glossary": {},
+            "doc_kind": "kb",
+        },
+    }
+
+    candidates = version_candidate_lookup(
+        owner_id=owner_id,
+        normalized_name=normalize_filename(filename),
+        title=filename,
+    )
+    version_decision = decide_version(
+        filename=filename,
+        owner_id=owner_id,
+        preliminary_doc_metadata={
+            "title": filename,
+            "version": None,
+            "document_date": None,
+            "effective_date": None,
+            "created_date": None,
+        },
+        candidates=candidates,
+    )
+
+    return {
+        "status": "ready",
+        "document_metadata": doc_metadata,
+        "version_decision": version_decision,
+        "chunk_rows": enriched_rows,
+        "doc_kind": "kb",
+    }
+
+
+# ---------------------------------------------------------------------------
 # Schema registry — ordered; first match wins. Each class is a pure
 # dispatcher: detect() decides, ingest() emits the same dict shape as the
 # legacy path.
@@ -1673,7 +2208,57 @@ class GenericArraySchema:
         return _ingest_generic_array(**kwargs)
 
 
-STRUCTURED_SCHEMAS = [ContactSchema, GoldTicketSchema, GenericArraySchema]
+class StoreConfigSchema:
+    """US Pharma store-config JSON: array of objects each with a Store_ID.
+    Emits one chunk per store, stamped with a nested Metadata.store_id.
+
+    MUST be registered BEFORE GenericArraySchema — otherwise a store array
+    could be claimed as generic records, which would drop the nested
+    Metadata.store_id that store-scoped retrieval filters on.
+    """
+
+    name = "StoreConfigSchema"
+
+    @staticmethod
+    def detect(file_bytes: bytes) -> bool:
+        return _is_store_config_json(file_bytes)
+
+    @staticmethod
+    def ingest(**kwargs) -> Dict[str, Any]:
+        return _ingest_store_config_array(**kwargs)
+
+
+class USPharmaKBEnvelopeSchema:
+    """US Pharma KB envelope: {doc_class:"knowledge_base", schema, org,
+    records:[[<store bundle>], ...]}. One chunk per store, stamped with a
+    nested Metadata.store_id.
+
+    Registered FIRST — its detect is tightly gated on the explicit
+    doc_class signature (US Pharma KB exports only), so it never claims
+    another org's or format's file. Running it ahead of the array schemas
+    is what lets the array-of-arrays `records` be read correctly (the
+    generic/store schemas would see zero dict records and skip it, dropping
+    the file into dumb text chunking).
+    """
+
+    name = "USPharmaKBEnvelopeSchema"
+
+    @staticmethod
+    def detect(file_bytes: bytes) -> bool:
+        return _is_usp_kb_envelope(file_bytes)
+
+    @staticmethod
+    def ingest(**kwargs) -> Dict[str, Any]:
+        return _ingest_usp_kb_envelope(**kwargs)
+
+
+STRUCTURED_SCHEMAS = [
+    USPharmaKBEnvelopeSchema,
+    ContactSchema,
+    GoldTicketSchema,
+    StoreConfigSchema,
+    GenericArraySchema,
+]
 
 
 def process_document(

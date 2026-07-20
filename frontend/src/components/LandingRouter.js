@@ -2,7 +2,7 @@ import React, { Suspense, useEffect, useState } from "react";
 import { Button, Card, Spin, message } from "antd";
 import { useChat } from "../hooks/ChatContext";
 import { useOrg } from "../hooks/OrgContext";
-import { useOrgModule } from "../orgs/registry";
+import { useOrgModule, isUSPharma } from "../orgs/registry";
 // Fingerprint landing disabled — Tier-1 Copilot is now the default entry.
 // Keep import commented so it can be re-enabled in a single line if needed.
 // import FingerprintInputScreen from "./FingerprintInputScreen";
@@ -48,6 +48,12 @@ export default function LandingRouter({
   // lazy — rendered inside <Suspense> below.
   const { activeOrg } = useOrg();
   const { IntakeForm, Workspace } = useOrgModule(activeOrg?.slug);
+  // US Pharma — KB SOP quick-action opens a general chat over ALL files
+  // (no store scope at the landing/entry stage). Gated so only US Pharma
+  // shows the pill; other orgs pass undefined and the pill hides itself.
+  const onOpenKbSop = isUSPharma(activeOrg?.slug)
+    ? () => dispatch({ type: "NEW_CHAT", payload: { kbSearchFromLanding: true } })
+    : undefined;
   // Default landing is the LandingPage entry-tile view ("Resolve
   // incidents like your best engineer on her best day."). Picking
   // Proactive / Reactive + Continue advances to "tier1"
@@ -293,6 +299,7 @@ export default function LandingRouter({
       onOpenEscalationProcedure={onOpenEscalationProcedure}
       onOpenTicketFilter={onOpenTicketFilter}
       onOpenServiceNow={onOpenServiceNow}
+      onOpenKbSop={onOpenKbSop}
       // Picking "Proactive / Reactive" on the entry-tile view +
       // clicking Continue switches this router to its Tier1IntakeForm
       // screen, where the engineer chooses proactive alert vs.

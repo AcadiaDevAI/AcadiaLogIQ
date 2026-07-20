@@ -37,6 +37,28 @@ class OrgProfile:
     # backend/retrieval/orchestrator.py::retrieve.
     kb_search_all_on_identifier_miss: bool = False
 
+    # Extra doc_kinds to FOLD INTO a doc-kind-scoped KB search. Stage 4
+    # "Search KB / SOP" scopes retrieval to ("sop", "kb"); an org can widen
+    # that so KB search ALSO surfaces other corpora. US Pharma adds "ticket"
+    # so JSON ticket documents show up in KB search (JSON auto-classifies as
+    # doc_kind="ticket"). Default () = shared behavior: KB search stays SOP/KB
+    # only. Only applied when the search is already doc-kind-scoped; an
+    # unrestricted (None) search already sees every kind. See
+    # backend/api.py /ask KB retrieval branch.
+    kb_search_extra_doc_kinds: tuple = ()
+
+    # Retrieval concurrency policy. The hybrid orchestrator runs its search
+    # channels (vector / BM25 / keyword / metadata) in parallel threads. On
+    # the DEFAULT path they all share ONE copied request context via
+    # ctx.run — but a contextvars.Context can only be entered by one thread
+    # at a time, so concurrent channels raise "cannot enter context: ... is
+    # already entered" and silently drop BM25 + keyword (only vector, which
+    # enters first, survives). When True, each channel gets its OWN copy of
+    # the request context, so all channels run without contending — restoring
+    # true hybrid retrieval. Default False = legacy shared-context behavior.
+    # See backend/retrieval/orchestrator.py.
+    retrieval_per_channel_context: bool = False
+
     # Tier-1 intake policy. When True, the tier-1 analyze flow requires a
     # store_id and hard-scopes historic matches to that store (US Pharma).
     # Default False = shared behavior (Acadia's asset/alert intake, no store

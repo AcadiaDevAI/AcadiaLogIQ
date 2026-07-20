@@ -5,6 +5,7 @@ import {
   MessageOutlined,
   FileOutlined,
   DeleteOutlined,
+  DownloadOutlined,
   MenuFoldOutlined,
   MenuUnfoldOutlined,
   CloudUploadOutlined,
@@ -27,6 +28,7 @@ import {
   deleteAllSessions,
   listFiles,
   deleteFile,
+  downloadFile,
   resetSessionContext,
 } from "../services/api";
 import UploadPanel from "./UploadPanel";
@@ -356,6 +358,24 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
     }
   };
 
+  // Admin-only original-file download. Fetches the bytes as a Blob (auth
+  // header rides on the axios instance) and triggers a browser save.
+  const handleDownloadFile = async (fileId, fileName) => {
+    try {
+      const res = await downloadFile(fileId);
+      const url = window.URL.createObjectURL(new Blob([res.data]));
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = fileName || "download";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      window.URL.revokeObjectURL(url);
+    } catch {
+      message.error("Failed to download file");
+    }
+  };
+
 
   // ── Build tabs based on role ──
   const tabItems = [
@@ -480,25 +500,37 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
                       </div>
                     </div>
                     {isAdmin && (
-                      <Popconfirm
-                        title={`Delete "${f.name}"?`}
-                        description="This will remove the file and all its indexed data."
-                        onConfirm={() => handleDeleteFile(f.id, f.name)}
-                        okText="Delete"
-                        cancelText="Cancel"
-                        okButtonProps={{ danger: true }}
-                      >
-                        <Tooltip title="Delete file">
+                      <div className="flex items-center gap-1 flex-shrink-0">
+                        <Tooltip title="Download file">
                           <Button
                             type="text"
                             size="small"
-                            icon={<DeleteOutlined />}
-                            className="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
+                            icon={<DownloadOutlined />}
+                            onClick={() => handleDownloadFile(f.id, f.name)}
+                            className="opacity-0 group-hover:opacity-100 transition-opacity"
                             style={{ color: "var(--text-muted)" }}
-                            danger
                           />
                         </Tooltip>
-                      </Popconfirm>
+                        <Popconfirm
+                          title={`Delete "${f.name}"?`}
+                          description="This will remove the file and all its indexed data."
+                          onConfirm={() => handleDeleteFile(f.id, f.name)}
+                          okText="Delete"
+                          cancelText="Cancel"
+                          okButtonProps={{ danger: true }}
+                        >
+                          <Tooltip title="Delete file">
+                            <Button
+                              type="text"
+                              size="small"
+                              icon={<DeleteOutlined />}
+                              className="opacity-0 group-hover:opacity-100 transition-opacity"
+                              style={{ color: "var(--text-muted)" }}
+                              danger
+                            />
+                          </Tooltip>
+                        </Popconfirm>
+                      </div>
                     )}
                   </div>
                 );
@@ -509,6 +541,7 @@ export default function Sidebar({ onOpenRca, onOpenGapAnalysis, onOpenTicketFilt
                   versions={versions}
                   isAdmin={isAdmin}
                   onDelete={handleDeleteFile}
+                  onDownload={handleDownloadFile}
                 />
               );
             })

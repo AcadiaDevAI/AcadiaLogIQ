@@ -25,6 +25,12 @@ import TicketFilterFlow from "./components/TicketFilter/TicketFilterFlow";
 import ServiceNowFlow from "./components/ServiceNow/ServiceNowFlow";
 import EscalationProcedureModal from "./components/EscalationProcedure/EscalationProcedureModal";
 import EscalationChatWidget from "./components/EscalationProcedure/EscalationChatWidget";
+import { useOrg } from "./hooks/OrgContext";
+import { isUSPharma } from "./orgs/registry";
+// US-Pharma-only theme scope — repaints the shared premium surface to
+// Walgreens red (AntD tokens here + `.org-uspharma` CSS-var rebinds).
+// Inert for every other org. All red values live under src/orgs/uspharma/theme.
+import UsPharmaThemeScope from "./orgs/uspharma/theme/UsPharmaThemeScope";
 
 function BuildStamp() {
   return (
@@ -48,6 +54,12 @@ function BuildStamp() {
 
 function AppLayout() {
   const { state, dispatch } = useChat();
+
+  // US Pharma repaints the shared premium surface to Walgreens red. We
+  // resolve it here (inside OrgContextProvider) because the org slug is
+  // not known at the top-level ThemeProvider / ConfigProvider.
+  const { activeOrg } = useOrg();
+  const usPharma = isUSPharma(activeOrg?.slug);
 
   // Sprint 13.32 — RCA mode flag. Local to AppLayout so we don't
   // pollute ChatContext for a feature that doesn't touch chat.
@@ -276,9 +288,14 @@ function AppLayout() {
   // of the ChatArea. Sidebar stays visible so past sessions remain reachable.
   const showLanding = !state.selectedMode;
 
+  const shellClass =
+    "flex h-screen overflow-hidden t-bg-primary" +
+    (usPharma ? " org-uspharma" : "");
+
   return (
-    <div className="flex h-screen overflow-hidden t-bg-primary">
-      {/* Sidebar - desktop */}
+    <UsPharmaThemeScope enabled={usPharma}>
+      <div className={shellClass}>
+        {/* Sidebar - desktop */}
       <div className="hidden md:flex">
         <Sidebar
           onOpenRca={() => setRcaModalOpen(true)}
@@ -390,6 +407,7 @@ function AppLayout() {
           definition above is left in place for diagnostic reuse but
           is no longer rendered on the app shell. */}
     </div>
+    </UsPharmaThemeScope>
   );
 }
 

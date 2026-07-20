@@ -32,14 +32,31 @@ def build_stage4(
     alert_type: Optional[str],
     notes: Optional[str] = None,
     dominant_root_cause: Optional[str] = None,
+    store_id: Optional[str] = None,
 ) -> Stage4SearchKB:
     """Assemble the prefilled chat message per spec §3.6.
 
-    Format:
+    Format (Acadia / no store):
         Severity {sev} — {alert_type} on {asset_name}.
         Past tickets suggest {dominant_root_cause}.
         {notes (if provided)}
+
+    US Pharma (store_id present): a simple, dynamic store lookup —
+        Give me details about {store_id}
+    The KB chat is store-scoped (chat_sessions.scope_store_id, migration
+    065), so this one message lets the engineer ask anything about that
+    store and every follow-up is answered from that store's data only.
     """
+    # US Pharma — store-scoped KB chat. Only US Pharma intake carries a
+    # Store ID (OrgProfile.tier1_requires_store_id), so this branch is
+    # naturally org-gated; Acadia falls through to the alert-summary below.
+    sid = (store_id or "").strip()
+    if sid:
+        return Stage4SearchKB(
+            prefilled_message=f"Give me details about {sid} store",
+            allowed_doc_kinds=["sop", "kb"],
+        )
+
     sev = (severity or "P3").strip()
     alert = (alert_type or "(unspecified alert)").strip()
     asset = (asset_name or "(unspecified asset)").strip()

@@ -11,13 +11,14 @@
 
 import React from "react";
 import { Button, Card, List, Tag, Tooltip, Typography } from "antd";
-import { MessageOutlined, ExportOutlined } from "@ant-design/icons";
+import { MessageOutlined } from "@ant-design/icons";
 
 import CardWatermark from "../../../components/Tier1Copilot/journey/CardWatermark";
 import CorpusStatsTail from "../../../components/Tier1Copilot/journey/CorpusStatsTail";
 import DislikeButton from "../../../components/Tier1Copilot/journey/DislikeButton";
 import EscalateButton from "../../../components/Tier1Copilot/journey/EscalateButton";
 import HelpfulButton from "../../../components/Tier1Copilot/journey/HelpfulButton";
+import { USP_RED_SCALE } from "../theme/palette";
 // Sprint 13.10 — Stage 0 now offers a direct shortcut to Stage 3
 // (Guided Troubleshooting Workflow) alongside Escalate, so the
 // engineer can skip the intermediate Pivot Insights / Stage 2
@@ -47,15 +48,10 @@ const { Title, Text, Paragraph } = Typography;
 //   rowId    — inline ticket id (e.g. INC-PHOENIX-402)
 //   rowLink  — "Discuss →" right-aligned per-row action
 // ─────────────────────────────────────────────────────────────
-const B01_BLUE = {
-  50:  "#EFF6FF",
-  100: "#DBEAFE",
-  200: "#BFDBFE",
-  400: "#60A5FA",
-  500: "#3B82F6",
-  600: "#2563EB",
-  700: "#1D4ED8",
-};
+// Walgreens-red tint ramp (US Pharma). Sourced from the org palette so
+// the banner's locally-injected <style> matches the rest of the org's
+// red theme. Named B01_* for the CSS class prefix, not the hue.
+const B01_BLUE = USP_RED_SCALE;
 const B01_CSS = `
 .b01-root { color: #0F172A; }
 .b01-eyebrow {
@@ -109,29 +105,23 @@ const B01_CSS = `
 }
 .b01-rowBody {
   font-family: var(--font-body, 'Geist', system-ui, sans-serif);
-  font-size: 14px; line-height: 1.55; color: #0F172A;
+  font-size: 14.5px; line-height: 1.55; color: #0F172A;
 }
 .b01-rowId {
   display: inline-block;
   font-family: var(--font-mono, 'Geist Mono', monospace);
   font-feature-settings: 'tnum' 1;
-  font-size: 12.5px; font-weight: 600;
+  /* A touch larger than the sentence (.b01-rowBody = 14.5px). */
+  font-size: 15px; font-weight: 600;
   color: ${B01_BLUE[700]};
   background: ${B01_BLUE[50]};
   border: 1px solid ${B01_BLUE[200]};
   padding: 1px 8px; border-radius: 6px;
   margin-right: 8px;
 }
-.b01-rowLink {
-  font-family: var(--font-body, 'Geist', system-ui, sans-serif);
-  font-size: 12.5px; font-weight: 600;
-  color: ${B01_BLUE[600]};
-  background: transparent; border: none; padding: 4px 0; cursor: pointer;
-  white-space: nowrap;
-  transition: color 160ms ease, transform 160ms ease;
-}
-.b01-rowLink:hover:not(:disabled) { color: ${B01_BLUE[700]}; transform: translateX(2px); }
-.b01-rowLink:disabled { color: ${B01_BLUE[400]}; cursor: not-allowed; }
+/* "Discuss with LogIQ" now renders as an AntD primary <Button> (matching
+   the KB SOP NextStageButton), so the old .b01-rowLink chip styles were
+   removed. */
 `;
 let _b01StylesInjected = false;
 function _ensureB01Styles() {
@@ -177,6 +167,29 @@ function extractTrailingIncidentId(stepText) {
   // optional trailing whitespace tolerated.
   const m = stepText.match(/\s-\s([A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+)\s*$/);
   return m ? m[1] : null;
+}
+
+
+// US Pharma — Best-Historical-Match rows show the first N SENTENCES of
+// each incident summary (the full narrative was "a big message"). We cut
+// at each sentence-ending punctuation (. ! ?) that is followed by
+// whitespace or end-of-string, keep the punctuation, and stop after
+// `count` sentences. e.g. count=2 on "At 08:15 UTC, … dropped abruptly.
+// Monitoring alerts indicated a 'BGP Down' state… End users…" yields the
+// first two sentences. Falls back to the whole string when fewer sentence
+// breaks are found (e.g. a one-line summary).
+function firstSentences(text, count = 2) {
+  if (typeof text !== "string") return text;
+  const re = /^[\s\S]*?[.!?](?=\s|$)/;
+  let rest = text.trimStart();
+  const parts = [];
+  for (let i = 0; i < count; i += 1) {
+    const m = rest.match(re);
+    if (!m) break;
+    parts.push(m[0].trim());
+    rest = rest.slice(m[0].length).trimStart();
+  }
+  return parts.length ? parts.join(" ") : text.trim();
 }
 
 
@@ -275,6 +288,9 @@ export default function Stage0BestTicketDistillation({
         position: "relative",
         overflow: "hidden",
       }}
+      // US Pharma — pale-red panel fill (matches Preliminary Tier 1
+      // Checks). --usp-panel-bg is defined only under .org-uspharma.
+      bodyStyle={{ background: "var(--usp-panel-bg, transparent)" }}
     >
       <CardWatermark />
       {/* ─── Block 01 — Best Historical Match (premium typography) ─────
@@ -380,9 +396,11 @@ export default function Stage0BestTicketDistillation({
               // Strip the trailing " - INC-XXX" suffix from the body
               // so the id renders ONCE (as the inline chip) instead of
               // being duplicated at the end of the sentence.
-              const bodyText = bulletIncident
+              const bodyFull = bulletIncident
                 ? cleaned.replace(/\s*-\s*[A-Z][A-Z0-9-]+\s*$/, "")
                 : cleaned;
+              // US Pharma — trim to the first two sentences.
+              const bodyText = firstSentences(bodyFull, 2);
               const idx = String(i + 1).padStart(2, "0");
               return (
                 <li className="b01-row" key={i}>
@@ -393,6 +411,8 @@ export default function Stage0BestTicketDistillation({
                     ) : null}
                     {bodyText}
                   </span>
+                  {/* Discuss with LogIQ — sits after the line (per row),
+                      which keeps it above the Escalate / KB SOP footer. */}
                   {sessionId && cleaned ? (
                     <Tooltip
                       title={
@@ -401,17 +421,19 @@ export default function Stage0BestTicketDistillation({
                           : "Discuss this with LogIQ"
                       }
                     >
-                      <button
-                        type="button"
-                        className="b01-rowLink"
-                        disabled={handoffBusy}
+                      {/* Styled to match the "KB SOP" NextStageButton —
+                          AntD primary button (US Pharma red gradient) with
+                          the icon at the end. */}
+                      <Button
+                        type="primary"
+                        loading={handoffBusy}
                         onClick={() => askInChat(cleaned, bulletIncident)}
+                        icon={<MessageOutlined />}
+                        iconPosition="end"
                         aria-label={`Discuss ${bulletIncident || "this match"} with LogIQ`}
-                        style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
                       >
                         Discuss with LogIQ
-                        <ExportOutlined aria-hidden="true" style={{ fontSize: 12 }} />
-                      </button>
+                      </Button>
                     </Tooltip>
                   ) : null}
                 </li>
@@ -475,7 +497,7 @@ export default function Stage0BestTicketDistillation({
               fromStage="stage_0"
               onReveal={onReveal}
             />
-            <NextStageButton sessionId={sessionId} fromStage="stage_0" toStage="stage_4" label="KB SOP" onReveal={onReveal} />
+            <NextStageButton sessionId={sessionId} fromStage="stage_0" toStage="stage_4" label="Discuss Store Specific with LogIQ" onReveal={onReveal} />
           </div>
         </div>
       ) : null}

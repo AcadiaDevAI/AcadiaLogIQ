@@ -3,6 +3,7 @@ import { Button, Tooltip, Popconfirm } from "antd";
 import {
   FileOutlined,
   DeleteOutlined,
+  DownloadOutlined,
   CaretRightOutlined,
   CaretDownOutlined,
 } from "@ant-design/icons";
@@ -50,7 +51,7 @@ function DocKindBadge({ kind }) {
  * (newest first). The first entry is rendered as the visible "latest" row;
  * the rest appear when the group is expanded.
  */
-export default function VersionGroup({ versions, isAdmin, onDelete }) {
+export default function VersionGroup({ versions, isAdmin, onDelete, onDownload }) {
   const [expanded, setExpanded] = useState(false);
 
   if (!versions || versions.length === 0) return null;
@@ -69,27 +70,41 @@ export default function VersionGroup({ versions, isAdmin, onDelete }) {
     }
   };
 
-  const renderDelete = (f) =>
+  const renderActions = (f) =>
     isAdmin && (
-      <Popconfirm
-        title={`Delete "${f.name}"?`}
-        description="This will remove the file and all its indexed data."
-        onConfirm={() => onDelete(f.id, f.name)}
-        okText="Delete"
-        cancelText="Cancel"
-        okButtonProps={{ danger: true }}
-      >
-        <Tooltip title="Delete file">
-          <Button
-            type="text"
-            size="small"
-            icon={<DeleteOutlined />}
-            className="opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0"
-            style={{ color: "var(--text-muted)" }}
-            danger
-          />
-        </Tooltip>
-      </Popconfirm>
+      <div className="flex items-center gap-1 flex-shrink-0">
+        {onDownload && (
+          <Tooltip title="Download file">
+            <Button
+              type="text"
+              size="small"
+              icon={<DownloadOutlined />}
+              onClick={() => onDownload(f.id, f.name)}
+              className="opacity-0 group-hover:opacity-100 transition-opacity"
+              style={{ color: "var(--text-muted)" }}
+            />
+          </Tooltip>
+        )}
+        <Popconfirm
+          title={`Delete "${f.name}"?`}
+          description="This will remove the file and all its indexed data."
+          onConfirm={() => onDelete(f.id, f.name)}
+          okText="Delete"
+          cancelText="Cancel"
+          okButtonProps={{ danger: true }}
+        >
+          <Tooltip title="Delete file">
+            <Button
+              type="text"
+              size="small"
+              icon={<DeleteOutlined />}
+              className="opacity-0 group-hover:opacity-100 transition-opacity"
+              style={{ color: "var(--text-muted)" }}
+              danger
+            />
+          </Tooltip>
+        </Popconfirm>
+      </div>
     );
 
   return (
@@ -145,7 +160,7 @@ export default function VersionGroup({ versions, isAdmin, onDelete }) {
             </p>
           </div>
         </div>
-        <div onClick={(e) => e.stopPropagation()}>{renderDelete(latest)}</div>
+        <div onClick={(e) => e.stopPropagation()}>{renderActions(latest)}</div>
       </div>
 
       {/* Expanded version list */}
@@ -184,7 +199,7 @@ export default function VersionGroup({ versions, isAdmin, onDelete }) {
                     </p>
                   </div>
                 </div>
-                {renderDelete(f)}
+                {renderActions(f)}
               </div>
             );
           })}

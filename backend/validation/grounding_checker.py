@@ -67,6 +67,28 @@ _TICKET_ID_PATTERN = re.compile(
     r")\b"
 )
 
+# Genuine ticket / incident / change reference prefixes. The HARD
+# fabrication fail (answer replacement) fires ONLY for these. The shape
+# above also matches NETWORK DEVICE HOSTNAMES and CIRCUIT IDs
+# (e.g. RTR-TN-3001, FW-TN-3001, LTE-TN-3001, VER-TN-3001, FRO-TN-3001-FIB01)
+# which are legitimate CONFIG identifiers, not authoritative ticket
+# pointers — flagging them nuked correct store-config / network answers.
+# Restricting the hard fail to real ticket prefixes keeps the original
+# protection (invented INC-/CHG-/TKT- refs) while ending the false
+# positives on device names.
+_TICKET_ID_PREFIXES = frozenset({
+    "INC", "CHG", "TKT", "REQ", "PRB", "PROB", "TASK", "SR",
+    "CASE", "RITM", "CR", "WO", "TICKET",
+})
+
+
+def _is_real_ticket_ref(token: str) -> bool:
+    """True only when the identifier's leading alpha segment is a known
+    ticket/incident/change prefix. Excludes device hostnames / circuit ids
+    (RTR-, FW-, LTE-, VER-, FRO-, SW-, AP-, …)."""
+    m = re.match(r"^([A-Z]+)", token or "")
+    return bool(m and m.group(1) in _TICKET_ID_PREFIXES)
+
 
 # ---------------------------------------------------------------------------
 # Specifics-fabrication detector (soft signal — reduces grounding score
@@ -207,6 +229,12 @@ def check_grounding(
         context_matches = set(pattern.findall(doc_context or ""))
 
         fabricated = answer_matches - context_matches
+        if pattern is _TICKET_ID_PATTERN:
+            # Only genuine ticket/incident references are hard fabrications;
+            # network device hostnames / circuit ids that share the shape
+            # (RTR-TN-3001, FW-TN-3001, VER-TN-3001, FRO-TN-3001-FIB01) are
+            # config identifiers and must not replace the answer.
+            fabricated = {f for f in fabricated if _is_real_ticket_ref(f)}
         for fab in fabricated:
             result.fabrications.append(f"Fabricated {label}: {fab}")
             result.issues.append(f"Answer contains {label} '{fab}' not found in source documents")

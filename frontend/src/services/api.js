@@ -242,6 +242,10 @@ export const uploadFileV2 = async (file, fileType, onProgress, docKind) => {
 
 export const listFiles = () => api.get("/files");
 export const deleteFile = (fileId) => api.delete(`/files/${fileId}`);
+// Admin-only original-file download. Returns the raw bytes as a Blob so the
+// caller can trigger a browser save (the backend gates this on org admin).
+export const downloadFile = (fileId) =>
+  api.get(`/files/${fileId}/download`, { responseType: "blob" });
 
 // askQuestion(question, sessionId, clarificationResponse, options)
 //
