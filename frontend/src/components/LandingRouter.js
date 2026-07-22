@@ -10,6 +10,7 @@ import LandingPage from "./LandingPage";
 import Tier1AnswerCard from "./Tier1Copilot/Tier1AnswerCard";
 import Tier1FollowupChips from "./Tier1Copilot/Tier1FollowupChips";
 import { analyzeAlert } from "./Tier1Copilot/tier1Api";
+import StoreIdDialog from "../orgs/uspharma/StoreIdDialog";
 
 // Suspense fallback while an org's lazy module chunk loads.
 const OrgModuleFallback = (
@@ -48,11 +49,13 @@ export default function LandingRouter({
   // lazy — rendered inside <Suspense> below.
   const { activeOrg } = useOrg();
   const { IntakeForm, Workspace } = useOrgModule(activeOrg?.slug);
-  // US Pharma — KB SOP quick-action opens a general chat over ALL files
-  // (no store scope at the landing/entry stage). Gated so only US Pharma
-  // shows the pill; other orgs pass undefined and the pill hides itself.
+  // US Pharma — "Discuss Store Specific with LogIQ" now opens a small
+  // Store-ID dialog; entering a Store ID pre-creates a store-scoped chat
+  // (POST /chat/sessions/store-scoped) and opens it empty. Gated so only US
+  // Pharma shows the pill/tile; other orgs pass undefined and it hides itself.
+  const [storeDlgOpen, setStoreDlgOpen] = useState(false);
   const onOpenKbSop = isUSPharma(activeOrg?.slug)
-    ? () => dispatch({ type: "NEW_CHAT", payload: { kbSearchFromLanding: true } })
+    ? () => setStoreDlgOpen(true)
     : undefined;
   // Default landing is the LandingPage entry-tile view ("Resolve
   // incidents like your best engineer on her best day."). Picking
@@ -293,18 +296,22 @@ export default function LandingRouter({
   }
 
   return (
-    <LandingPage
-      onOpenRca={onOpenRca}
-      onOpenGapAnalysis={onOpenGapAnalysis}
-      onOpenEscalationProcedure={onOpenEscalationProcedure}
-      onOpenTicketFilter={onOpenTicketFilter}
-      onOpenServiceNow={onOpenServiceNow}
-      onOpenKbSop={onOpenKbSop}
-      // Picking "Proactive / Reactive" on the entry-tile view +
-      // clicking Continue switches this router to its Tier1IntakeForm
-      // screen, where the engineer chooses proactive alert vs.
-      // reactive channel intake.
-      onProactiveReactive={goToTier1}
-    />
+    <>
+      <LandingPage
+        onOpenRca={onOpenRca}
+        onOpenGapAnalysis={onOpenGapAnalysis}
+        onOpenEscalationProcedure={onOpenEscalationProcedure}
+        onOpenTicketFilter={onOpenTicketFilter}
+        onOpenServiceNow={onOpenServiceNow}
+        onOpenKbSop={onOpenKbSop}
+        // Picking "Proactive / Reactive" on the entry-tile view +
+        // clicking Continue switches this router to its Tier1IntakeForm
+        // screen, where the engineer chooses proactive alert vs.
+        // reactive channel intake.
+        onProactiveReactive={goToTier1}
+      />
+      {/* US Pharma — Store-ID dialog for "Discuss Store Specific with LogIQ". */}
+      <StoreIdDialog open={storeDlgOpen} onClose={() => setStoreDlgOpen(false)} />
+    </>
   );
 }

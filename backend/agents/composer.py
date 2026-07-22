@@ -686,6 +686,22 @@ FINAL ANSWER:"""
                 _prev_max, _composer_max_tokens,
             )
 
+    # US Pharma (org profile) — lift the composer output cap so full-record KB
+    # answers (escalation matrices, contact/vendor tables) don't truncate
+    # mid-list. Only ever RAISES the cap; invoke_llm still bounds the result by
+    # budget.remaining, so this never over-spends. Acadia (override=0) unchanged.
+    try:
+        from backend.orgs.context import resolve_current_profile
+        _org_out_cap = int(getattr(resolve_current_profile(), "answer_max_output_tokens", 0) or 0)
+    except Exception:
+        _org_out_cap = 0
+    if _org_out_cap > _composer_max_tokens:
+        logger.info(
+            "[composer_output_cap] org override: %d -> %d",
+            _composer_max_tokens, _org_out_cap,
+        )
+        _composer_max_tokens = _org_out_cap
+
     logger.info(
         "[resp_class] composer class=analytical max_tokens=%d", _composer_max_tokens,
     )

@@ -64,6 +64,19 @@ const initialState = {
   // ChatArea shows a "Back to screen" button while it's set so the engineer
   // can return to the landing screen. Journey Stage 4 chats never set it.
   kbSearchFromLanding: false,
+
+  // US Pharma — the Store ID a landing/intake "Discuss Store Specific with
+  // LogIQ" chat is scoped to (set alongside a pre-created store-scoped
+  // session via NEW_CHAT payload.scopeStoreId). Drives the ChatArea banner
+  // label so the engineer sees which store the chat is restricted to. Null
+  // for every non-store-scoped chat.
+  kbScopeStoreId: null,
+
+  // True for any freshly-opened chat (NEW_CHAT — e.g. the sidebar "New Chat"
+  // button), so ChatArea shows a "Back to screen" button that returns the
+  // user to the landing screen. Cleared when a history session is loaded
+  // (SET_SESSION) so old chats don't show it. All orgs.
+  backToScreen: false,
 };
 
 function reducer(state, action) {
@@ -126,6 +139,9 @@ function reducer(state, action) {
         // Loading a specific chat from history is never the landing KB SOP
         // chat — clear the flag so its "Back to screen" button doesn't leak.
         kbSearchFromLanding: false,
+        kbScopeStoreId: null,
+        // A loaded history session is not a fresh New Chat → no back button.
+        backToScreen: false,
       };
 
     case "NEW_CHAT":
@@ -145,7 +161,12 @@ function reducer(state, action) {
       //      via SET_SESSION cleanly.
       return {
         ...state,
-        sessionId: null,
+        // US Pharma — the "Discuss Store Specific with LogIQ" dialog
+        // pre-creates a store-scoped session server-side and passes its id
+        // here so the FIRST /ask already runs against that scoped session.
+        // A plain "New Chat" sends no payload → null (fresh session on first
+        // /ask, unchanged behavior).
+        sessionId: (action.payload && action.payload.sessionId) || null,
         messages: [],
         selectedMode: "troubleshooting",
         subMode: null,
@@ -164,6 +185,12 @@ function reducer(state, action) {
         // (dispatch NEW_CHAT with payload.kbSearchFromLanding). A plain
         // "New Chat" click sends no payload, so the flag clears.
         kbSearchFromLanding: !!(action.payload && action.payload.kbSearchFromLanding),
+        // US Pharma — Store ID this chat is scoped to (from the Store-ID
+        // dialog). Null for a plain New Chat.
+        kbScopeStoreId: (action.payload && action.payload.scopeStoreId) || null,
+        // Any New Chat (incl. the sidebar "New Chat") shows a "Back to
+        // screen" button so the user can return to the landing screen.
+        backToScreen: true,
       };
 
     // US Pharma — leave the landing-opened KB SOP chat and return to the
@@ -177,6 +204,8 @@ function reducer(state, action) {
         subMode: null,
         conversationContextActive: false,
         kbSearchFromLanding: false,
+        kbScopeStoreId: null,
+        backToScreen: false,
         sessionId: null,
         messages: [],
         pendingContextBreak: null,
@@ -326,6 +355,8 @@ function reducer(state, action) {
         formData: null,
         pendingContextBreak: null,
         kbSearchFromLanding: false,
+        kbScopeStoreId: null,
+        backToScreen: false,
       };
 
     // ── Sprint 2 ──────────────────────────────────────

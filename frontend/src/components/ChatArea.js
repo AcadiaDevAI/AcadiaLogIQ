@@ -254,7 +254,7 @@ export default function ChatArea() {
           A "Back to screen" button returns the engineer to the landing
           screen. Journey Stage 4 chats don't set this flag, so they never
           show it. */}
-      {state.kbSearchFromLanding && (
+      {(state.kbSearchFromLanding || state.backToScreen) && (
         <div
           className="px-4 py-2 border-b flex items-center justify-between"
           style={{
@@ -264,7 +264,11 @@ export default function ChatArea() {
           }}
         >
           <span className="text-xs t-text-muted">
-            Knowledge Base &amp; SOP search — all files
+            {state.kbScopeStoreId
+              ? `Store ${state.kbScopeStoreId} — store-scoped chat`
+              : state.kbSearchFromLanding
+              ? "Knowledge Base & SOP search — all files"
+              : "New chat"}
           </span>
           <Button
             size="small"

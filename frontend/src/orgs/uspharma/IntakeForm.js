@@ -7,6 +7,7 @@ import UniversalIntakePanel from "../../components/Tier1Copilot/intake/Universal
 import QuickActionsBar from "../../components/QuickActionsBar";
 import { useChat } from "../../hooks/ChatContext";
 import { USP_RED, uspRedAlpha } from "./theme/palette";
+import StoreIdDialog from "./StoreIdDialog";
 
 /**
  * US Pharma intake — Store ID + symptom.
@@ -27,13 +28,14 @@ import { USP_RED, uspRedAlpha } from "./theme/palette";
 export default function USPharmaIntakeForm(props) {
   const [prefill, setPrefill] = useState(null);
   const [activeTab, setActiveTab] = useState("proactive");
+  const [storeDlgOpen, setStoreDlgOpen] = useState(false);
   const { dispatch } = useChat();
 
-  // KB SOP on the intake screen — no Store ID entered yet, so this opens a
-  // fresh general chat that searches EVERYTHING (all JSON + all files),
-  // unscoped. NEW_CHAT flips the app to a blank troubleshooting chat.
-  const handleOpenKbSop = () =>
-    dispatch({ type: "NEW_CHAT", payload: { kbSearchFromLanding: true } });
+  // "Discuss Store Specific with LogIQ" on the intake screen — opens the
+  // Store-ID dialog; entering a Store ID pre-creates a store-scoped chat and
+  // opens it empty (see StoreIdDialog). Replaces the previous unscoped
+  // all-files chat.
+  const handleOpenKbSop = () => setStoreDlgOpen(true);
 
   const handleCardPicked = (filled) => {
     // Reactive → Proactive handoff. We can only reliably pre-fill the symptom
@@ -44,6 +46,8 @@ export default function USPharmaIntakeForm(props) {
 
   return (
     <div className="flex-1 overflow-y-auto px-2 py-4 t-bg-primary">
+      {/* US Pharma — Store-ID dialog for "Discuss Store Specific with LogIQ". */}
+      <StoreIdDialog open={storeDlgOpen} onClose={() => setStoreDlgOpen(false)} />
       <div className="w-full" style={{ maxWidth: 1400, margin: "0 auto" }}>
         <QuickActionsBar
           onOpenRca={props.onOpenRca}

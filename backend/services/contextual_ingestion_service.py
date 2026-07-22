@@ -1845,40 +1845,61 @@ def _ingest_store_config_array(
 
 
 # ---------------------------------------------------------------------------
-# US Pharma KB envelope (doc_class = "knowledge_base") — the signed KB
-# export. Shape:
-#     { "doc_class": "knowledge_base", "schema": "usp.store_kb.v1",
-#       "org": "us-pharma", "records": [ [ <store bundle> ], ... ] }
-#
-# `records` is an ARRAY OF ARRAYS: one sub-array ("bundle") per store. The
-# store id lives on the bundle element that carries a `site` object
-# (site.store_id, an integer). This differs from the flat StoreConfigSchema
-# (top-level store_id per record), so it needs its own reader.
+# US Pharma KB envelope (doc_class = "knowledge_base") — the signed KB export.
+# Shape-agnostic: BOTH of these ingest identically —
+#   V2   "records": [ [ {site...}, {Application...}, ... ], ... ]  (list/store)
+#   V3+  "records": [ { "site": {...}, "Store_X_wan": {...}, ... }, ... ]  (obj/store)
 #
 # US-Pharma-ONLY by construction: detection is gated on the explicit
-# doc_class signature, which only US Pharma's KB exports emit — Acadia
-# uploads never match, so their ingestion path is untouched.
+# doc_class="knowledge_base" signature, which only US Pharma's KB exports
+# emit — Acadia uploads never match, so their ingestion path is untouched.
 #
-# Emits ONE chunk per store, stamped with a nested Metadata.store_id — the
-# exact path store-scoped KB retrieval (retrieve_within_store, migration
-# 065) and the tier-1 store filter query. Identical chunk shape to
-# _ingest_store_config_array so retrieval behaves the same.
+# Chunking is a RECURSIVE, SIZE-BOUNDED, STRUCTURE-AWARE walk (handles any of
+# the 6 JSON types at any nesting depth). Guarantees:
+#   * No embedding truncation — every emitted chunk serializes under
+#     _KB_CHUNK_BUDGET_CHARS (well below settings.MAX_CHARS), so the embedder
+#     encodes the WHOLE chunk. Oversized sections split along their own
+#     children rather than being cut off.
+#   * No data loss — this is PARTITIONING, not truncation: every key / element
+#     lands in exactly one chunk. Cuts happen only at JSON structural
+#     boundaries (between fields / elements), so scalars (phones, IPs, emails,
+#     circuit IDs) are never split mid-value. The lone exception — a single
+#     STRING larger than the budget — is split on safe text boundaries
+#     (paragraph > line > sentence > separator > space) with overlap, so no
+#     token is severed there either.
+#   * Store isolation — store_id is resolved once per record and stamped as
+#     Metadata.store_id on EVERY chunk, so store-scoped retrieval
+#     (retrieve_within_store, migration 065) hard-isolates a store as before.
+#   * Coverage self-check — scalar-leaf count across emitted chunks is compared
+#     to the source (must be >=, since window-split strings only ADD leaves);
+#     a shortfall is logged loudly so a silent drop can never pass unnoticed.
 # ---------------------------------------------------------------------------
 
-def _usp_kb_store_id_of_bundle(bundle: List[Any]) -> Optional[str]:
-    """Resolve the store id for one US Pharma KB store bundle.
+# Chunk budget in CHARACTERS — a CEILING, not a fixed width. Chunks are
+# variable-sized: as large as they can be while staying under budget and
+# cutting only at structure boundaries. Kept well under settings.MAX_CHARS
+# (the embedding-input cap) so header + body never approach the truncation line.
+_KB_CHUNK_BUDGET_CHARS = 4500
+# Overlap (chars) applied ONLY when a single oversized string must be windowed,
+# so no sentence/token is severed at the seam.
+_KB_STRING_OVERLAP_CHARS = 200
 
-    Primary source is the element carrying a `site` object (site.store_id);
-    falls back to a top-level store_id/Store_ID on any element. Coerced to a
-    trimmed string so it matches the TEXT store filter
-    (metadata_json->'Metadata'->>'store_id') — the source has it as an int.
-    """
+
+def _store_id_str(value: Any) -> Optional[str]:
+    """Coerce a store id (often an int in the source) to a trimmed string, or
+    None. Matches the TEXT store filter metadata_json->'Metadata'->>'store_id'."""
+    s = str(value).strip() if value is not None else ""
+    return s or None
+
+
+def _usp_kb_store_id_of_bundle(bundle: List[Any]) -> Optional[str]:
+    """Resolve the store id for a LIST-shaped store record (V2 bundle)."""
     for el in bundle:
         if isinstance(el, dict) and isinstance(el.get("site"), dict):
             site = el["site"]
-            sid = site.get("store_id") or site.get("Store_ID") or site.get("storeId")
-            if sid is not None and str(sid).strip():
-                return str(sid).strip()
+            sid = _store_id_str(site.get("store_id") or site.get("Store_ID") or site.get("storeId"))
+            if sid:
+                return sid
     for el in bundle:
         if isinstance(el, dict):
             sid = _store_id_of(el)
@@ -1887,55 +1908,165 @@ def _usp_kb_store_id_of_bundle(bundle: List[Any]) -> Optional[str]:
     return None
 
 
-def _usp_kb_bundles(data: Any) -> List[List[Dict[str, Any]]]:
-    """From a US Pharma KB envelope, return the per-store bundles.
+def _usp_kb_store_id_of_record(record: Any) -> Optional[str]:
+    """Resolve the store id for ONE store record — whether it is a LIST of
+    section objects (V2) or a single OBJECT whose keys are sections (V3+)."""
+    if isinstance(record, list):
+        return _usp_kb_store_id_of_bundle(record)
+    if isinstance(record, dict):
+        site = record.get("site")
+        if isinstance(site, dict):
+            sid = _store_id_str(site.get("store_id") or site.get("Store_ID") or site.get("storeId"))
+            if sid:
+                return sid
+        sid = _store_id_of(record)
+        if sid:
+            return sid
+        for v in record.values():
+            if isinstance(v, dict) and isinstance(v.get("site"), dict):
+                sid = _store_id_str(v["site"].get("store_id"))
+                if sid:
+                    return sid
+    return None
 
-    `records` is an array of arrays (one sub-array per store). A dict element
-    is tolerated and wrapped as a single-element bundle so a flattened future
-    variant still ingests. Non-list/non-dict entries are ignored.
-    """
+
+def _usp_kb_records(data: Any) -> List[Any]:
+    """Return the per-store records (each a dict OR a list) from a KB envelope.
+    Non-dict/list entries are ignored; empties dropped."""
     if not isinstance(data, dict):
         return []
     records = data.get("records")
     if not isinstance(records, list):
         return []
-    bundles: List[List[Dict[str, Any]]] = []
+    out: List[Any] = []
     for rec in records:
-        if isinstance(rec, list):
-            bundle = [d for d in rec if isinstance(d, dict)]
-        elif isinstance(rec, dict):
-            bundle = [rec]
-        else:
-            continue
-        if bundle:
-            bundles.append(bundle)
-    return bundles
+        if isinstance(rec, dict) and rec:
+            out.append(rec)
+        elif isinstance(rec, list):
+            kept = [d for d in rec if isinstance(d, dict)]
+            if kept:
+                out.append(kept)
+    return out
 
 
 def _usp_kb_element_label(el: Dict[str, Any]) -> str:
-    """Human/embedding-friendly label for one element of a store bundle.
-
-    Drives the chunk header + section_heading so component-specific queries
-    ("Managed Services Escalation Matrix for store 3000") embed and retrieve
-    against the exact section rather than a 96 KB whole-store blob.
-    """
+    """Readable breadcrumb label for one dict element (used when splitting an
+    array of objects — e.g. a Teams[] or Vendors[] list)."""
     if isinstance(el.get("site"), dict):
         return "Site Profile & Network Configuration"
-    for key in ("Application", "Component"):
+    for key in ("Application", "Component", "Team_Name", "Vendor_Name",
+                "Infrastructure_Category", "Guide_Name"):
         v = el.get(key)
         if isinstance(v, str) and v.strip():
-            return f"{key}: {v.strip()}"
+            return v.strip()
     keys = list(el.keys())
     if keys:
-        # Single-key wrappers (Managed_Services_Escalation_Matrix,
-        # Vendor_Escalation_Matrix, Email_Templates, …) → readable label.
         return str(keys[0]).replace("_", " ").strip() or "Section"
     return "Section"
 
 
+def _kb_dumps(node: Any) -> str:
+    return json.dumps(node, indent=2, ensure_ascii=False)
+
+
+def _kb_window_string(s: str) -> List[str]:
+    """Split an oversized STRING into overlapping windows on safe boundaries
+    (paragraph > line > sentence > separator > space) so no token is severed.
+    Lossless: the windows fully cover the source (with small overlaps)."""
+    budget = _KB_CHUNK_BUDGET_CHARS
+    overlap = _KB_STRING_OVERLAP_CHARS
+    if len(s) <= budget:
+        return [s]
+    out: List[str] = []
+    start, n = 0, len(s)
+    while start < n:
+        end = min(start + budget, n)
+        if end < n:
+            window = s[start:end]
+            for sep in ("\n\n", "\n", ". ", "; ", ", ", " "):
+                pos = window.rfind(sep)
+                if pos > int(budget * 0.5):  # only backtrack to a boundary reasonably far in
+                    end = start + pos + len(sep)
+                    break
+        out.append(s[start:end])
+        if end >= n:
+            break
+        start = max(end - overlap, start + 1)
+    return out
+
+
+def _kb_walk(node: Any, path: List[str]):
+    """Recursively PARTITION `node` into (path, fragment) pieces each
+    serializing <= _KB_CHUNK_BUDGET_CHARS. Objects split by key, arrays by
+    element; small siblings are packed together, big children recursed into.
+    A value is only ever cut internally for a single oversized STRING (safe
+    windows). Yields (path_list, fragment)."""
+    if len(_kb_dumps(node)) <= _KB_CHUNK_BUDGET_CHARS:
+        yield (path, node)
+        return
+
+    if isinstance(node, dict):
+        pack: Dict[str, Any] = {}
+        pack_len = 0
+        for k, v in node.items():
+            vlen = len(_kb_dumps(v))
+            if vlen > _KB_CHUNK_BUDGET_CHARS:
+                if pack:
+                    yield (path, pack)
+                    pack, pack_len = {}, 0
+                yield from _kb_walk(v, path + [str(k)])
+            else:
+                if pack and pack_len + vlen > _KB_CHUNK_BUDGET_CHARS:
+                    yield (path, pack)
+                    pack, pack_len = {}, 0
+                pack[k] = v
+                pack_len += vlen
+        if pack:
+            yield (path, pack)
+        return
+
+    if isinstance(node, list):
+        lpack: List[Any] = []
+        lpack_len = 0
+        for i, v in enumerate(node):
+            vlen = len(_kb_dumps(v))
+            if vlen > _KB_CHUNK_BUDGET_CHARS:
+                if lpack:
+                    yield (path, lpack)
+                    lpack, lpack_len = [], 0
+                label = _usp_kb_element_label(v) if isinstance(v, dict) else f"[{i}]"
+                yield from _kb_walk(v, path + [label])
+            else:
+                if lpack and lpack_len + vlen > _KB_CHUNK_BUDGET_CHARS:
+                    yield (path, lpack)
+                    lpack, lpack_len = [], 0
+                lpack.append(v)
+                lpack_len += vlen
+        if lpack:
+            yield (path, lpack)
+        return
+
+    # Oversized scalar — only a string can exceed the budget. Window-split it.
+    if isinstance(node, str):
+        for piece in _kb_window_string(node):
+            yield (path, piece)
+    else:
+        yield (path, node)
+
+
+def _kb_leaf_count(node: Any) -> int:
+    """Count scalar leaves — the integrity signal for the coverage self-check.
+    Empty containers count as one presence so source/emitted totals align."""
+    if isinstance(node, dict):
+        return sum(_kb_leaf_count(v) for v in node.values()) if node else 1
+    if isinstance(node, list):
+        return sum(_kb_leaf_count(v) for v in node) if node else 1
+    return 1
+
+
 def _is_usp_kb_envelope(file_bytes: bytes) -> bool:
     """True only for the US Pharma KB envelope: a root object declaring
-    doc_class == "knowledge_base" that yields at least one store bundle.
+    doc_class == "knowledge_base" that yields at least one store record.
     This signature is emitted only by US Pharma's KB exports, so the schema
     is US-Pharma-scoped by construction."""
     try:
@@ -1946,7 +2077,7 @@ def _is_usp_kb_envelope(file_bytes: bytes) -> bool:
         return False
     if str(data.get("doc_class") or "").strip().lower() != "knowledge_base":
         return False
-    return len(_usp_kb_bundles(data)) > 0
+    return len(_usp_kb_records(data)) > 0
 
 
 def _ingest_usp_kb_envelope(
@@ -1959,14 +2090,15 @@ def _ingest_usp_kb_envelope(
     exact_duplicate_lookup,
     version_candidate_lookup,
 ) -> Dict[str, Any]:
-    """One-chunk-per-STORE ingestion for the US Pharma KB envelope.
+    """Recursive, size-bounded, structure-aware ingestion for the US Pharma
+    KB envelope (any of V2's list-per-store or V3+'s object-per-store shapes).
 
-    Each store's sub-array is embedded verbatim into a single chunk stamped
-    with a nested Metadata.store_id. Mirrors _ingest_store_config_array's
-    return shape so the upload pipeline (embed → BM25 → insert) is unchanged.
-    Oversized bundles are safe: the embedding step truncates its input at
-    settings.MAX_CHARS while the full content is preserved for BM25/keyword
-    retrieval and LLM context.
+    Each store record is PARTITIONED (not truncated) into chunks that each
+    serialize under _KB_CHUNK_BUDGET_CHARS, so every chunk embeds completely
+    and no section is lost past the embedding cutoff. Cuts land only at JSON
+    structure boundaries (scalars stay whole); every chunk carries the same
+    Metadata.store_id. Mirrors _ingest_store_config_array's return shape so the
+    upload pipeline (embed → BM25 → insert) is unchanged.
     """
     exact = None
     if settings.ENABLE_DUPLICATE_CHECK:
@@ -1996,53 +2128,54 @@ def _ingest_usp_kb_envelope(
     except Exception as exc:
         raise RuntimeError(f"US Pharma KB envelope re-parse failed: {exc}")
 
-    bundles = _usp_kb_bundles(data)
+    records = _usp_kb_records(data)
     enriched_rows: List[Dict[str, Any]] = []
     seen_stores: set = set()
     idx = 0
 
-    for bundle in bundles:
-        store_id = _usp_kb_store_id_of_bundle(bundle)
+    for record in records:
+        store_id = _usp_kb_store_id_of_record(record)
         if not store_id:
             # No resolvable store id → can't be isolated; skip rather than
             # emit an untagged chunk that store-scoped retrieval can't reach.
-            logger.warning("[ingest] USP KB: store bundle without store_id — skipped")
+            logger.warning("[ingest] USP KB: store record without store_id — skipped")
             continue
         if store_id in seen_stores:
-            # The source occasionally repeats a store bundle verbatim; keep
-            # the first, skip the rest so retrieval isn't served duplicates.
+            # The source occasionally repeats a store verbatim; keep the
+            # first, skip the rest so retrieval isn't served duplicates.
             logger.info("[ingest] USP KB: duplicate store %s — skipped", store_id)
             continue
         seen_stores.add(store_id)
 
-        # ONE CHUNK PER TOP-LEVEL OBJECT in the store bundle (site, each
-        # application/component, and each matrix/template) — NOT one blob per
-        # store. Rationale: a whole-store bundle is ~96 KB, but the embedding
-        # step encodes only settings.MAX_CHARS (~8 KB); sections past that
-        # (e.g. Managed_Services_Escalation_Matrix at ~char 88 K) become
-        # invisible to vector search and get truncated out of the LLM prompt.
-        # Splitting per object makes each ~2-8 KB section fully embeddable and
-        # individually retrievable — while every chunk still carries the same
-        # Metadata.store_id, so store-scoped retrieval hard-isolation is
-        # unchanged.
-        for el in bundle:
-            label = _usp_kb_element_label(el)
-            header = f"STORE {store_id} — {label}"
-            body = json.dumps(el, indent=2, ensure_ascii=False)
+        # RECURSIVE, SIZE-BOUNDED partition of the WHOLE store record (any
+        # shape). Each emitted fragment serializes under _KB_CHUNK_BUDGET_CHARS
+        # so it embeds completely (no truncation), and cuts land only at JSON
+        # structure boundaries (no scalar is split mid-value). Every chunk
+        # carries the same Metadata.store_id, so store-scoped retrieval
+        # hard-isolation is unchanged. The `path` breadcrumb preserves meaning
+        # for split-off sub-sections (heading + citation).
+        src_leaves = _kb_leaf_count(record)
+        emitted_leaves = 0
+        store_chunks = 0
+        for path, fragment in _kb_walk(record, []):
+            breadcrumb = " > ".join(path) if path else "Overview"
+            header = f"STORE {store_id} — {breadcrumb}"
+            body = fragment if isinstance(fragment, str) else _kb_dumps(fragment)
             content = f"{header}\n\n{body}"
-            section_heading = f"Store {store_id} — {label}"
+            section_heading = f"Store {store_id} — {breadcrumb}"
+            emitted_leaves += 1 if isinstance(fragment, str) else _kb_leaf_count(fragment)
 
             row_metadata_json = {
                 "primary_id": store_id,
                 "id_type": "store_id",
                 "doc_kind": "kb",
-                # Nested Metadata.store_id — the exact path store filters
-                # query (metadata_json->'Metadata'->>'store_id'); mirrors the
-                # ticket + store-config shapes so all store corpora hard-scope
-                # identically.
+                # Nested Metadata.store_id — the exact path store filters query
+                # (metadata_json->'Metadata'->>'store_id'); mirrors the ticket +
+                # store-config shapes so all store corpora hard-scope identically.
                 "Metadata": {"store_id": store_id},
                 "store_id": store_id,
-                "component": label,
+                "component": breadcrumb,
+                "section_path": list(path),
                 "title": filename,
                 "source_type": file_type,
                 "document_type": "Store Configuration",
@@ -2078,10 +2211,25 @@ def _ingest_usp_kb_envelope(
                 }
             )
             idx += 1
+            store_chunks += 1
+
+        # Coverage self-check — partitioning must never drop a subtree. Emitted
+        # leaves should be >= source leaves (window-split strings only ADD).
+        if emitted_leaves < src_leaves:
+            logger.warning(
+                "[ingest] USP KB COVERAGE SHORTFALL store=%s source_leaves=%d "
+                "emitted_leaves=%d — possible data drop, investigate",
+                store_id, src_leaves, emitted_leaves,
+            )
+        logger.info(
+            "[ingest] USP KB store=%s -> %d chunk(s) (leaves src=%d emitted=%d)",
+            store_id, store_chunks, src_leaves, emitted_leaves,
+        )
 
     logger.info(
-        "[ingest] structured fast-path: %d store(s), schema=USPharmaKBEnvelopeSchema",
-        len(enriched_rows),
+        "[ingest] structured fast-path: %d chunk(s) across %d store(s), "
+        "schema=USPharmaKBEnvelopeSchema",
+        len(enriched_rows), len(seen_stores),
     )
 
     doc_metadata = {
@@ -2097,7 +2245,7 @@ def _ingest_usp_kb_envelope(
         "created_date": None,
         "section_count": len(enriched_rows),
         "chunk_count": len(enriched_rows),
-        "metadata_version": "usp-kb-envelope-v1",
+        "metadata_version": "usp-kb-envelope-v2-recursive",
         "extracted_at": datetime.now(timezone.utc).isoformat(),
         "metadata_json": {
             "title": filename,
@@ -2109,6 +2257,209 @@ def _ingest_usp_kb_envelope(
             "document_date": None,
             "effective_date": None,
             "created_date": None,
+            "glossary": {},
+            "doc_kind": "kb",
+        },
+    }
+
+    candidates = version_candidate_lookup(
+        owner_id=owner_id,
+        normalized_name=normalize_filename(filename),
+        title=filename,
+    )
+    version_decision = decide_version(
+        filename=filename,
+        owner_id=owner_id,
+        preliminary_doc_metadata={
+            "title": filename,
+            "version": None,
+            "document_date": None,
+            "effective_date": None,
+            "created_date": None,
+        },
+        candidates=candidates,
+    )
+
+    return {
+        "status": "ready",
+        "document_metadata": doc_metadata,
+        "version_decision": version_decision,
+        "chunk_rows": enriched_rows,
+        "doc_kind": "kb",
+    }
+
+
+# ---------------------------------------------------------------------------
+# US Pharma — recursive chunking for ARBITRARY JSON (no envelope required).
+# When the org profile sets json_recursive_chunking=True, any JSON not already
+# claimed by the specific schemas (KB-envelope / ticket / contact) is ingested
+# with the SAME recursive, size-bounded, lossless walker as the KB envelope —
+# so raw escalation / config JSON of ANY structure embeds fully (no truncation,
+# no data loss). Gated on the org profile, so Acadia's ingestion is unchanged.
+# ---------------------------------------------------------------------------
+
+def _usp_json_recursive_enabled() -> bool:
+    """True only when the current org profile opts into recursive JSON
+    chunking (US Pharma). Resolved from the request/job org context; any
+    failure → False so the shared path is used (Acadia-safe)."""
+    try:
+        from backend.orgs.context import resolve_current_profile
+        return bool(getattr(resolve_current_profile(), "json_recursive_chunking", False))
+    except Exception:
+        return False
+
+
+def _is_usp_recursive_json(file_bytes: bytes) -> bool:
+    """Fire for US Pharma on any structurally-usable JSON (a non-empty object,
+    or a list containing objects/lists). Specific schemas registered ahead of
+    this one (KB-envelope / contact / ticket) still win for their formats."""
+    if not _usp_json_recursive_enabled():
+        return False
+    try:
+        data = json.loads(file_bytes.decode("utf-8", errors="replace"))
+    except Exception:
+        return False
+    if isinstance(data, dict):
+        return bool(data)
+    if isinstance(data, list):
+        return any(isinstance(x, (dict, list)) for x in data)
+    return False
+
+
+def _ingest_usp_json_recursive(
+    *,
+    file_bytes: bytes,
+    filename: str,
+    file_type: str,
+    owner_id: str,
+    fingerprint: str,
+    exact_duplicate_lookup,
+    version_candidate_lookup,
+) -> Dict[str, Any]:
+    """US Pharma — recursive, size-bounded, LOSSLESS ingestion for arbitrary
+    JSON (any of the 6 types / any nesting). Chunks the whole document with
+    path breadcrumbs; stamps Metadata.store_id when the doc declares one so
+    store-scoped chats can still hard-isolate it, otherwise emits store-agnostic
+    KB chunks searchable in general chat. doc_kind='kb'."""
+    exact = None
+    if settings.ENABLE_DUPLICATE_CHECK:
+        exact = exact_duplicate_lookup(owner_id=owner_id, fingerprint=fingerprint)
+    if exact:
+        return {
+            "status": "exact_duplicate",
+            "document_metadata": {},
+            "version_decision": {
+                "decision": "exact_duplicate",
+                "matched_document_id": exact["document_id"],
+                "reason": "same fingerprint already exists",
+                "confidence": 1.0,
+                "normalized_name": exact.get("normalized_name") or normalize_filename(filename),
+                "version_family_key": exact.get("version_family_key") or normalize_filename(filename),
+                "version_label": exact.get("version_label"),
+                "version_rank": float(exact.get("version_rank") or 0.0),
+                "document_date": exact.get("document_date"),
+                "effective_date": exact.get("effective_date"),
+                "created_date": exact.get("created_date"),
+            },
+            "chunk_rows": [],
+        }
+
+    try:
+        data = json.loads(file_bytes.decode("utf-8", errors="replace"))
+    except Exception as exc:
+        raise RuntimeError(f"US Pharma recursive-JSON re-parse failed: {exc}")
+
+    base_label = (filename.rsplit(".", 1)[0] or "document").strip() or "document"
+    store_id = _usp_kb_store_id_of_record(data) if isinstance(data, (dict, list)) else None
+
+    src_leaves = _kb_leaf_count(data)
+    emitted_leaves = 0
+    enriched_rows: List[Dict[str, Any]] = []
+    idx = 0
+
+    for path, fragment in _kb_walk(data, [base_label]):
+        breadcrumb = " > ".join(path) if path else base_label
+        body = fragment if isinstance(fragment, str) else _kb_dumps(fragment)
+        content = f"{breadcrumb}\n\n{body}"
+        emitted_leaves += 1 if isinstance(fragment, str) else _kb_leaf_count(fragment)
+
+        row_metadata_json = {
+            "doc_kind": "kb",
+            "title": filename,
+            "source_type": file_type,
+            "document_type": "Knowledge Base",
+            "component": breadcrumb,
+            "section_path": list(path),
+            "operational_context": "knowledge_base",
+            "vendor": None,
+            "product": None,
+            "domain": None,
+            "version": None,
+            "document_date": None,
+            "effective_date": None,
+            "created_date": None,
+            "purpose_description": None,
+        }
+        if store_id:
+            row_metadata_json["Metadata"] = {"store_id": store_id}
+            row_metadata_json["store_id"] = store_id
+            row_metadata_json["primary_id"] = store_id
+            row_metadata_json["id_type"] = "store_id"
+
+        enriched_rows.append(
+            {
+                "chunk_index": idx,
+                "content": content,
+                "contextualized_content": content,
+                "summary": None,
+                "section_heading": breadcrumb,
+                # store_config when a store id is present (so store-scoped
+                # ranking treats it as config); plain kb otherwise.
+                "chunk_type": "store_config" if store_id else "kb",
+                "page_number": None,
+                "token_estimate": max(1, len(content) // 4),
+                "source_order": idx,
+                "labels_json": {
+                    "tags": ["kb", "json_recursive"],
+                    "entities": [store_id] if store_id else [],
+                    "keywords": [],
+                    "operational_context": "knowledge_base",
+                },
+                "metadata_json": row_metadata_json,
+            }
+        )
+        idx += 1
+
+    if emitted_leaves < src_leaves:
+        logger.warning(
+            "[ingest] USP recursive-JSON COVERAGE SHORTFALL file=%s source_leaves=%d "
+            "emitted_leaves=%d — possible data drop, investigate",
+            filename, src_leaves, emitted_leaves,
+        )
+    logger.info(
+        "[ingest] structured fast-path: %d chunk(s) (leaves src=%d emitted=%d), "
+        "schema=USPharmaRecursiveJsonSchema store_id=%s",
+        len(enriched_rows), src_leaves, emitted_leaves, store_id,
+    )
+
+    doc_metadata = {
+        "title": filename,
+        "document_type": "Knowledge Base",
+        "file_type": "kb",
+        "vendor": None,
+        "product": None,
+        "domain": None,
+        "version_label": None,
+        "document_date": None,
+        "effective_date": None,
+        "created_date": None,
+        "section_count": len(enriched_rows),
+        "chunk_count": len(enriched_rows),
+        "metadata_version": "usp-json-recursive-v1",
+        "extracted_at": datetime.now(timezone.utc).isoformat(),
+        "metadata_json": {
+            "title": filename,
+            "document_type": "Knowledge Base",
             "glossary": {},
             "doc_kind": "kb",
         },
@@ -2252,10 +2603,30 @@ class USPharmaKBEnvelopeSchema:
         return _ingest_usp_kb_envelope(**kwargs)
 
 
+class USPharmaRecursiveJsonSchema:
+    """US Pharma — recursive, lossless chunking for ARBITRARY JSON (gated on
+    the org profile's json_recursive_chunking flag). Registered AFTER the
+    specific schemas (KB-envelope / contact / ticket) so those formats keep
+    their handling, but BEFORE StoreConfig/Generic so any other US Pharma JSON
+    (e.g. raw escalation matrices) is chunked recursively instead of falling to
+    one-chunk-per-record / text. Never fires for other orgs (profile gate)."""
+
+    name = "USPharmaRecursiveJsonSchema"
+
+    @staticmethod
+    def detect(file_bytes: bytes) -> bool:
+        return _is_usp_recursive_json(file_bytes)
+
+    @staticmethod
+    def ingest(**kwargs) -> Dict[str, Any]:
+        return _ingest_usp_json_recursive(**kwargs)
+
+
 STRUCTURED_SCHEMAS = [
     USPharmaKBEnvelopeSchema,
     ContactSchema,
     GoldTicketSchema,
+    USPharmaRecursiveJsonSchema,
     StoreConfigSchema,
     GenericArraySchema,
 ]

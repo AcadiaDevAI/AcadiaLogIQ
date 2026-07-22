@@ -346,6 +346,19 @@ def route_and_generate(
             _resp_class = None
             _resp_cap = settings.RESPONSE_TOKENS_DEFAULT
 
+    # US Pharma (org profile) — lift the answer output cap so full-record KB /
+    # RAG answers aren't truncated mid-list. Only ever RAISES the cap, over
+    # whatever the response-class classifier chose. Acadia (override=0)
+    # unchanged. Bounded downstream by the model's output limit.
+    try:
+        from backend.orgs.context import resolve_current_profile
+        _org_out_cap = int(getattr(resolve_current_profile(), "answer_max_output_tokens", 0) or 0)
+    except Exception:
+        _org_out_cap = 0
+    if _org_out_cap > _resp_cap:
+        logger.info("[resp_class] org output override: %d -> %d", _resp_cap, _org_out_cap)
+        _resp_cap = _org_out_cap
+
     # Step 1: Classify complexity
     complexity = classify_complexity(
         query=query,

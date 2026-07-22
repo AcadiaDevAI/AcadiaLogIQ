@@ -39,3 +39,20 @@ class USPharmaProfile(OrgProfile):
     # US Pharma tier-1 intake is Store ID + symptom; historic matches are
     # hard-scoped to that store. Store ID is mandatory.
     tier1_requires_store_id = True
+
+    # US Pharma KB answers are structured data pulls (full escalation matrices,
+    # vendor/contact tables, per-store config) where completeness matters more
+    # than brevity — the shared response-class caps (600/1200 tokens) truncate
+    # them mid-record. Lift the answer output cap so these complete. Still
+    # bounded by the agent token budget + the model's output limit, so it can't
+    # over-spend. (Acadia keeps the shared response-class caps.)
+    answer_max_output_tokens = 8000
+
+    # Ingest ANY uploaded JSON (any structure) through the recursive, lossless
+    # chunker so raw escalation / config JSON is fully searchable in chat.
+    # (Acadia keeps the generic one-chunk-per-record / text path.)
+    json_recursive_chunking = True
+
+    # Escalation Procedure = upload-then-chat (JSON + PDF), not the fixed-PDF
+    # vendor-section template. Uploading drops the engineer into the chatbot.
+    escalation_mode = "upload_chat"

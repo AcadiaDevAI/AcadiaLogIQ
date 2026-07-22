@@ -3207,6 +3207,76 @@ async def delete_all_sessions(user_id: Optional[str] = Depends(auth_dependency))
 
 
 # ─────────────────────────────────────────────────────────────
+# US Pharma — "Discuss Store Specific with LogIQ" Store-ID dialog.
+# Creates an EMPTY chat session hard-scoped to one Store ID, so the
+# landing / intake dialog can open a store-scoped chat without a
+# journey. Mirrors the Stage-4 handoff's scope mechanism
+# (chat_sessions.scope_store_id, migration 065) but with NO prefilled
+# turn — the engineer types their own question. The frontend only calls
+# this for US Pharma (isUSPharma gate), so no other org surfaces it.
+# ─────────────────────────────────────────────────────────────
+class CreateStoreScopedChatRequest(BaseModel):
+    store_id: str
+
+
+@app.post("/chat/sessions/store-scoped")
+async def create_store_scoped_chat(
+    req: CreateStoreScopedChatRequest,
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    """Mint a fresh, empty chat session restricted to one Store ID.
+
+    Returns {session_id, scope_store_id}. Every /ask inside this session
+    is hard-scoped to that store's indexed content (retrieve_within_store)
+    because scope_store_id is persisted on the chat_sessions row. The
+    allowed_doc_kinds scope matches the Stage-4 KB handoff (sop/kb; US
+    Pharma folds "ticket" in at retrieval time via its org profile)."""
+    owner_id = _normalize_owner_id(user_id)
+    store_id = (req.store_id or "").strip()
+    if not store_id:
+        raise HTTPException(status_code=400, detail="store_id is required")
+
+    session_id = uuid.uuid4().hex
+    now = datetime.now(timezone.utc)
+    try:
+        from sqlalchemy import text as _ss_text
+        from backend.db.connection import engine as _ss_engine
+        with _ss_engine.begin() as _conn:
+            _conn.execute(
+                _ss_text(
+                    """
+                    INSERT INTO chat_sessions
+                        (id, owner_id, title, created_at, updated_at,
+                         scope_store_id, allowed_doc_kinds)
+                    VALUES
+                        (:id, :owner, :title, :now, :now,
+                         :store, CAST(:kinds AS JSONB))
+                    """
+                ),
+                {
+                    "id": session_id,
+                    "owner": owner_id,
+                    "title": f"Store {store_id}",
+                    "now": now,
+                    "store": store_id,
+                    "kinds": json.dumps(["sop", "kb"]),
+                },
+            )
+    except Exception as exc:
+        logger.error(
+            "[chat.store_scoped] create failed store=%s err=%s",
+            store_id, exc, exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail="failed_to_create_store_scoped_chat")
+
+    logger.info(
+        "[chat.store_scoped] created session=%s store=%s owner=%s",
+        session_id, store_id, owner_id,
+    )
+    return {"session_id": session_id, "scope_store_id": store_id}
+
+
+# ─────────────────────────────────────────────────────────────
 # Guided Workflow — session mode state endpoints (Sprint 1).
 # All three require an authenticated user and verify the session
 # belongs to that user via the existing get_chat_session pattern.

@@ -25,6 +25,7 @@ import TicketFilterFlow from "./components/TicketFilter/TicketFilterFlow";
 import ServiceNowFlow from "./components/ServiceNow/ServiceNowFlow";
 import EscalationProcedureModal from "./components/EscalationProcedure/EscalationProcedureModal";
 import EscalationChatWidget from "./components/EscalationProcedure/EscalationChatWidget";
+import EscalationUploadDialog from "./orgs/uspharma/EscalationUploadDialog";
 import { useOrg } from "./hooks/OrgContext";
 import { isUSPharma } from "./orgs/registry";
 // US-Pharma-only theme scope — repaints the shared premium surface to
@@ -58,8 +59,12 @@ function AppLayout() {
   // US Pharma repaints the shared premium surface to Walgreens red. We
   // resolve it here (inside OrgContextProvider) because the org slug is
   // not known at the top-level ThemeProvider / ConfigProvider.
-  const { activeOrg } = useOrg();
+  const { activeOrg, platformRole } = useOrg();
   const usPharma = isUSPharma(activeOrg?.slug);
+  // Real org role — admins curate (can upload), members are read-only.
+  const isAdmin =
+    (activeOrg?.role || "").toLowerCase() === "admin" ||
+    platformRole === "super_admin";
 
   // Sprint 13.32 — RCA mode flag. Local to AppLayout so we don't
   // pollute ChatContext for a feature that doesn't touch chat.
@@ -257,9 +262,25 @@ function AppLayout() {
   // below) via the `acadia:open-escalation-chat` window event so the
   // chat panel persists even after the modal closes.
   const [escalationModalOpen, setEscalationModalOpen] = useState(false);
+  // US Pharma — escalation_mode="upload_chat": the action opens an upload
+  // dialog (JSON/PDF) and, on upload, drops the engineer into the chatbot.
+  // Every other org keeps the fixed-PDF vendor-section modal.
+  const [escalationUploadOpen, setEscalationUploadOpen] = useState(false);
   const handleOpenEscalationProcedure = useCallback(() => {
-    setEscalationModalOpen(true);
-  }, []);
+    if (usPharma) {
+      // Admins curate the escalation KB (upload dialog). Members are
+      // read-only, so they go straight into the chatbot to QUERY the
+      // escalation data an admin already uploaded — no upload step (uploads
+      // are admin-gated server-side anyway).
+      if (isAdmin) {
+        setEscalationUploadOpen(true);
+      } else {
+        dispatch({ type: "NEW_CHAT", payload: { kbSearchFromLanding: true } });
+      }
+    } else {
+      setEscalationModalOpen(true);
+    }
+  }, [usPharma, isAdmin, dispatch]);
 
   const handleReturnFromGapAnalysis = useCallback(() => {
     // Mirror RCA's "Return to Stages" — drop the user on the
@@ -400,6 +421,11 @@ function AppLayout() {
       <EscalationProcedureModal
         open={escalationModalOpen}
         onClose={() => setEscalationModalOpen(false)}
+      />
+      {/* US Pharma — upload-then-chat escalation surface (JSON/PDF). */}
+      <EscalationUploadDialog
+        open={escalationUploadOpen}
+        onClose={() => setEscalationUploadOpen(false)}
       />
       <EscalationChatWidget />
 

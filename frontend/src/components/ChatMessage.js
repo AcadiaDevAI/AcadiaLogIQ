@@ -20,6 +20,8 @@ import {
   DislikeFilled,
 } from "@ant-design/icons";
 import { useChat } from "../hooks/ChatContext";
+import { useOrg } from "../hooks/OrgContext";
+import { isUSPharma } from "../orgs/registry";
 import { saveFeedbackState, submitFeedback } from "../services/api";
 import ClarificationOptions from "./ClarificationOptions";
 import JourneyMessageActions from "./journey-chat/JourneyMessageActions";
@@ -291,7 +293,29 @@ export default function ChatMessage({ msg, index, sessionId, onClarificationSele
     return "Low";
   };
 
-  const allSources = Array.isArray(msg.sources) ? msg.sources.filter(Boolean) : [];
+  // US Pharma — hide sources from non-admin MEMBERS (UI-only). Admins and
+  // platform super-admins still see them; Acadia + other orgs are unaffected.
+  // Hides BOTH the "Sources (N)" section (allSources → []) AND any inline
+  // "[Source: …]" / "(Sources: …)" mentions the model echoed into the answer.
+  const { activeOrg, platformRole } = useOrg();
+  const isAdminViewer =
+    (activeOrg?.role || "").toLowerCase() === "admin" ||
+    platformRole === "super_admin";
+  const hideSources = isUSPharma(activeOrg?.slug) && !isAdminViewer;
+
+  const stripSourceMentions = (text) =>
+    (text || "")
+      .replace(/\[\s*sources?\s*:[^\]]*\]/gi, "")
+      .replace(/\(\s*sources?\s*:[^)]*\)/gi, "")
+      .replace(/[ \t]{2,}/g, " ")
+      .trim();
+
+  const allSources = hideSources
+    ? []
+    : Array.isArray(msg.sources)
+    ? msg.sources.filter(Boolean)
+    : [];
+  const displayContent = hideSources ? stripSourceMentions(msg.content) : msg.content;
 
   // Modal title and placeholder change based on like vs dislike
   const isLikeModal = modalType === "like";
@@ -376,7 +400,7 @@ export default function ChatMessage({ msg, index, sessionId, onClarificationSele
             rehypePlugins={settings.RICH_FORMATTING_ENABLED ? [rehypeHighlight] : []}
             components={settings.RICH_FORMATTING_ENABLED ? markdownComponents : undefined}
           >
-            {msg.content}
+            {displayContent}
           </ReactMarkdown>
         </div>
 

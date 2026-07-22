@@ -65,6 +65,34 @@ class OrgProfile:
     # scoping). See backend/tier1_copilot/routes.py + retrieval.py.
     tier1_requires_store_id: bool = False
 
+    # Answer-generation output budget. When > 0, this org's KB / RAG answers
+    # use THIS max_output_tokens FLOOR instead of the shared per-response-class
+    # caps (RESPONSE_TOKENS_*), so structured full-record answers (e.g. a
+    # complete escalation matrix or contact table) are not cut off mid-list.
+    # It only ever RAISES the cap, never lowers it, and is still bounded by the
+    # agent token budget (invoke_llm) and the model's output limit — so it
+    # cannot over-spend or exceed the model. Default 0 = shared behavior
+    # (response-class caps apply). See backend/routing/model_router.py and
+    # backend/agents/composer.py.
+    answer_max_output_tokens: int = 0
+
+    # JSON ingestion policy. When True, ANY uploaded JSON not already claimed
+    # by a specific schema (KB-envelope / ticket / contact) is ingested by the
+    # recursive, size-bounded, lossless chunker (backend/services/
+    # contextual_ingestion_service.py::USPharmaRecursiveJsonSchema) instead of
+    # the generic one-chunk-per-record / text path — so arbitrary JSON of any
+    # structure embeds fully without truncation. Default False = shared
+    # behavior (GenericArraySchema / text). US Pharma sets it True so raw
+    # escalation / config JSON is searchable in chat.
+    json_recursive_chunking: bool = False
+
+    # Escalation Procedure UX, resolved per org. "fixed_pdf" (default/Acadia) =
+    # the consolidated PDF with the fixed vendor sections (backend/escalation).
+    # "upload_chat" (US Pharma) = the action opens an upload dialog (JSON + PDF)
+    # and, on upload, drops the engineer into the chatbot to query the uploaded
+    # data. Surfaced in public_config so the frontend picks the surface per org.
+    escalation_mode: str = "fixed_pdf"
+
     def __init__(self, org_id: Optional[uuid.UUID] = None, org_slug: Optional[str] = None):
         self.org_id = org_id
         # Prefer the real per-request slug; fall back to the class slug.
@@ -89,6 +117,8 @@ class OrgProfile:
             "theme": dict(self.theme or {}),
             "enabled_flows": sorted(self.enabled_flows),
             "feature_flags": dict(self.feature_flags),
+            # Per-org Escalation Procedure surface ("fixed_pdf" | "upload_chat").
+            "escalation_mode": self.escalation_mode,
         }
 
     # ---- behavior override points (Phase 2+) ------------------------------
