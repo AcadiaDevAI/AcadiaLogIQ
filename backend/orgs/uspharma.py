@@ -56,3 +56,9 @@ class USPharmaProfile(OrgProfile):
     # Escalation Procedure = upload-then-chat (JSON + PDF), not the fixed-PDF
     # vendor-section template. Uploading drops the engineer into the chatbot.
     escalation_mode = "upload_chat"
+
+    # US Pharma answers are vendor / escalation contact directories — the email
+    # addresses ARE the requested content, not PII to hide. Keep them visible
+    # (all other PII types stay scrubbed). Set back to True to restore email
+    # redaction. (Acadia keeps the shared email scrubbing.)
+    redact_contact_emails = False

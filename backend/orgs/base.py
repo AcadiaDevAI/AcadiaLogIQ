@@ -93,6 +93,16 @@ class OrgProfile:
     # data. Surfaced in public_config so the frontend picks the surface per org.
     escalation_mode: str = "fixed_pdf"
 
+    # Output PII scrubbing. The post-generation sanitizer
+    # (backend/services/output_sanitizer.py) redacts email addresses as PII →
+    # "[REDACTED_EMAIL]". When False, THIS org's answers keep emails visible —
+    # US Pharma's vendor / escalation matrices are operational contact
+    # directories where the email IS the requested content, not personal PII.
+    # Default True = shared behavior (emails redacted). Non-email PII (SSN,
+    # credit card, …) is still scrubbed regardless. To REVERT for an org, set
+    # this back to True (one line) — it's output-time only, no data change.
+    redact_contact_emails: bool = True
+
     def __init__(self, org_id: Optional[uuid.UUID] = None, org_slug: Optional[str] = None):
         self.org_id = org_id
         # Prefer the real per-request slug; fall back to the class slug.

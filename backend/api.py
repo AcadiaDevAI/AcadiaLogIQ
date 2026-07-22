@@ -4510,6 +4510,10 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         retrieval = retrieve_within_store(
             scope_store_id=_scope_store_id,
             query_embedding=q_emb,
+            # Enables HYBRID (vector + full-text) fusion so exact-phrase /
+            # named-entity lookups (e.g. "Network Onsite Support" → "SmartHands")
+            # rank into the top slots that cosine alone misses.
+            query_text=req.q,
             allowed_file_ids=active_file_ids,
         )
     else:

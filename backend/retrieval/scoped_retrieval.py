@@ -60,6 +60,7 @@ found" from "look-up failed."
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any, Dict, List, Optional, Set
 
@@ -69,6 +70,16 @@ from backend.db.connection import engine
 
 
 logger = logging.getLogger("acadia-log-iq")
+
+
+def _to_or_tsquery(text: str) -> str:
+    """Build an OR-joined tsquery string from free text so a chunk matching
+    SOME query terms still scores (BM25-like recall + ts_rank rewards more
+    matches), instead of plainto_tsquery's all-terms-AND. Non-alphanumerics are
+    dropped; empty input yields an empty query (keyword channel contributes
+    nothing, fusion degrades gracefully to vector)."""
+    toks = re.findall(r"[A-Za-z0-9]+", text or "")
+    return " | ".join(toks)
 
 
 # ─────────────────────────────────────────────────────────────
@@ -97,6 +108,27 @@ DEFAULT_SCOPED_TOP_K = 50
 # meaningful but non-absolute nudge. Only used by retrieve_within_store, so
 # Acadia's retrieval is untouched.
 _TICKET_RANK_PENALTY = 0.15
+
+
+# US Pharma store-scoped HYBRID retrieval (vector + keyword/full-text fusion).
+# The pure-vector store path misses exact-phrase / named-entity lookups (e.g.
+# "Network Onsite Support" → "SmartHands IT") because cosine blurs exact terms,
+# especially when the phrase lives in a chunk diluted by other content. Adding
+# a full-text (BM25-ish ts_rank) channel and fusing the two rankings via
+# Reciprocal Rank Fusion (RRF) pulls the exact-match chunk into the top slots.
+# Both channels stay hard-filtered to the store, and the KB-over-ticket
+# preference is kept as a soft demotion in fused space. US-Pharma-only path.
+_STORE_HYBRID_CANDIDATES = 200   # store-filtered pool fused before the final cut
+_RRF_K = 60                      # standard RRF damping constant
+_TICKET_FUSION_DEMOTION = 0.15   # soft KB-over-ticket nudge on the fused score
+# The store-scoped chat is dominated by structured LOOKUPS ("who provides X for
+# store N", "the escalation matrix"), where the exact term is the reliable
+# signal and cosine is noisy (verbose runbooks that repeat "network/support"
+# out-rank a concise vendor row). So the keyword channel is weighted above the
+# vector channel in fusion. 2.0 lands the exact-match chunk in the top-8 while
+# still letting vector break ties. Tunable.
+_RRF_W_VECTOR = 1.0
+_RRF_W_KEYWORD = 2.0
 
 
 # ─────────────────────────────────────────────────────────────
@@ -239,6 +271,57 @@ ORDER BY
           END
     ) ASC
 LIMIT :top_k
+"""
+
+# Store-scoped HYBRID candidate fetch (US Pharma). Same store hard-filter as
+# _SQL_STORE_BASE, but ALSO computes a full-text ts_rank per chunk against the
+# query text so both signals are available for RRF fusion in Python. Ordered by
+# vector distance and capped at _STORE_HYBRID_CANDIDATES — a pool large enough
+# to hold every chunk of a normal store, so both channels see the full set.
+_SQL_STORE_HYBRID_BASE = """
+SELECT
+    c.id::text                              AS id,
+    COALESCE(c.contextualized_content,
+             c.content)                     AS text,
+    c.metadata_json                         AS metadata_json,
+    c.section_heading                       AS section_heading,
+    c.chunk_type                            AS chunk_type,
+    c.summary                               AS summary,
+    c.labels_json                           AS labels_json,
+    d.id::text                              AS file_id,
+    d.owner_id                              AS owner_id,
+    d.name                                  AS source,
+    d.file_type                             AS file_type,
+    (e.embedding <=> CAST(:query_embedding AS vector)) AS distance,
+    ts_rank(
+        to_tsvector('english',
+                    COALESCE(c.contextualized_content, c.content, '')),
+        to_tsquery('english', :query_ts)
+    )                                       AS ts_rank,
+    (e.embedding IS NULL)                   AS missing_embedding,
+    ((c.metadata_json->>'doc_kind') = 'ticket') AS is_ticket
+FROM chunks c
+LEFT JOIN embeddings e
+  ON e.chunk_id = c.id
+JOIN documents d
+  ON d.id = c.document_id
+JOIN document_versions dv
+  ON dv.id = c.document_version_id
+WHERE
+    (
+        (c.metadata_json->'Metadata'->>'store_id') = :store_id
+        OR (c.metadata_json->'Metadata'->>'store_id') IS NULL
+    )
+    AND d.status = 'active'
+    AND dv.is_active = TRUE
+    AND d.current_version_id = dv.id
+"""
+
+_SQL_STORE_HYBRID_TAIL = """
+ORDER BY
+    CASE WHEN e.embedding IS NULL THEN 1 ELSE 0 END ASC,
+    distance ASC NULLS LAST
+LIMIT :cand_limit
 """
 
 
@@ -458,12 +541,70 @@ def retrieve_within_incident(
 
 
 # ─────────────────────────────────────────────────────────────
+# Store-scoped RRF fusion (US Pharma hybrid retrieval)
+# ─────────────────────────────────────────────────────────────
+def _rrf_fuse_store_rows(rows: List[Any], top_k: int):
+    """Reciprocal-Rank-Fusion of the vector and full-text rankings over the
+    store-filtered candidate rows. Returns ``(ranked_tuples, missing_embeddings)``.
+
+    The FUSED rank decides the ORDER, but each returned tuple keeps its vector
+    cosine similarity as its score (so downstream top_score thresholds stay on
+    the same scale as the pure-vector path). KB-over-ticket preference is a soft
+    demotion applied in fused space.
+    """
+    if not rows:
+        return [], 0
+
+    # Vector ranking: embedded chunks first, then by cosine distance ASC.
+    vec_sorted = sorted(
+        rows,
+        key=lambda r: (
+            1 if r.get("missing_embedding") else 0,
+            float(r["distance"]) if r.get("distance") is not None else 9e9,
+        ),
+    )
+    vec_rank = {r["id"]: i + 1 for i, r in enumerate(vec_sorted)}
+
+    # Keyword ranking: only chunks with a positive full-text score are hits.
+    kw_sorted = sorted(
+        [r for r in rows if float(r.get("ts_rank") or 0.0) > 0.0],
+        key=lambda r: float(r["ts_rank"]),
+        reverse=True,
+    )
+    kw_rank = {r["id"]: i + 1 for i, r in enumerate(kw_sorted)}
+
+    def _fused(r):
+        rid = r["id"]
+        s = _RRF_W_VECTOR / (_RRF_K + vec_rank[rid])
+        if rid in kw_rank:
+            s += _RRF_W_KEYWORD / (_RRF_K + kw_rank[rid])
+        if r.get("is_ticket"):
+            s *= (1.0 - _TICKET_FUSION_DEMOTION)
+        return s
+
+    ordered = sorted(rows, key=_fused, reverse=True)[: int(top_k)]
+
+    ranked = []
+    missing = 0
+    for r in ordered:
+        raw_dist = r.get("distance")
+        if r.get("missing_embedding") or raw_dist is None:
+            sim = 0.5
+            missing += 1
+        else:
+            sim = max(0.0, 1.0 - float(raw_dist))
+        ranked.append((str(r["id"]), str(r.get("text") or ""), _wrap_metadata(r), sim))
+    return ranked, missing
+
+
+# ─────────────────────────────────────────────────────────────
 # Store-scoped entry point (migration 065, US Pharma)
 # ─────────────────────────────────────────────────────────────
 def retrieve_within_store(
     *,
     scope_store_id: str,
     query_embedding: List[float],
+    query_text: Optional[str] = None,
     allowed_file_ids: Optional[Set[str]] = None,
     top_k: int = DEFAULT_SCOPED_TOP_K,
 ):
@@ -503,22 +644,44 @@ def retrieve_within_store(
             no_embedding=True,
         )
 
-    params: Dict[str, Any] = {
-        "store_id": sid,
-        "query_embedding": _vector_literal(query_embedding),
-        "top_k": int(top_k),
-        # Soft demotion for ticket chunks so KB/SOP leads (see
-        # _TICKET_RANK_PENALTY); tickets stay eligible, just ranked later.
-        "ticket_penalty": _TICKET_RANK_PENALTY,
-    }
-    if allowed_file_ids:
-        sql = _SQL_STORE_BASE + _SQL_FILE_IDS_CLAUSE + _SQL_STORE_TAIL
-        params["file_ids"] = [str(fid) for fid in allowed_file_ids]
-    else:
-        sql = _SQL_STORE_BASE + _SQL_STORE_TAIL
+    # HYBRID when we have query text (vector + full-text fused via RRF); pure
+    # vector otherwise. Both hard-filter to the store; hybrid pulls exact-phrase
+    # / named-entity matches into the top slots that cosine alone would miss.
+    q_text = (query_text or "").strip()
+    use_hybrid = bool(q_text)
 
     try:
         with engine.connect() as conn:
+            if use_hybrid:
+                params: Dict[str, Any] = {
+                    "store_id": sid,
+                    "query_embedding": _vector_literal(query_embedding),
+                    "query_ts": _to_or_tsquery(q_text),
+                    "cand_limit": _STORE_HYBRID_CANDIDATES,
+                }
+                if allowed_file_ids:
+                    sql = (
+                        _SQL_STORE_HYBRID_BASE
+                        + _SQL_FILE_IDS_CLAUSE
+                        + _SQL_STORE_HYBRID_TAIL
+                    )
+                    params["file_ids"] = [str(fid) for fid in allowed_file_ids]
+                else:
+                    sql = _SQL_STORE_HYBRID_BASE + _SQL_STORE_HYBRID_TAIL
+            else:
+                params = {
+                    "store_id": sid,
+                    "query_embedding": _vector_literal(query_embedding),
+                    "top_k": int(top_k),
+                    # Soft demotion for ticket chunks so KB/SOP leads (see
+                    # _TICKET_RANK_PENALTY); tickets stay eligible, just later.
+                    "ticket_penalty": _TICKET_RANK_PENALTY,
+                }
+                if allowed_file_ids:
+                    sql = _SQL_STORE_BASE + _SQL_FILE_IDS_CLAUSE + _SQL_STORE_TAIL
+                    params["file_ids"] = [str(fid) for fid in allowed_file_ids]
+                else:
+                    sql = _SQL_STORE_BASE + _SQL_STORE_TAIL
             rows = conn.execute(_sql_text(sql), params).mappings().all()
     except Exception as exc:
         logger.warning(
@@ -532,22 +695,27 @@ def retrieve_within_store(
     from backend.retrieval.orchestrator import RetrievalResult
     from backend.retrieval.query_classifier import QueryIntent
 
-    ranked = []
-    missing_embeddings = 0
-    for row in rows:
-        raw_dist = row.get("distance")
-        is_missing = bool(row.get("missing_embedding"))
-        if is_missing or raw_dist is None:
-            similarity = 0.5
-            missing_embeddings += 1
-        else:
-            similarity = max(0.0, 1.0 - float(raw_dist))
-        ranked.append((
-            str(row["id"]),
-            str(row.get("text") or ""),
-            _wrap_metadata(row),
-            similarity,
-        ))
+    if use_hybrid:
+        ranked, missing_embeddings = _rrf_fuse_store_rows(rows, top_k)
+        mode = "hybrid"
+    else:
+        ranked = []
+        missing_embeddings = 0
+        for row in rows:
+            raw_dist = row.get("distance")
+            is_missing = bool(row.get("missing_embedding"))
+            if is_missing or raw_dist is None:
+                similarity = 0.5
+                missing_embeddings += 1
+            else:
+                similarity = max(0.0, 1.0 - float(raw_dist))
+            ranked.append((
+                str(row["id"]),
+                str(row.get("text") or ""),
+                _wrap_metadata(row),
+                similarity,
+            ))
+        mode = "vector"
 
     elapsed_ms = int((time.perf_counter() - t_start) * 1000)
     res = RetrievalResult()
@@ -558,16 +726,18 @@ def retrieve_within_store(
     res.ranked = ranked
     res.stats = {
         "search_mode": "scoped_store",
+        "retrieval_mode": mode,
         "scope_store_id": sid,
         "matched_count": len(ranked),
+        "candidates": len(rows),
         "top_score": ranked[0][3] if ranked else 0.0,
         "missing_embeddings": missing_embeddings,
         "timing_total_ms": elapsed_ms,
     }
     logger.info(
-        "[scoped_retrieval] store=%s returned=%d "
+        "[scoped_retrieval] store=%s mode=%s candidates=%d returned=%d "
         "(missing_embeddings=%d) top_score=%.3f (%dms)",
-        sid, len(ranked), missing_embeddings,
+        sid, mode, len(rows), len(ranked), missing_embeddings,
         ranked[0][3] if ranked else 0.0, elapsed_ms,
     )
     return res

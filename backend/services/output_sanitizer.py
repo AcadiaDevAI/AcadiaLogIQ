@@ -37,9 +37,24 @@ def sanitize_output(answer: str, original_query: str = "") -> Tuple[str, List[st
     result = answer
     issues: List[str] = []
 
+    # Per-org opt-out for EMAIL redaction only (US Pharma: vendor / escalation
+    # contact emails are the requested content, not PII). All other PII types
+    # stay scrubbed. Resolved from the request org context; any failure keeps
+    # the default (redact) so we never accidentally leak. See OrgProfile.
+    _skip_email = False
+    try:
+        from backend.orgs.context import resolve_current_profile
+        _skip_email = not bool(
+            getattr(resolve_current_profile(), "redact_contact_emails", True)
+        )
+    except Exception:
+        _skip_email = False
+
     try:
         if settings.OUTPUT_SANITIZER_SCRUB_PII:
             for name, pattern in PII_PATTERNS.items():
+                if name == "email" and _skip_email:
+                    continue
                 def _repl(m, _name=name):
                     candidate = m.group(0)
                     if not _should_redact_pii_match(_name, candidate):
