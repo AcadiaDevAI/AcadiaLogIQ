@@ -351,7 +351,7 @@ export default function Stage4SearchKBHandoff({
           sessionId={sessionId}
           fromStage="stage_4"
           onReveal={onReveal}
-          label="Escalate to Tier-2"
+          label="Handoff / Escalate"
         />
       </div>
     </Card>
