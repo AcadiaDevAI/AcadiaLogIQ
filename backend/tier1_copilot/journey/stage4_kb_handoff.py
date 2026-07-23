@@ -52,9 +52,17 @@ def build_stage4(
     # naturally org-gated; Acadia falls through to the alert-summary below.
     sid = (store_id or "").strip()
     if sid:
+        # Idea A — the chat no longer auto-runs a "give me details" dump.
+        # It opens with a short store-orientation summary (built by the
+        # route, which has DB + LLM access) plus these clickable sample
+        # questions. `store_summary` stays None here; the route fills it.
+        # `prefilled_message` is only a harmless fallback (the frontend
+        # does NOT auto-send it once `store_summary` is present).
+        from .store_kb_summary import store_sample_questions
         return Stage4SearchKB(
-            prefilled_message=f"Give me details about {sid} store",
+            prefilled_message=f"Store {sid} — ask me anything about this store.",
             allowed_doc_kinds=["sop", "kb"],
+            sample_questions=store_sample_questions(sid),
         )
 
     sev = (severity or "P3").strip()

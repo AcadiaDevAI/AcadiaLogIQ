@@ -120,7 +120,8 @@ export default function USPharmaIntakeForm(props) {
             onChange={(v) => setActiveTab(v)}
             options={[
               { label: "Proactive", value: "proactive" },
-              { label: "Reactive", value: "reactive" },
+              // US Pharma — Reactive mode hidden for now (Proactive only).
+              // { label: "Reactive", value: "reactive" },
             ]}
             size="large"
           />
@@ -216,7 +217,7 @@ function USPharmaProactiveForm({ sessionId, busy, onSubmit, onBack, prefill }) {
         </div>
 
         <Form form={form} layout="vertical" onFinish={handleFinish}>
-          <Form.Item label={<span style={{ fontWeight: 600 }}>Store ID</span>} required>
+          <Form.Item label={<span style={{ fontWeight: 600 }}>Store/Customer</span>} required>
             <Input
               size="large"
               value={storeId}

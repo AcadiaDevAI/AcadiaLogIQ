@@ -15,7 +15,7 @@
 import React, { useState } from "react";
 import { Modal, Input, message } from "antd";
 import { useChat } from "../../hooks/ChatContext";
-import { createStoreScopedChat } from "../../services/api";
+import { createStoreScopedChat, getSession } from "../../services/api";
 
 export default function StoreIdDialog({ open, onClose }) {
   const { dispatch } = useChat();
@@ -37,9 +37,10 @@ export default function StoreIdDialog({ open, onClose }) {
     try {
       const res = await createStoreScopedChat(sid);
       const sessionId = res?.data?.session_id;
-      // Open the pre-created store-scoped session as an empty chat. The
-      // kbSearchFromLanding flag surfaces ChatArea's "Back to screen" button;
-      // scopeStoreId drives its banner label.
+      const storeSummary = res?.data?.store_summary;
+      // Open the pre-created store-scoped session. The kbSearchFromLanding
+      // flag surfaces ChatArea's "Back to screen" button; scopeStoreId
+      // drives its banner label.
       dispatch({
         type: "NEW_CHAT",
         payload: {
@@ -48,6 +49,21 @@ export default function StoreIdDialog({ open, onClose }) {
           scopeStoreId: sid,
         },
       });
+      // Idea A — the backend opened the chat with a store-orientation
+      // summary (first assistant turn) + sample-question chips. Load the
+      // session so that opener renders (SET_SESSION re-attaches the chips
+      // to the first assistant message). NEW_CHAT above already set the
+      // scope banners; SET_SESSION spreads state so they persist. If the
+      // opener wasn't created, this stays the legacy empty chat.
+      if (storeSummary && sessionId) {
+        try {
+          const sessRes = await getSession(sessionId);
+          dispatch({ type: "SET_SESSION", payload: sessRes.data });
+        } catch (loadErr) {
+          // eslint-disable-next-line no-console
+          console.warn("[storeDialog] opener hydration failed", loadErr);
+        }
+      }
       close();
     } catch (err) {
       const detail =

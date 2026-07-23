@@ -722,6 +722,14 @@ async def post_escalation_handoff_note(
 
 
 # ─────────────────────────────────────────────────────────────
+# Idea A (US Pharma) — store-orientation summary for the KB chat opener.
+# Shared with the standalone store-scoped chat (POST /chat/sessions/
+# store-scoped) via store_kb_summary so both openers stay identical.
+# ─────────────────────────────────────────────────────────────
+from .store_kb_summary import build_store_summary as _build_store_summary  # noqa: E402
+
+
+# ─────────────────────────────────────────────────────────────
 # Sprint 10.2 — /search-kb-handoff — creates a real chat session,
 # auto-submits the journey's prefilled question, and either invokes
 # /ask (when SOP/KB corpus exists) or inserts an upload-prompt
@@ -815,6 +823,21 @@ async def search_kb_handoff(
     if store_id and not scope_incident_id:
         scope_store_id = str(store_id).strip() or None
 
+    # Idea A — US Pharma store KB chat opens with a 2-line store summary
+    # (first assistant turn) + clickable sample questions, instead of the
+    # legacy auto-`/ask` "give me details" dump. Only the genuine Stage 4
+    # store handoff sets scope_store_id (per-bullet Ask-in-Chat carries an
+    # incident scope instead), so this branch is naturally org-gated.
+    opening_assistant_message = None
+    opening_suggestions = None
+    store_summary_out = None
+    sample_questions_out = None
+    if scope_store_id:
+        store_summary_out = _build_store_summary(scope_store_id)
+        sample_questions_out = handoff.sample_questions
+        opening_assistant_message = store_summary_out
+        opening_suggestions = sample_questions_out
+
     try:
         result = create_chat_session_with_handoff(
             journey_session_id=session_id,
@@ -824,6 +847,8 @@ async def search_kb_handoff(
             ask_fn=None,  # frontend fires /ask after SET_SESSION lands
             scope_incident_id=scope_incident_id,
             scope_store_id=scope_store_id,
+            opening_assistant_message=opening_assistant_message,
+            opening_suggestions=opening_suggestions,
         )
     except Exception as exc:
         logger.error(
@@ -832,6 +857,9 @@ async def search_kb_handoff(
         )
         raise HTTPException(status_code=500, detail="search_kb_handoff_failed")
 
+    # Surface the opener back so the frontend skips the legacy auto-/ask.
+    result["store_summary"] = store_summary_out
+    result["sample_questions"] = sample_questions_out
     return SearchKBHandoffResponse(**result)
 
 

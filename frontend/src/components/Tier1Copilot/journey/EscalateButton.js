@@ -14,6 +14,8 @@ import { ExportOutlined, LoadingOutlined } from "@ant-design/icons";
 
 import EscalationReasonModal from "./EscalationReasonModal";
 import { postJourneyEvent } from "./journeyApi";
+import { useOrg } from "../../../hooks/OrgContext";
+import { isUSPharma } from "../../../orgs/registry";
 
 
 // ─── Amber escalate palette ───────────────────────────────────────
@@ -57,10 +59,17 @@ export default function EscalateButton({
   fromStage,
   onReveal,
   disabled = false,
-  label = "Escalate to Tier 2",
+  label,
 }) {
   const [busy, setBusy] = useState(false);
   const [modalOpen, setModalOpen] = useState(false);
+
+  // US Pharma renames this action to "Handoff / Escalate"; every other org
+  // keeps "Escalate to Tier 2". An explicit `label` prop still wins.
+  const { activeOrg } = useOrg();
+  const resolvedLabel =
+    label ??
+    (isUSPharma(activeOrg?.slug) ? "Handoff / Escalate" : "Escalate to Tier 2");
 
   // ─── LOGIC — BYTE-IDENTICAL ───────────────────────────────────
   const handleClick = () => {
@@ -121,7 +130,7 @@ export default function EscalateButton({
           ) : (
             <ExportOutlined style={{ fontSize: 14 }} />
           )}
-          <span>{label}</span>
+          <span>{resolvedLabel}</span>
         </button>
       </Tooltip>
       <EscalationReasonModal

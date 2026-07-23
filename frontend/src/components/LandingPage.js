@@ -411,12 +411,23 @@ export default function LandingPage({
     onOpenKbSop,
   };
 
+  // US Pharma — the intake is Proactive-only (Reactive mode is hidden in the
+  // org IntakeForm), so drop "/ Reactive" from the entry tile label. The
+  // `onOpenKbSop` handler is wired for US Pharma only, so it doubles as the
+  // org marker here (same proxy the KB SOP tile below relies on).
+  const isUspLanding = !!onOpenKbSop;
+  const relabelForUsp = (opt) =>
+    isUspLanding && opt.value === "proactive_reactive"
+      ? { ...opt, label: "Proactive" }
+      : opt;
+  const baseEntryOptions = ENTRY_OPTIONS.map(relabelForUsp);
+
   // US Pharma — add a "KB SOP" tile to the entry view. Only shown when the
   // handler is wired (LandingRouter passes it for US Pharma only), inserted
-  // just before the "Proactive / Reactive" tile so it stays last.
+  // just before the "Proactive" tile so it stays last.
   const entryOptions = onOpenKbSop
     ? [
-        ...ENTRY_OPTIONS.slice(0, -1),
+        ...baseEntryOptions.slice(0, -1),
         {
           value: "kb_sop",
           label: "Discuss Store Specific with LogIQ",
@@ -425,9 +436,9 @@ export default function LandingPage({
           accent: "var(--aurora-1)",
           handlerProp: "onOpenKbSop",
         },
-        ENTRY_OPTIONS[ENTRY_OPTIONS.length - 1],
+        baseEntryOptions[baseEntryOptions.length - 1],
       ]
-    : ENTRY_OPTIONS;
+    : baseEntryOptions;
   const handleEntrySelect = (opt) => {
     if (!opt) return;
     if (opt.value === "proactive_reactive") {
@@ -534,7 +545,7 @@ export default function LandingPage({
           <p style={subStyle}>
             Pick an entry point. RCA, and Gap Analysis open as focused popups.
             <br />
-            Proactive / Reactive advances to the full Tier-1 mode picker.
+            {isUspLanding ? "Proactive" : "Proactive / Reactive"} advances to the full Tier-1 mode picker.
           </p>
 
           {/* Glass command card — same chrome as the mode-picker view */}

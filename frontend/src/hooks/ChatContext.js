@@ -89,7 +89,7 @@ function reducer(state, action) {
       return {
         ...state,
         sessionId: action.payload.id,
-        messages: (action.payload.messages || []).map((msg) => {
+        messages: (action.payload.messages || []).map((msg, _idx, _arr) => {
           let sources = msg.sources;
           if (sources && !Array.isArray(sources)) {
             sources = [
@@ -101,6 +101,15 @@ function reducer(state, action) {
           return {
             ...msg,
             sources: sources || [],
+            // US Pharma (Idea A) — the store-orientation opener persists its
+            // sample-question chips in session metadata (first message's
+            // `_session_metadata.suggestions`). Re-attach them to the first
+            // assistant message so the chips survive reload.
+            suggestions:
+              msg.suggestions ||
+              (_idx === _arr.findIndex((m) => m.role === "assistant")
+                ? action.payload.metadata?.suggestions || null
+                : null),
             // Preserve feedback state from backend ("like", "dislike", or undefined)
             feedback: msg.feedback || null,
             semanticCacheId:
@@ -243,6 +252,9 @@ function reducer(state, action) {
             role: "assistant",
             content: action.payload.answer || "",
             sources: action.payload.sources || [],
+            // US Pharma (Idea A) — clickable sample-question chips rendered
+            // under a store-orientation opener. Null for normal answers.
+            suggestions: action.payload.suggestions || null,
             confidence: action.payload.confidence,
             processingTime: action.payload.processing_time_ms,
             timestamp: new Date().toISOString(),

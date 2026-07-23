@@ -45,6 +45,8 @@ def create_chat_session_with_handoff(
     save_message_fn: Optional[Callable[..., str]] = None,
     scope_incident_id: Optional[str] = None,
     scope_store_id: Optional[str] = None,
+    opening_assistant_message: Optional[str] = None,
+    opening_suggestions: Optional[list] = None,
 ) -> Dict[str, Any]:
     """Sprint 10.6 — orchestrate the Stage 4 handoff.
 
@@ -80,18 +82,34 @@ def create_chat_session_with_handoff(
     if save_message_fn is None:
         from backend.vector_store import save_message_to_session as save_message_fn  # type: ignore
 
-    # 1. Create chat session + insert the prefilled user turn. The
+    # 1. Create chat session + insert the FIRST turn. The
     #    journey_session_id rides on metadata under `_session_metadata`
     #    so the chat-session GET response carries it back at the top
     #    level (Sprint 10.4 round-trip).
+    #
+    #    Idea A (US Pharma store KB chat): when the caller supplies an
+    #    `opening_assistant_message`, the chat opens with THAT as the
+    #    first (assistant) turn — a short store-orientation summary — and
+    #    NO auto-run "give me details" user turn. `opening_suggestions`
+    #    (the clickable sample questions) ride on the same first-message
+    #    metadata so get_chat_session surfaces them back to the frontend
+    #    (which renders them as chips and they survive reload). Every
+    #    other handoff keeps the original prefilled user-turn behavior.
+    opener = (opening_assistant_message or "").strip()
+    first_meta: Dict[str, Any] = {}
+    if journey_session_id:
+        first_meta["journey_session_id"] = journey_session_id
+    if opener and opening_suggestions:
+        first_meta["suggestions"] = list(opening_suggestions)
+
     save_kwargs = {
         "session_id": None,
-        "role": "user",
-        "content": prefilled_message,
+        "role": "assistant" if opener else "user",
+        "content": opener or prefilled_message,
         "owner_id": owner_id,
     }
-    if journey_session_id:
-        save_kwargs["metadata"] = {"journey_session_id": journey_session_id}
+    if first_meta:
+        save_kwargs["metadata"] = first_meta
     try:
         chat_session_id = save_message_fn(**save_kwargs)
     except TypeError:

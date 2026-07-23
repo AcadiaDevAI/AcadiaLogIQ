@@ -412,6 +412,12 @@ class Stage3TroubleshootingApproach(BaseModel):
 class Stage4SearchKB(BaseModel):
     prefilled_message: str
     allowed_doc_kinds: List[str] = Field(default_factory=lambda: ["sop", "kb"])
+    # US Pharma store-scoped KB chat (Idea A). Instead of auto-running a
+    # "give me details" dump, the chat opens with a short 2-line store
+    # orientation summary + a few clickable sample questions. Both are
+    # null for Acadia / non-store handoffs (unchanged behavior there).
+    store_summary: Optional[str] = None
+    sample_questions: Optional[List[str]] = None
 
 
 # ─────────────────────────────────────────────────────────────
@@ -492,6 +498,12 @@ class SearchKBHandoffRequest(BaseModel):
 class SearchKBHandoffResponse(BaseModel):
     chat_session_id: str
     redirect_url: str
+    # US Pharma (Idea A) — when the KB chat opens with a store-orientation
+    # opener, the summary text is returned here so the frontend knows to
+    # skip the legacy auto-`/ask` dump. Null = legacy behavior (frontend
+    # fires /ask with the prefilled message, unchanged).
+    store_summary: Optional[str] = None
+    sample_questions: Optional[List[str]] = None
 
 
 # ─────────────────────────────────────────────────────────────

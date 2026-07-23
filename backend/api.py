@@ -3273,7 +3273,44 @@ async def create_store_scoped_chat(
         "[chat.store_scoped] created session=%s store=%s owner=%s",
         session_id, store_id, owner_id,
     )
-    return {"session_id": session_id, "scope_store_id": store_id}
+
+    # Idea A — open the store-scoped chat with the SAME 2-line summary +
+    # sample-question chips as the journey Stage-4 handoff (shared helpers
+    # so the two entry points never drift). Saved as the first assistant
+    # turn with the chips in its metadata, so get_chat_session surfaces
+    # them back and they survive reload. Never blocks the chat: any
+    # failure just leaves the session empty (legacy blank-chat behavior).
+    store_summary = None
+    sample_questions = None
+    try:
+        from backend.tier1_copilot.journey.store_kb_summary import (
+            build_store_summary,
+            store_sample_questions,
+        )
+        from backend.vector_store import save_message_to_session
+
+        store_summary = build_store_summary(store_id)
+        sample_questions = store_sample_questions(store_id)
+        if store_summary:
+            save_message_to_session(
+                session_id=session_id,
+                role="assistant",
+                content=store_summary,
+                owner_id=owner_id,
+                metadata={"suggestions": sample_questions},
+            )
+    except Exception as exc:
+        logger.warning(
+            "[chat.store_scoped] opener generation failed store=%s err=%s",
+            store_id, exc,
+        )
+
+    return {
+        "session_id": session_id,
+        "scope_store_id": store_id,
+        "store_summary": store_summary,
+        "sample_questions": sample_questions,
+    }
 
 
 # ─────────────────────────────────────────────────────────────

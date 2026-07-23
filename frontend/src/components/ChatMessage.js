@@ -115,7 +115,7 @@ const { TextArea } = Input;
  *   Both dialogs: user types optional message (up to 1200 chars) → sent via SES email
  *   Like/dislike state is persisted in backend session → survives refresh/sign-out
  */
-export default function ChatMessage({ msg, index, sessionId, onClarificationSelect, clarificationDisabled, onPrefillInput }) {
+export default function ChatMessage({ msg, index, sessionId, onClarificationSelect, clarificationDisabled, onPrefillInput, onSuggestionClick }) {
   const { state, dispatch } = useChat();
   const [copied, setCopied] = useState(false);
 
@@ -293,20 +293,24 @@ export default function ChatMessage({ msg, index, sessionId, onClarificationSele
     return "Low";
   };
 
-  // US Pharma — hide sources from non-admin MEMBERS (UI-only). Admins and
-  // platform super-admins still see them; Acadia + other orgs are unaffected.
+  // US Pharma — hide sources from EVERYONE (UI-only), including org admins
+  // and platform super-admins; Acadia + other orgs are unaffected.
   // Hides BOTH the "Sources (N)" section (allSources → []) AND any inline
-  // "[Source: …]" / "(Sources: …)" mentions the model echoed into the answer.
-  const { activeOrg, platformRole } = useOrg();
-  const isAdminViewer =
-    (activeOrg?.role || "").toLowerCase() === "admin" ||
-    platformRole === "super_admin";
-  const hideSources = isUSPharma(activeOrg?.slug) && !isAdminViewer;
+  // "[Source: …]" / "(Sources: …)" mentions — plus a trailing "Sources:"
+  // line — that the model echoed into the answer.
+  const { activeOrg } = useOrg();
+  const hideSources = isUSPharma(activeOrg?.slug);
 
   const stripSourceMentions = (text) =>
     (text || "")
+      // trailing "## Source documents" / "## Sources used" markdown section
+      // (the KB-search prompt appends this footer to every answer).
+      .replace(/\n#{1,6}\s*source\s+documents?\b[\s\S]*$/i, "")
+      .replace(/\n#{1,6}\s*sources\s+used\b[\s\S]*$/i, "")
       .replace(/\[\s*sources?\s*:[^\]]*\]/gi, "")
       .replace(/\(\s*sources?\s*:[^)]*\)/gi, "")
+      // trailing "Sources:" line (to end of answer)
+      .replace(/\n+\s*sources?\s*:.*$/is, "")
       .replace(/[ \t]{2,}/g, " ")
       .trim();
 
@@ -436,6 +440,35 @@ export default function ChatMessage({ msg, index, sessionId, onClarificationSele
               ),
             }]}
           />
+        )}
+
+        {/* US Pharma (Idea A) — sample-question chips under the store
+            orientation opener. Clicking one sends it immediately via the
+            chat's normal ask flow (store-scoped by the session). */}
+        {!isUser && Array.isArray(msg.suggestions) && msg.suggestions.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            {msg.suggestions.map((q, i) => (
+              <button
+                key={i}
+                type="button"
+                onClick={() => !clarificationDisabled && onSuggestionClick?.(q)}
+                disabled={clarificationDisabled}
+                className="text-xs"
+                style={{
+                  cursor: clarificationDisabled ? "not-allowed" : "pointer",
+                  padding: "6px 12px",
+                  borderRadius: 9999,
+                  border: "1px solid var(--brand-accent)",
+                  background: "var(--brand-light)",
+                  color: "var(--brand-accent)",
+                  fontWeight: 500,
+                  opacity: clarificationDisabled ? 0.6 : 1,
+                }}
+              >
+                {q}
+              </button>
+            ))}
+          </div>
         )}
 
         {/* Action buttons: Copy | 👍 Like | 👎 Dislike

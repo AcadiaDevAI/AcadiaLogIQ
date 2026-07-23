@@ -299,6 +299,7 @@ export default function ChatArea() {
                   onClarificationSelect={handleClarificationSelect}
                   clarificationDisabled={state.isLoading}
                   onPrefillInput={setPrefillValue}
+                  onSuggestionClick={handleSend}
                 />
                 {msg.role === "assistant" &&
                   msg.patternActive &&

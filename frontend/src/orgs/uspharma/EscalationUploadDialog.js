@@ -83,8 +83,7 @@ export default function EscalationUploadDialog({ open, onClose }) {
       destroyOnClose
     >
       <p style={{ marginBottom: 12, color: "var(--text-muted, #6b7280)" }}>
-        Upload an escalation document — <strong>JSON</strong> (any structure) or{" "}
-        <strong>PDF</strong>. It’s indexed automatically and you’ll be taken to
+        Upload an escalation document. It’s indexed automatically and you’ll be taken to
         the chat to ask escalation questions.
       </p>
       <Dragger
@@ -100,8 +99,8 @@ export default function EscalationUploadDialog({ open, onClose }) {
         <p className="ant-upload-drag-icon">
           <InboxOutlined />
         </p>
-        <p className="ant-upload-text">Click or drag a JSON / PDF here</p>
-        <p className="ant-upload-hint">Accepts .json and .pdf</p>
+        <p className="ant-upload-text">Click or drag a PDF here</p>
+        <p className="ant-upload-hint">Accepts .pdf</p>
       </Dragger>
       {busy && (
         <div style={{ marginTop: 14 }}>

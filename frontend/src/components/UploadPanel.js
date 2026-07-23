@@ -26,7 +26,7 @@ const DOC_ACCEPT = ".txt,.md,.json,.pdf,.docx,.log,.csv,.xlsx,.xls";
 // frontend flag is off, the dropdown is disabled and defaults to
 // 'ticket' so behavior is byte-identical to post-PREP-A.
 const DOC_KIND_OPTIONS = [
-  { value: "ticket",           label: "Ticket history (JSON)" },
+  { value: "ticket",           label: "Ticket history" },
   { value: "sop",              label: "SOP / Runbook" },
   { value: "kb",               label: "KB article" },
   { value: "contact_customer", label: "Customer contact directory" },

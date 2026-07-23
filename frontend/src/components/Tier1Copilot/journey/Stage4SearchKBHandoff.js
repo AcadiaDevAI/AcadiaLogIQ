@@ -108,7 +108,14 @@ export default function Stage4SearchKBHandoff({
       // Sprint 10.6 §3 — backend response no longer carries
       // has_corpus; the handoff invokes /ask the same way regular chat
       // does (no doc-kind gate, no filter), so the boolean is gone.
-      const { chat_session_id } = await searchKbHandoff(sessionId);
+      const handoff = await searchKbHandoff(sessionId);
+      const { chat_session_id } = handoff;
+      // Idea A (US Pharma) — when the backend opened the store-scoped chat
+      // with a summary + sample questions, it returns `store_summary`. In
+      // that case the opener (assistant summary + chips) is already
+      // persisted and loads via SET_SESSION below, so we SKIP the legacy
+      // auto-`/ask` "give me details" dump entirely.
+      const isStoreOpener = !!handoff.store_summary;
 
       // Switch the main pane to chat. AppLayout reads
       // state.selectedMode; when non-null it falls through from
@@ -134,56 +141,32 @@ export default function Stage4SearchKBHandoff({
       } catch (sessErr) {
         // eslint-disable-next-line no-console
         console.warn("[journey.stage4] SET_SESSION hydration failed", sessErr);
-        dispatch({
-          type: "ADD_USER_MESSAGE",
-          payload: data.prefilled_message,
-        });
+        if (isStoreOpener) {
+          // Fallback for the store opener: surface the summary + chips
+          // directly (the persisted turn didn't load).
+          dispatch({
+            type: "ADD_ASSISTANT_MESSAGE",
+            payload: {
+              answer: handoff.store_summary,
+              sources: [],
+              suggestions: handoff.sample_questions || [],
+              sessionId: chat_session_id,
+            },
+          });
+        } else {
+          dispatch({
+            type: "ADD_USER_MESSAGE",
+            payload: data.prefilled_message,
+          });
+        }
       }
 
-      // Sprint 10.6 §3 — auto-fire /ask through the same pipeline
-      // regular chat uses, BUT with retrieval pinned to KB-style
-      // chunks (PDF / DOCX / SOP / runbook). The previous behaviour
-      // ("no allowed_doc_kinds, no filter") leaked ticket JSON into
-      // KB-search answers because every upload was being mis-tagged
-      // as doc_kind="ticket". With content-aware doc_kind detection
-      // in the ingestion path, KB uploads now land as doc_kind="kb"
-      // and we can safely scope retrieval to those.
-      //
-      // If the backend handoff returned an explicit allowed_doc_kinds
-      // for this stage, honor it — otherwise default to ["kb"].
-      const handoffDocKinds = Array.isArray(data.allowed_doc_kinds) && data.allowed_doc_kinds.length
-        ? data.allowed_doc_kinds
-        : ["kb"];
-      dispatch({ type: "SET_LOADING", payload: true });
-      try {
-        const askRes = await askQuestion(
-          data.prefilled_message,
-          chat_session_id,
-          null,
-          { allowedDocKinds: handoffDocKinds },
-        );
-        const askData = askRes.data;
-        dispatch({
-          type: "ADD_ASSISTANT_MESSAGE",
-          payload: {
-            answer: askData.answer,
-            sources: askData.sources || [],
-            confidence: askData.confidence,
-            processing_time_ms: askData.processing_time_ms,
-            sessionId: askData.session_id,
-            context_stats: askData.context_stats || null,
-            needs_clarification: askData.needs_clarification,
-            clarification_id: askData.clarification_id,
-            clarification_options: askData.clarification_options,
-            clarification_context: askData.clarification_context,
-          },
-        });
-        // Sprint 11 — engagement signal. Posted ONLY when /ask
-        // returned successfully (i.e., the engineer actually saw an
-        // assistant answer in the chat). The escalation traversal
-        // log uses this to distinguish "opened KB chat (1 exchange)"
-        // from a click-through that never triggered any retrieval.
-        // Fire-and-forget; a telemetry failure shouldn't disrupt UX.
+      // Idea A (US Pharma store opener): the chat already opened with a
+      // persisted summary + sample-question chips (loaded via SET_SESSION).
+      // Do NOT auto-fire the legacy "give me details" /ask — the engineer
+      // drives from here by clicking a chip or typing. Still emit the
+      // engagement signal so Stage 5's traversal log sees the KB chat open.
+      if (isStoreOpener) {
         postJourneyEvent(
           sessionId, "stage_4", "kb_chat_engaged",
           { chat_session_id },
@@ -191,11 +174,64 @@ export default function Stage4SearchKBHandoff({
           // eslint-disable-next-line no-console
           console.warn("[journey.stage4] kb_chat_engaged telemetry failed", tErr);
         });
-      } catch (askErr) {
-        // eslint-disable-next-line no-console
-        console.warn("[journey.stage4] /ask follow-up failed", askErr);
-      } finally {
-        dispatch({ type: "SET_LOADING", payload: false });
+      } else {
+        // Sprint 10.6 §3 — auto-fire /ask through the same pipeline
+        // regular chat uses, BUT with retrieval pinned to KB-style
+        // chunks (PDF / DOCX / SOP / runbook). The previous behaviour
+        // ("no allowed_doc_kinds, no filter") leaked ticket JSON into
+        // KB-search answers because every upload was being mis-tagged
+        // as doc_kind="ticket". With content-aware doc_kind detection
+        // in the ingestion path, KB uploads now land as doc_kind="kb"
+        // and we can safely scope retrieval to those.
+        //
+        // If the backend handoff returned an explicit allowed_doc_kinds
+        // for this stage, honor it — otherwise default to ["kb"].
+        const handoffDocKinds = Array.isArray(data.allowed_doc_kinds) && data.allowed_doc_kinds.length
+          ? data.allowed_doc_kinds
+          : ["kb"];
+        dispatch({ type: "SET_LOADING", payload: true });
+        try {
+          const askRes = await askQuestion(
+            data.prefilled_message,
+            chat_session_id,
+            null,
+            { allowedDocKinds: handoffDocKinds },
+          );
+          const askData = askRes.data;
+          dispatch({
+            type: "ADD_ASSISTANT_MESSAGE",
+            payload: {
+              answer: askData.answer,
+              sources: askData.sources || [],
+              confidence: askData.confidence,
+              processing_time_ms: askData.processing_time_ms,
+              sessionId: askData.session_id,
+              context_stats: askData.context_stats || null,
+              needs_clarification: askData.needs_clarification,
+              clarification_id: askData.clarification_id,
+              clarification_options: askData.clarification_options,
+              clarification_context: askData.clarification_context,
+            },
+          });
+          // Sprint 11 — engagement signal. Posted ONLY when /ask
+          // returned successfully (i.e., the engineer actually saw an
+          // assistant answer in the chat). The escalation traversal
+          // log uses this to distinguish "opened KB chat (1 exchange)"
+          // from a click-through that never triggered any retrieval.
+          // Fire-and-forget; a telemetry failure shouldn't disrupt UX.
+          postJourneyEvent(
+            sessionId, "stage_4", "kb_chat_engaged",
+            { chat_session_id },
+          ).catch((tErr) => {
+            // eslint-disable-next-line no-console
+            console.warn("[journey.stage4] kb_chat_engaged telemetry failed", tErr);
+          });
+        } catch (askErr) {
+          // eslint-disable-next-line no-console
+          console.warn("[journey.stage4] /ask follow-up failed", askErr);
+        } finally {
+          dispatch({ type: "SET_LOADING", payload: false });
+        }
       }
     } catch (err) {
       // eslint-disable-next-line no-console

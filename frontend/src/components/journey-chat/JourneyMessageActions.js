@@ -36,6 +36,8 @@ import {
 import { useChat } from "../../hooks/ChatContext";
 import EscalationReasonModal from "../Tier1Copilot/journey/EscalationReasonModal";
 import { postJourneyEvent } from "../Tier1Copilot/journey/journeyApi";
+import { useOrg } from "../../hooks/OrgContext";
+import { isUSPharma } from "../../orgs/registry";
 
 
 // ─── Premium pill — compact variant for chat-message action rows ─────
@@ -125,9 +127,15 @@ const ACCENT_ESCALATE = {
 
 export default function JourneyMessageActions({ journeySessionId }) {
   const { dispatch } = useChat();
+  const { activeOrg } = useOrg();
   const [escalating, setEscalating] = React.useState(false);
   // Sprint 13.25 — modal-gated escalate
   const [modalOpen, setModalOpen] = React.useState(false);
+
+  // US Pharma renames this action to "Handoff / Escalate".
+  const escalateLabel = isUSPharma(activeOrg?.slug)
+    ? "Handoff / Escalate"
+    : "Escalate to Tier 2";
 
   if (!journeySessionId) return null;
 
@@ -194,7 +202,7 @@ export default function JourneyMessageActions({ journeySessionId }) {
           <CompactPill
             accent={ACCENT_ESCALATE}
             icon={<ExportOutlined />}
-            label="Escalate to Tier 2"
+            label={escalateLabel}
             onClick={handleEscalateClick}
             loading={escalating}
           />
