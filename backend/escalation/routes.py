@@ -29,9 +29,9 @@ from backend.tenancy.context import get_request_context, require_org_admin
 
 from .bedrock_client import embed_text
 from .bootstrap import ensure_kb_loaded, scan_report
-from .parser import parse_pdf
+from .parser import parse_json, parse_pdf
 from .qa import answer as answer_question
-from .sections import KB_FILENAME, SECTION_IDS
+from .sections import GENERAL_SECTION, KB_FILENAME, SECTION_IDS
 from .store import delete_kb, save_kb
 
 
@@ -66,7 +66,7 @@ class HistoryTurn(BaseModel):
 
 
 class AskRequest(BaseModel):
-    section: Literal["cisco", "microsoft", "verizon", "att", "vendor_dispatch"]
+    section: Literal["cisco", "microsoft", "verizon", "att", "vendor_dispatch", "general"]
     question: str = Field(min_length=1, max_length=2000)
     history: List[HistoryTurn] = Field(default_factory=list)
     model_config = ConfigDict(extra="ignore")
@@ -124,20 +124,26 @@ async def upload(
         raise HTTPException(400, "No active organization. Pick an organization first.")
     org_key = str(ctx.org_id)
 
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(400, "Only PDF uploads are accepted.")
+    fname = (file.filename or "").lower()
+    is_json = fname.endswith(".json")
+    if not (fname.endswith(".pdf") or is_json):
+        raise HTTPException(400, "Only PDF or JSON uploads are accepted.")
 
     content = await file.read()
     if not content:
         raise HTTPException(400, "Empty file payload.")
 
     try:
-        chunks, sections_summary = parse_pdf(content)
+        # JSON escalation matrices (US Pharma) parse into the catch-all
+        # "general" section; PDFs keep the vendor-section detection.
+        chunks, sections_summary = (
+            parse_json(content) if is_json else parse_pdf(content)
+        )
     except ValueError as exc:
         raise HTTPException(400, str(exc))
     except Exception as exc:
-        logger.warning("[escalation] parse_pdf failed: %s", exc)
-        raise HTTPException(500, "Failed to parse the PDF.")
+        logger.warning("[escalation] parse failed (%s): %s", fname, exc)
+        raise HTTPException(500, "Failed to parse the uploaded document.")
 
     if not chunks:
         raise HTTPException(400, "No content extracted from the PDF.")
@@ -234,7 +240,7 @@ async def ask(
     user_id: Optional[str] = Depends(lazy_auth_dependency),
     ctx=Depends(get_request_context),
 ) -> AskResponse:
-    if payload.section not in SECTION_IDS:
+    if payload.section not in SECTION_IDS and payload.section != GENERAL_SECTION:
         raise HTTPException(400, "Unknown section.")
 
     if not ctx.org_id:

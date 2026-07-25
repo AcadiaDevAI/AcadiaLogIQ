@@ -430,7 +430,7 @@ export default function LandingPage({
         ...baseEntryOptions.slice(0, -1),
         {
           value: "kb_sop",
-          label: "Discuss Store Specific with LogIQ",
+          label: "Discuss Store Specifics with LogIQ",
           sub: "Search the knowledge base & SOPs across all files",
           icon: <FileSearchOutlined />,
           accent: "var(--aurora-1)",

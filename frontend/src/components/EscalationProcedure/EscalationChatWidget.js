@@ -17,6 +17,20 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 
 import { askEscalation } from "./escalationApi";
+import { useOrg } from "../../hooks/OrgContext";
+import { isUSPharma } from "../../orgs/registry";
+
+// Accent gradients + shadows. Acadia keeps the premium blue; US Pharma
+// swaps to the org's soft-red "aurora" so the escalation chat matches the
+// "Discuss with LogIQ" theme (--aurora-1 = #FF8A9B). Kept as plain hexes
+// (not the private uspharma palette) since this is a shared component.
+const BLUE_GRADIENT = "linear-gradient(135deg, #1E4FAF 0%, #5B8DEF 100%)";
+const BLUE_SHADOW =
+  "0 12px 28px -10px rgba(30, 79, 175, 0.55), 0 4px 12px rgba(0,0,0,0.15)";
+const USP_RED_GRADIENT =
+  "linear-gradient(135deg, #FF8A9B 0%, #E31837 55%, #B00E24 100%)";
+const USP_RED_SHADOW =
+  "0 12px 28px -10px rgba(227, 24, 55, 0.55), 0 4px 12px rgba(0,0,0,0.15)";
 
 
 const { Text } = Typography;
@@ -79,13 +93,12 @@ const LAUNCHER_STYLE = {
   width: 56,
   height: 56,
   borderRadius: "50%",
-  background:
-    "linear-gradient(135deg, #1E4FAF 0%, #5B8DEF 100%)",
+  background: BLUE_GRADIENT,
   color: "#fff",
   border: "none",
   fontSize: 26,
   cursor: "pointer",
-  boxShadow: "0 12px 28px -10px rgba(30, 79, 175, 0.55), 0 4px 12px rgba(0,0,0,0.15)",
+  boxShadow: BLUE_SHADOW,
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -118,6 +131,14 @@ export default function EscalationChatWidget() {
   const [messages, setMessages] = useState([]);
   const [draft, setDraft] = useState("");
   const [sending, setSending] = useState(false);
+
+  // US Pharma repaints the escalation chat's blue accent to the org's
+  // soft-red aurora (matches the "Discuss with LogIQ" theme). Every other
+  // org keeps the premium blue.
+  const { activeOrg } = useOrg();
+  const usp = isUSPharma(activeOrg?.slug);
+  const accentBg = usp ? USP_RED_GRADIENT : BLUE_GRADIENT;
+  const accentShadow = usp ? USP_RED_SHADOW : BLUE_SHADOW;
 
   const scrollRef = useRef(null);
 
@@ -209,7 +230,7 @@ export default function EscalationChatWidget() {
         <button
           type="button"
           aria-label="Open escalation chat"
-          style={LAUNCHER_STYLE}
+          style={usp ? { ...LAUNCHER_STYLE, background: accentBg, boxShadow: accentShadow } : LAUNCHER_STYLE}
           onClick={() => setMode("expanded")}
         >
           <span role="img" aria-hidden>
@@ -226,8 +247,7 @@ export default function EscalationChatWidget() {
       <div
         style={{
           padding: "12px 14px",
-          background:
-            "linear-gradient(135deg, #1E4FAF 0%, #5B8DEF 100%)",
+          background: accentBg,
           color: "#fff",
           display: "flex",
           alignItems: "center",
@@ -292,7 +312,7 @@ export default function EscalationChatWidget() {
                   padding: "9px 12px",
                   borderRadius: 12,
                   background: isUser
-                    ? "linear-gradient(135deg, #1E4FAF 0%, #5B8DEF 100%)"
+                    ? accentBg
                     : "var(--bg-secondary, #fff)",
                   color: isUser ? "#fff" : "var(--text, #0f172a)",
                   border: isUser

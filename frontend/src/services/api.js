@@ -288,7 +288,7 @@ export const listSessions = () => api.get("/chat/sessions");
 export const getSession = (sessionId) => api.get(`/chat/sessions/${sessionId}`);
 
 // US Pharma — create an empty chat session hard-scoped to one Store ID
-// (the "Discuss Store Specific with LogIQ" Store-ID dialog). Returns
+// (the " with LogIQ" Store-ID dialog). Returns
 // { session_id, scope_store_id }.
 export const createStoreScopedChat = (storeId) =>
   api.post("/chat/sessions/store-scoped", { store_id: storeId });

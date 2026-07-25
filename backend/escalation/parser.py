@@ -16,6 +16,7 @@ time can filter strictly by section without any cross-talk.
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass
@@ -24,7 +25,7 @@ from typing import Dict, List, Optional, Tuple
 
 import fitz
 
-from .sections import SECTION_ANCHORS, SECTION_IDS
+from .sections import GENERAL_SECTION, SECTION_ANCHORS, SECTION_IDS
 
 
 logger = logging.getLogger("acadia-log-iq")
@@ -166,6 +167,39 @@ def _chunk_text(
         if start + chunk_chars >= len(cleaned):
             break
     return out
+
+
+def parse_json(json_bytes: bytes) -> Tuple[List[EscalationChunk], Dict[str, Dict[str, int]]]:
+    """Parse a JSON escalation document into chunks under GENERAL_SECTION.
+
+    US Pharma uploads JSON escalation matrices (any structure) rather than a
+    vendor-sectioned PDF. We render the JSON to indented text (lossless) and
+    window it into overlapping chunks so ``/escalation/ask`` can retrieve
+    across the whole document — there are no per-vendor sections to detect.
+
+    Returns the same ``(chunks, section_summary)`` shape as :func:`parse_pdf`.
+    """
+    if not json_bytes:
+        raise ValueError("Empty JSON payload")
+    try:
+        data = json.loads(json_bytes.decode("utf-8"))
+    except Exception as exc:
+        raise ValueError(f"Invalid JSON: {exc}")
+
+    # Indented dump keeps keys next to values so a chunk stays readable.
+    text = json.dumps(data, indent=2, ensure_ascii=False)
+    pieces = _chunk_text(text, chunk_chars=1200, overlap_chars=150)
+    if not pieces:
+        raise ValueError("No content extracted from the JSON.")
+
+    chunks = [
+        EscalationChunk(section=GENERAL_SECTION, page=idx + 1, text=piece)
+        for idx, piece in enumerate(pieces)
+    ]
+    summary: Dict[str, Dict[str, int]] = {
+        GENERAL_SECTION: {"start_page": 1, "end_page": len(chunks), "chunks": len(chunks)}
+    }
+    return chunks, summary
 
 
 def parse_pdf(pdf_bytes: bytes) -> Tuple[List[EscalationChunk], Dict[str, Dict[str, int]]]:

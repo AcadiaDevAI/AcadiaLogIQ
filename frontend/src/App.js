@@ -268,19 +268,16 @@ function AppLayout() {
   const [escalationUploadOpen, setEscalationUploadOpen] = useState(false);
   const handleOpenEscalationProcedure = useCallback(() => {
     if (usPharma) {
-      // Admins curate the escalation KB (upload dialog). Members are
-      // read-only, so they go straight into the chatbot to QUERY the
-      // escalation data an admin already uploaded — no upload step (uploads
-      // are admin-gated server-side anyway).
-      if (isAdmin) {
-        setEscalationUploadOpen(true);
-      } else {
-        dispatch({ type: "NEW_CHAT", payload: { kbSearchFromLanding: true } });
-      }
+      // US Pharma — persistent per-org escalation KB (same backend as
+      // Acadia: /escalation/status + /escalation/upload). The dialog checks
+      // status: if a doc is already uploaded it opens the escalation chat
+      // directly (no re-upload); otherwise an admin uploads (PDF/JSON) and
+      // then lands in the chat. Uploads are admin-only (server-enforced).
+      setEscalationUploadOpen(true);
     } else {
       setEscalationModalOpen(true);
     }
-  }, [usPharma, isAdmin, dispatch]);
+  }, [usPharma]);
 
   const handleReturnFromGapAnalysis = useCallback(() => {
     // Mirror RCA's "Return to Stages" — drop the user on the
@@ -422,9 +419,10 @@ function AppLayout() {
         open={escalationModalOpen}
         onClose={() => setEscalationModalOpen(false)}
       />
-      {/* US Pharma — upload-then-chat escalation surface (JSON/PDF). */}
+      {/* US Pharma — persistent escalation KB surface (JSON/PDF). */}
       <EscalationUploadDialog
         open={escalationUploadOpen}
+        isAdmin={isAdmin}
         onClose={() => setEscalationUploadOpen(false)}
       />
       <EscalationChatWidget />

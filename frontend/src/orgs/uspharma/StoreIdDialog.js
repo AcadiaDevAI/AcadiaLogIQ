@@ -77,7 +77,7 @@ export default function StoreIdDialog({ open, onClose }) {
   return (
     <Modal
       open={open}
-      title="Discuss Store Specific with LogIQ"
+      title="Discuss Store Specifics with LogIQ"
       okText="Start chat"
       cancelText="Cancel"
       confirmLoading={busy}

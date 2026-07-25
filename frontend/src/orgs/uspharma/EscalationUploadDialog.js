@@ -1,74 +1,108 @@
 // EscalationUploadDialog — US Pharma "Escalation Procedure" surface.
 //
-// Replaces Acadia's fixed-PDF vendor-section modal for US Pharma
-// (escalation_mode = "upload_chat"). The engineer uploads an escalation
-// document — JSON of ANY structure (ingested by the recursive, lossless
-// chunker) or a PDF — and, once it's indexed, is dropped straight into the
-// chatbot to ask escalation questions against it.
+// Uses the SAME persistent backend as Acadia (GET /escalation/status +
+// POST /escalation/upload → per-org kb.json), so the escalation document is
+// uploaded ONCE and never needs re-uploading. Two US-Pharma differences from
+// Acadia's flow:
+//   1. Accepts BOTH PDF and JSON (Acadia is PDF-only). JSON matrices are
+//      ingested whole under the catch-all "general" section.
+//   2. After a successful upload — or immediately, when a doc already
+//      exists — it drops the user straight into the escalation chatbot
+//      instead of Acadia's vendor-section picker.
+//
+// Upload is admin-only: enforced server-side by require_org_admin, and the
+// dragger is shown only to admins here. Members land directly in the chat
+// (to query a doc an admin already uploaded).
 //
 // US-Pharma-only: mounted/opened solely by the US Pharma branch in App.js.
 
-import React, { useState } from "react";
-import { Modal, Upload, Progress, message } from "antd";
+import React, { useEffect, useState } from "react";
+import { Modal, Upload, Progress, Spin, message } from "antd";
 import { InboxOutlined } from "@ant-design/icons";
-import { useChat } from "../../hooks/ChatContext";
-import { uploadFileV2, getUploadStatus } from "../../services/api";
+import {
+  getEscalationStatus,
+  uploadEscalationPdf,
+} from "../../components/EscalationProcedure/escalationApi";
 
 const { Dragger } = Upload;
 
-export default function EscalationUploadDialog({ open, onClose }) {
-  const { dispatch } = useChat();
+// Open the shared floating escalation chat (the same widget Acadia hands off
+// to). US Pharma has no vendor sections, so we use the catch-all "general"
+// section, which searches the whole KB.
+function openEscalationChat() {
+  window.dispatchEvent(
+    new CustomEvent("acadia:open-escalation-chat", {
+      detail: { section: "general", label: "Escalation" },
+    })
+  );
+}
+
+export default function EscalationUploadDialog({ open, onClose, isAdmin }) {
+  const [checking, setChecking] = useState(true);
   const [busy, setBusy] = useState(false);
   const [progress, setProgress] = useState(0);
-  const [statusText, setStatusText] = useState("");
 
   const close = () => {
+    setChecking(true);
     setBusy(false);
     setProgress(0);
-    setStatusText("");
     onClose && onClose();
   };
 
-  // Poll ingestion to completion so the data is searchable before we open the
-  // chat. Mirrors UploadPanel.pollJob (status "done" | "failed" | "error").
-  const pollJob = async (jobId) => {
-    for (let i = 0; i < 120; i++) {
+  // On open, check whether this org already has an escalation doc. If so,
+  // skip straight to the chat (no re-upload). Otherwise show the uploader
+  // (admins) or an info note (members).
+  useEffect(() => {
+    if (!open) return undefined;
+    let cancelled = false;
+    setChecking(true);
+    setBusy(false);
+    setProgress(0);
+    (async () => {
       try {
-        const res = await getUploadStatus(jobId);
-        const { status, error } = res.data;
-        if (status === "done") return { ok: true };
-        if (status === "failed" || status === "error") return { ok: false, error };
-      } catch {
-        /* transient — keep polling */
+        const status = await getEscalationStatus();
+        if (cancelled) return;
+        if (status?.ready) {
+          // Already uploaded — open the chat directly, no re-upload.
+          openEscalationChat();
+          close();
+          return;
+        }
+        if (!isAdmin) {
+          message.info(
+            "No escalation document has been uploaded yet. Please ask an admin to upload one."
+          );
+          close();
+          return;
+        }
+        setChecking(false); // admin + not ready → show the uploader
+      } catch (err) {
+        if (cancelled) return;
+        message.error("Could not check the escalation document. Please try again.");
+        close();
       }
-      await new Promise((r) => setTimeout(r, 1500));
-    }
-    return { ok: false, error: "timed out" };
-  };
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
 
   const handleFile = async (file) => {
     setBusy(true);
     setProgress(0);
-    setStatusText("Uploading…");
     try {
-      const res = await uploadFileV2(file, "kb", (pct) => setProgress(pct));
-      const jobId = res?.data?.job_id;
-      setStatusText("Indexing…");
-      const done = await pollJob(jobId);
-      if (!done.ok) {
-        message.error(done.error ? `Indexing failed — ${done.error}` : "Indexing failed", 8);
-        setBusy(false);
-        return;
-      }
+      await uploadEscalationPdf(file, {
+        onUploadProgress: (e) => {
+          if (e.total) setProgress(Math.round((e.loaded / e.total) * 100));
+        },
+      });
       message.success("Uploaded — opening chat");
-      // Navigate to the chatbot: a general chat over all files (incl. the
-      // just-uploaded escalation doc). kbSearchFromLanding surfaces the
-      // "Back to screen" button.
-      dispatch({ type: "NEW_CHAT", payload: { kbSearchFromLanding: true } });
+      openEscalationChat();
       close();
     } catch (err) {
-      const detail = err?.response?.data?.error || err?.message || "Upload failed";
-      message.error(detail);
+      const detail =
+        err?.response?.data?.detail || err?.message || "Upload failed";
+      message.error(detail, 8);
       setBusy(false);
     }
   };
@@ -82,33 +116,39 @@ export default function EscalationUploadDialog({ open, onClose }) {
       maskClosable={!busy}
       destroyOnClose
     >
-      <p style={{ marginBottom: 12, color: "var(--text-muted, #6b7280)" }}>
-        Upload an escalation document. It’s indexed automatically and you’ll be taken to
-        the chat to ask escalation questions.
-      </p>
-      <Dragger
-        accept=".json,.pdf,application/json,application/pdf"
-        multiple={false}
-        showUploadList={false}
-        disabled={busy}
-        beforeUpload={(file) => {
-          handleFile(file);
-          return false; // prevent AntD's built-in auto-upload
-        }}
-      >
-        <p className="ant-upload-drag-icon">
-          <InboxOutlined />
-        </p>
-        <p className="ant-upload-text">Click or drag a PDF here</p>
-        <p className="ant-upload-hint">Accepts .pdf</p>
-      </Dragger>
-      {busy && (
-        <div style={{ marginTop: 14 }}>
-          <Progress percent={progress} status="active" />
-          <div style={{ marginTop: 6, fontSize: 12, color: "var(--text-muted, #6b7280)" }}>
-            {statusText}
-          </div>
+      {checking ? (
+        <div style={{ textAlign: "center", padding: "28px 0" }}>
+          <Spin />
+          <p style={{ marginTop: 12, color: "var(--text-muted, #6b7280)" }}>
+            Checking escalation document…
+          </p>
         </div>
+      ) : (
+        <>
+          <p style={{ marginBottom: 12, color: "var(--text-muted, #6b7280)" }}>
+            Upload the escalation document (PDF or JSON). It&apos;s indexed once
+            and persists — you won&apos;t need to upload it again. You&apos;ll be
+            taken straight to the chat to ask escalation questions.
+          </p>
+          <Dragger
+            accept=".json,.pdf,application/json,application/pdf"
+            multiple={false}
+            showUploadList={false}
+            disabled={busy}
+            beforeUpload={(file) => {
+              handleFile(file);
+              return false; // prevent AntD's built-in auto-upload
+            }}
+          >
+            <p className="ant-upload-drag-icon">
+              <InboxOutlined />
+            </p>
+            <p className="ant-upload-text">
+              Click or drag a PDF / JSON file to upload
+            </p>
+          </Dragger>
+          {busy && <Progress percent={progress} style={{ marginTop: 12 }} />}
+        </>
       )}
     </Modal>
   );

@@ -6,8 +6,8 @@ import logging
 from typing import Dict, List, Optional
 
 from .bedrock_client import answer_with_excerpts, cosine, embed_text
-from .sections import SECTION_LABELS
-from .store import chunks_for_section
+from .sections import GENERAL_SECTION, SECTION_LABELS
+from .store import all_chunks, chunks_for_section
 
 
 logger = logging.getLogger("acadia-log-iq")
@@ -33,12 +33,17 @@ def answer(
     history: Optional[List[Dict]] = None,
     top_k: int = 5,
 ) -> Dict:
-    section_chunks = chunks_for_section(org_id, section_id)
+    # "general" (US Pharma JSON / unsectioned) searches the whole KB; every
+    # other section stays strictly scoped to its own chunks.
+    if section_id == GENERAL_SECTION:
+        section_chunks = all_chunks(org_id)
+    else:
+        section_chunks = chunks_for_section(org_id, section_id)
     if not section_chunks:
         return {
             "answer": (
                 "The Escalation Procedures KB hasn't been uploaded yet, or "
-                "this section was not detected in the uploaded PDF."
+                "this section was not detected in the uploaded document."
             ),
             "sources": [],
         }

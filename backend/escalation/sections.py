@@ -14,6 +14,12 @@ from typing import Dict, List
 
 SECTION_IDS: List[str] = ["cisco", "microsoft", "verizon", "att", "vendor_dispatch"]
 
+# Catch-all section for uploads that have no vendor-section headings — e.g.
+# US Pharma's JSON escalation matrices, which are ingested whole and queried
+# across the entire KB (no per-vendor picker). Kept OUT of SECTION_IDS so the
+# PDF section detector is unaffected.
+GENERAL_SECTION = "general"
+
 
 SECTION_LABELS: Dict[str, str] = {
     "cisco": "Cisco",
@@ -21,6 +27,7 @@ SECTION_LABELS: Dict[str, str] = {
     "verizon": "Verizon",
     "att": "AT&T",
     "vendor_dispatch": "Vendor Dispatch",
+    "general": "Escalation",
 }
 
 

@@ -143,6 +143,16 @@ def chunks_for_section(org_id: str, section_id: str) -> List[Dict]:
     return [c for c in kb.get("chunks", []) if c.get("section") == section_id]
 
 
+def all_chunks(org_id: str) -> List[Dict]:
+    """Every chunk for this org, across all sections. Used by the catch-all
+    "general" query (US Pharma) which searches the whole KB rather than one
+    vendor section."""
+    kb = load_kb(org_id)
+    if not kb:
+        return []
+    return list(kb.get("chunks", []))
+
+
 def delete_kb(org_id: str) -> bool:
     """Remove the persisted KB JSON for ONE ORG so the next /status call
     shows the upload step again. Returns True if a file was deleted,
