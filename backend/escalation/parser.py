@@ -182,7 +182,9 @@ def parse_json(json_bytes: bytes) -> Tuple[List[EscalationChunk], Dict[str, Dict
     if not json_bytes:
         raise ValueError("Empty JSON payload")
     try:
-        data = json.loads(json_bytes.decode("utf-8"))
+        # utf-8-sig strips a leading BOM (Windows editors add one), which
+        # otherwise makes json.loads fail with "Expecting value".
+        data = json.loads(json_bytes.decode("utf-8-sig"))
     except Exception as exc:
         raise ValueError(f"Invalid JSON: {exc}")
 
@@ -230,10 +232,26 @@ def parse_pdf(pdf_bytes: bytes) -> Tuple[List[EscalationChunk], Dict[str, Dict[s
 
     starts = _detect_section_starts(page_texts)
     if not starts:
-        raise ValueError(
-            "No section headings detected. Expected Cisco / Verizon / "
-            "AT&T / Vendor Dispatch as section titles."
-        )
+        # No Acadia vendor-section headings (Cisco / Verizon / AT&T / Vendor
+        # Dispatch) — e.g. a US Pharma vendor-escalation PDF or any other
+        # unstructured escalation doc. Fall back to whole-document ingestion
+        # under the catch-all "general" section (searched across the whole KB
+        # at query time) instead of rejecting the upload with a 400.
+        fallback_chunks = [
+            EscalationChunk(section=GENERAL_SECTION, page=idx + 1, text=piece)
+            for idx, page_text in enumerate(page_texts)
+            for piece in _chunk_text(page_text)
+        ]
+        if not fallback_chunks:
+            raise ValueError("No text could be extracted from the PDF.")
+        summary = {
+            GENERAL_SECTION: {
+                "start_page": 1,
+                "end_page": total_pages,
+                "chunks": len(fallback_chunks),
+            }
+        }
+        return fallback_chunks, summary
 
     chunks: List[EscalationChunk] = []
     summary: Dict[str, Dict[str, int]] = {}

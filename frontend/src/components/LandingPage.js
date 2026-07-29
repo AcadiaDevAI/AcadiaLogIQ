@@ -418,7 +418,7 @@ export default function LandingPage({
   const isUspLanding = !!onOpenKbSop;
   const relabelForUsp = (opt) =>
     isUspLanding && opt.value === "proactive_reactive"
-      ? { ...opt, label: "Proactive" }
+      ? { ...opt, label: "Discuss with LogIQ" }
       : opt;
   const baseEntryOptions = ENTRY_OPTIONS.map(relabelForUsp);
 
@@ -545,7 +545,7 @@ export default function LandingPage({
           <p style={subStyle}>
             Pick an entry point. RCA, and Gap Analysis open as focused popups.
             <br />
-            {isUspLanding ? "Proactive" : "Proactive / Reactive"} advances to the full Tier-1 mode picker.
+            {isUspLanding ? "Discuss with LogIQ" : "Proactive / Reactive"} advances to the full Tier-1 mode picker.
           </p>
 
           {/* Glass command card — same chrome as the mode-picker view */}

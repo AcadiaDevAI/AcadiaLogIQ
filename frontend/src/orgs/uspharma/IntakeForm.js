@@ -119,7 +119,7 @@ export default function USPharmaIntakeForm(props) {
             value={activeTab}
             onChange={(v) => setActiveTab(v)}
             options={[
-              { label: "Proactive", value: "proactive" },
+              { label: "Discuss with LogIQ", value: "proactive" },
               // US Pharma — Reactive mode hidden for now (Proactive only).
               // { label: "Reactive", value: "reactive" },
             ]}
