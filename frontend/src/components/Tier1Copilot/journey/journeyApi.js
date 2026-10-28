@@ -121,6 +121,23 @@ export async function generateEscalationHandoffNote(
   return data;
 }
 
+// US Pharma — GET /tier1/journey/{session_id}/store-chat-summary
+// → {summary, store_id, question_count, chat_count}
+//
+// LLM digest of the topics the engineer asked about across ALL their
+// "Discuss Store Specifics with LogIQ" chats for this journey's store.
+// Rendered on the Escalation screen next to the time-spent-on-KB
+// metrics. `summary` is null when there's no store or no questions —
+// the caller hides the section and the escalation report is unchanged.
+// Not cached server-side, so each call reflects the latest interaction.
+// Fails graceful: caller treats a network error as "no summary".
+export async function fetchStoreChatSummary(sessionId) {
+  const { data } = await api.get(
+    `/tier1/journey/${encodeURIComponent(sessionId)}/store-chat-summary`,
+  );
+  return data;
+}
+
 // Sprint 10.7 §4.4 — GET /tier1/journey/{session_id}/resume-state
 // → {session_id, current_stage, last_event_at}
 //

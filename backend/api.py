@@ -3753,6 +3753,11 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         owner_id=owner_id,
     )
 
+    # Staged-progress hook (no-op on the plain /ask path; the /ask/stream SSE
+    # endpoint registers a sink that forwards these milestones to the client).
+    from backend.services.progress import emit_progress as _emit_progress
+    _emit_progress("analyzing", "Analyzing your question…")
+
     # Capture clarifier-refined flag before clarification_response is consumed
     # below; pattern analytics uses this signal downstream.
     _pattern_is_clarifier_refined = req.clarification_response is not None
@@ -4274,6 +4279,10 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
     #     if expanded_emb:
     #         q_emb = expanded_emb
     
+    # Staged-progress hook — retrieval phase is about to begin (embedding +
+    # vector search). No-op unless a /ask/stream sink is registered.
+    _emit_progress("retrieving", "Retrieving relevant context…")
+
     # ── Follow-up enrichment: DEPRECATED by Brief 3 query rewriter. The
     # rewriter upstream already produces a self-contained effective_query,
     # so this call is a no-op returning its input. Kept for legacy reasons.
@@ -5338,6 +5347,9 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         # kwarg for backward compatibility; we pass None.
         _sprint3a_session_mode = None
 
+        # Staged-progress hook — retrieval done, answer generation begins.
+        _emit_progress("generating", "Generating the answer…")
+
         agent_result = run_agent_pipeline(
             query=effective_query,
             doc_context=doc_ctx,
@@ -5715,6 +5727,109 @@ async def ask(request: Request, req: Question, user_id: Optional[str] = Depends(
         session_id=session_id,
         context_stats=context_stats,
         confidence_band=_confidence_band,
+    )
+
+
+def _sse_frame(event: str, data: dict) -> str:
+    """Serialize one Server-Sent Events frame (``event:`` + ``data:``)."""
+    import json as _json
+
+    return f"event: {event}\ndata: {_json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@app.post("/ask/stream")
+async def ask_stream(
+    request: Request,
+    req: Question,
+    user_id: Optional[str] = Depends(auth_dependency),
+):
+    """SSE variant of ``POST /ask``.
+
+    Streams REAL pipeline milestones as ``stage`` events, then the full
+    AnswerResponse as a terminal ``done`` event. It reuses the EXACT /ask
+    pipeline (via ``backend.services.progress`` hooks) run in a worker thread —
+    so behavior and the response shape are identical to /ask, and the client
+    can always fall back to ``POST /ask`` if the stream fails.
+
+        event: stage   data: {"stage":"retrieving","label":"Retrieving relevant context…"}
+        event: done    data: { ...AnswerResponse... }
+        event: error   data: {"detail":"..."}
+    """
+    import asyncio
+    import threading
+
+    from fastapi.responses import StreamingResponse
+
+    from backend.services.progress import (
+        reset_progress_sink as _reset_sink,
+        set_progress_sink as _set_sink,
+    )
+
+    loop = asyncio.get_running_loop()
+    events: "asyncio.Queue" = asyncio.Queue()
+
+    def _sink(stage: str, label: str) -> None:
+        # Runs on the worker thread → hand the event to the loop thread safely.
+        loop.call_soon_threadsafe(
+            events.put_nowait, {"type": "stage", "stage": stage, "label": label}
+        )
+
+    def _worker() -> None:
+        token = _set_sink(_sink)
+        try:
+            # ask() is an async coroutine; run it to completion in this thread's
+            # OWN event loop so its (partly blocking) work never stalls the SSE
+            # generator on the main loop. The progress sink (a ContextVar) is
+            # captured into that loop's context because we set it first.
+            result = asyncio.run(ask(request, req, user_id))
+            payload = (
+                result.model_dump() if hasattr(result, "model_dump") else dict(result)
+            )
+            loop.call_soon_threadsafe(
+                events.put_nowait, {"type": "done", "payload": payload}
+            )
+        except Exception as exc:  # noqa: BLE001 — report to client, never crash
+            detail = getattr(exc, "detail", None) or str(exc) or "ask pipeline failed"
+            logger.warning("[ask_stream] pipeline failed: %s", exc)
+            loop.call_soon_threadsafe(
+                events.put_nowait, {"type": "error", "detail": str(detail)}
+            )
+        finally:
+            _reset_sink(token)
+
+    threading.Thread(target=_worker, name="ask-stream", daemon=True).start()
+
+    async def _event_stream():
+        # Immediate first frame so the UI replaces the bare dots with a label
+        # the instant the connection opens (before any pipeline work reports).
+        yield _sse_frame(
+            "stage", {"stage": "queued", "label": "Analyzing your question…"}
+        )
+        while True:
+            item = await events.get()
+            kind = item["type"]
+            if kind == "stage":
+                yield _sse_frame(
+                    "stage", {"stage": item["stage"], "label": item["label"]}
+                )
+            elif kind == "done":
+                yield _sse_frame("done", item["payload"])
+                break
+            else:  # error
+                yield _sse_frame(
+                    "error", {"detail": item.get("detail", "stream error")}
+                )
+                break
+
+    return StreamingResponse(
+        _event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            # Disable proxy buffering (e.g. nginx) so events flush immediately.
+            "X-Accel-Buffering": "no",
+        },
     )
 
 

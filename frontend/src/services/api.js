@@ -1,8 +1,8 @@
 import axios from "axios";
 
 // ── Config ────────────────────────────────────────────────
-//const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:8000";
-const API_BASE = window.location.origin.replace(":8501", ":8000");
+const API_BASE = process.env.REACT_APP_API_BASE || "http://localhost:8000";
+//const API_BASE = window.location.origin.replace(":8501", ":8000");
 const API_KEY = process.env.REACT_APP_API_KEY || "";
 const CLERK_ENABLED = !!process.env.REACT_APP_CLERK_PUBLISHABLE_KEY;
 
@@ -283,6 +283,127 @@ export const askQuestion = (
   }
   return api.post("/ask", payload);
 };
+
+// Streaming variant of askQuestion. EventSource can't POST, so we use fetch +
+// a ReadableStream reader and parse the text/event-stream frames by hand.
+//
+//   onStage({ stage, label })  — fired for every progress milestone
+//   returns                    — the final AnswerResponse object (same shape
+//                                as askQuestion's res.data)
+//
+// Reuses the SAME auth gate + token getter as the axios `api` instance so the
+// Bearer token / X-API-Key are attached identically. Throws on any transport
+// or stream error so the caller can fall back to the plain askQuestion POST.
+export async function askQuestionStream(
+  question,
+  sessionId,
+  { onStage, options = {}, signal } = {}
+) {
+  const payload = { q: question, session_id: sessionId || null };
+  if (Array.isArray(options.allowedDocKinds) && options.allowedDocKinds.length) {
+    payload.allowed_doc_kinds = options.allowedDocKinds;
+  }
+
+  // Wait for the Clerk auth gate (same 8s cap as the axios interceptor), then
+  // resolve a fresh token. Failure-open: proceed unauthenticated and let the
+  // server return 401, which the caller turns into a fallback.
+  if (CLERK_ENABLED) {
+    try {
+      await Promise.race([
+        _authReady,
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Auth init timed out (8s)")), 8000)
+        ),
+      ]);
+    } catch (_e) {
+      /* fall through */
+    }
+  }
+  let token = null;
+  if (_getToken) {
+    try {
+      token = await _getToken();
+    } catch (_e) {
+      /* fall through */
+    }
+  }
+
+  const resp = await fetch(`${API_BASE}/ask/stream`, {
+    method: "POST",
+    signal,
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+      ...(API_KEY ? { "X-API-Key": API_KEY } : {}),
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!resp.ok || !resp.body) {
+    const text = await resp.text().catch(() => "");
+    const err = new Error(`ask/stream HTTP ${resp.status}`);
+    err.status = resp.status;
+    err.body = text;
+    throw err;
+  }
+
+  const reader = resp.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalAnswer = null;
+
+  // Parse one SSE frame (lines separated by \n, frames by a blank line).
+  const handleFrame = (frame) => {
+    let event = "message";
+    const dataLines = [];
+    for (let line of frame.split("\n")) {
+      line = line.replace(/\r$/, "");
+      if (line.startsWith("event:")) event = line.slice(6).trim();
+      else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+    }
+    if (!dataLines.length) return;
+    let data;
+    try {
+      data = JSON.parse(dataLines.join("\n"));
+    } catch (_e) {
+      return; // ignore malformed frames
+    }
+    if (event === "stage") {
+      onStage && onStage(data);
+    } else if (event === "done") {
+      finalAnswer = data;
+    } else if (event === "error") {
+      const e = new Error(data?.detail || "stream error");
+      e.stream = true;
+      throw e;
+    }
+  };
+
+  try {
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (value) buffer += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) !== -1) {
+        const frame = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+        if (frame.trim()) handleFrame(frame);
+      }
+      if (done) break;
+    }
+    if (buffer.trim()) handleFrame(buffer); // flush trailing frame
+  } finally {
+    try {
+      reader.releaseLock();
+    } catch (_e) {
+      /* ignore */
+    }
+  }
+
+  if (!finalAnswer) throw new Error("stream ended without a final answer");
+  return finalAnswer;
+}
 
 export const listSessions = () => api.get("/chat/sessions");
 export const getSession = (sessionId) => api.get(`/chat/sessions/${sessionId}`);

@@ -32,6 +32,7 @@ import HelpfulButton from "./HelpfulButton";
 import CardWatermark from "./CardWatermark";
 import {
   fetchEscalationRouting,
+  fetchStoreChatSummary,
   generateEscalationHandoffNote,
   getActivityVersion,
   subscribeActivityVersion,
@@ -223,6 +224,84 @@ function EscalationRoutingSection({ routing }) {
           </Text>
         </Paragraph>
       ) : null}
+    </div>
+  );
+}
+
+
+// ────────────────────────────────────────────────────────────
+// US Pharma — "Discuss with LogIQ" topics discussed.
+//
+// An LLM-generated digest of the areas the engineer asked about
+// across ALL their store-scoped "Discuss Store Specifics with LogIQ"
+// chats for this store. Shown next to the time-spent-on-KB metrics so
+// a Tier-2 colleague picking up the escalation can see which areas
+// were already explored without reading every transcript.
+//
+// Purely additive + failure-open: when there's no store or no
+// questions (`summary` null/blank), the section renders nothing and
+// the escalation report is exactly what it was before. The parent
+// re-fetches on mount + on Regenerate, so it always reflects the
+// latest interaction and the currently-selected store.
+// ────────────────────────────────────────────────────────────
+function _parseSummaryBullets(summary) {
+  if (!summary || typeof summary !== "string") return [];
+  return summary
+    .split(/\r?\n/)
+    .map((line) => line.replace(/^\s*[-*•]\s*/, "").trim())
+    .filter(Boolean);
+}
+
+function StoreChatSummarySection({ data, loading }) {
+  const summary = data && typeof data.summary === "string" ? data.summary.trim() : "";
+  // Empty case — nothing discussed for this store → render nothing so
+  // the escalation report falls back to its prior (time-only) form.
+  if (!loading && !summary) return null;
+
+  const bullets = _parseSummaryBullets(summary);
+  const questionCount = data ? Number(data.questionCount ?? data.question_count ?? 0) : 0;
+  const chatCount = data ? Number(data.chatCount ?? data.chat_count ?? 0) : 0;
+
+  return (
+    <div style={{ marginTop: 16 }}>
+      <Title level={5} style={{ marginTop: 0, marginBottom: 4 }}>
+        Topics discussed with LogIQ
+      </Title>
+      {loading && !summary ? (
+        <div style={{ padding: "8px 0", display: "flex", alignItems: "center", gap: 8 }}>
+          <Spin size="small" />
+          <Text type="secondary" style={{ fontSize: 12 }}>
+            Summarizing the store chat questions…
+          </Text>
+        </div>
+      ) : (
+        <>
+          {questionCount > 0 ? (
+            <Paragraph style={{ marginBottom: 8 }}>
+              <Text type="secondary" style={{ fontSize: 12 }}>
+                Based on {questionCount} question{questionCount === 1 ? "" : "s"}
+                {chatCount > 0
+                  ? ` across ${chatCount} store chat${chatCount === 1 ? "" : "s"}`
+                  : ""}
+                {data && data.store_id ? ` for Store ${data.store_id}` : ""}.
+              </Text>
+            </Paragraph>
+          ) : null}
+          {bullets.length > 0 ? (
+            <ul style={{ marginTop: 0, marginBottom: 0, paddingLeft: 20 }}>
+              {bullets.map((b, i) => (
+                <li key={i} style={{ marginBottom: 4 }}>
+                  <Text>{b}</Text>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <Paragraph style={{ marginBottom: 0 }}>
+              <Text>{summary}</Text>
+            </Paragraph>
+          )}
+        </>
+      )}
     </div>
   );
 }
@@ -1343,6 +1422,39 @@ export default function Stage5EscalationPackage({
     fetchRouting();
   }, [fetchRouting]);
 
+  // US Pharma — "Topics discussed with LogIQ" digest. Fetched on mount
+  // (so landing on Escalation / Handoff always reflects the latest
+  // store-chat interaction) and refreshed alongside routing when the
+  // engineer clicks Regenerate. Failure-open: a network error leaves
+  // the section hidden, never blocking the panel.
+  const [storeSummary, setStoreSummary] = useState(null);
+  const [storeSummaryLoading, setStoreSummaryLoading] = useState(false);
+  const fetchStoreSummary = React.useCallback(async () => {
+    if (!sessionId) return;
+    setStoreSummaryLoading(true);
+    try {
+      const s = await fetchStoreChatSummary(sessionId);
+      setStoreSummary(s);
+    } catch (err) {
+      // eslint-disable-next-line no-console
+      console.warn("[journey.store_chat_summary] fetch failed", err);
+      setStoreSummary(null);
+    } finally {
+      setStoreSummaryLoading(false);
+    }
+  }, [sessionId]);
+  useEffect(() => {
+    fetchStoreSummary();
+  }, [fetchStoreSummary]);
+
+  // Regenerate on the handoff note is a hard reload of the whole Stage 5
+  // view — extend it to refresh the store-chat digest too so a "Refresh"
+  // after the engineer went back and asked more picks up the new topics.
+  const refreshStage5 = React.useCallback(() => {
+    fetchRouting();
+    fetchStoreSummary();
+  }, [fetchRouting, fetchStoreSummary]);
+
   // Sprint 12.9 — `if (!data)` early-out removed. The new view does
   // not depend on the Sprint 7 package payload, so a /stage-5 fetch
   // failure no longer blanks the card. Reinstate alongside the
@@ -1416,6 +1528,12 @@ export default function Stage5EscalationPackage({
           Sprint 12.9 — primary content of the Escalate-to-Tier-2 view. */}
       <EscalationRoutingSection routing={routing} />
 
+      {/* US Pharma — LLM digest of the topics the engineer asked about
+          across all their store-scoped "Discuss Store Specifics with
+          LogIQ" chats. Renders nothing when there were no questions, so
+          the escalation report falls back to its prior time-only form. */}
+      <StoreChatSummarySection data={storeSummary} loading={storeSummaryLoading} />
+
       {/* Sprint 13.17 — Tier-2 handoff note. Auto-fetches on mount;
           no manual Generate button. The note text is what Tier-2
           will paste into ServiceNow / their ticket system.
@@ -1425,7 +1543,7 @@ export default function Stage5EscalationPackage({
       <HandoffNoteAction
         sessionId={sessionId}
         attemptedStage3Steps={attemptedStage3Steps}
-        onRefreshRouting={fetchRouting}
+        onRefreshRouting={refreshStage5}
       />
 
       <div

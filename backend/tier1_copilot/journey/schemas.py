@@ -162,6 +162,22 @@ class EscalationHandoffNoteResponse(BaseModel):
     used_fallback: bool = False
 
 
+# ─────────────────────────────────────────────────────────────
+# US Pharma — "Discuss Store Specifics with LogIQ" topics digest.
+# GET /tier1/journey/{sid}/store-chat-summary returns this. An
+# LLM-generated summary of the areas the engineer asked about across
+# ALL their store-scoped chats, shown on the Escalation screen next to
+# the existing time-spent-on-KB metrics. `summary` is None when there
+# is no store or no user questions — the frontend hides the section and
+# the escalation report is unchanged.
+# ─────────────────────────────────────────────────────────────
+class StoreChatSummaryResponse(BaseModel):
+    summary: Optional[str] = None
+    store_id: Optional[str] = None
+    question_count: int = 0
+    chat_count: int = 0
+
+
 class Stage1bDoNotChase(BaseModel):
     entries: List[DoNotChaseEntry] = Field(default_factory=list)
     empty: bool = True

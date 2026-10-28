@@ -348,6 +348,37 @@ Infra from docs/SCALING_100_USERS.md (4 API replicas + PgBouncer + db.r6g.large 
 
 (Multi-AZ RDS for HA would add ~$205; heavier usage at 50 queries/user/day pushes LLM to ~$2,000 and total to ~$2,800 → ~$28/user.)
 
+
+Same infra, LLM line swapped to the no-cache rate ($0.026/query):
+
+┌─────────────────────────────────────────┬──────────────────┐
+│                  Item                   │      ~$/mo       │
+├─────────────────────────────────────────┼──────────────────┤
+│ API: 4× Fargate (2 vCPU/4 GB)           │ $290             │
+├─────────────────────────────────────────┼──────────────────┤
+│ Workers: 2 report + 2 ingest            │ $120–160         │
+├─────────────────────────────────────────┼──────────────────┤
+│ ALB                                     │ $25              │
+├─────────────────────────────────────────┼──────────────────┤
+│ RDS db.r6g.large (single-AZ)            │ $205             │
+├─────────────────────────────────────────┼──────────────────┤
+│ PgBouncer (small instance/task)         │ $15–30           │
+├─────────────────────────────────────────┼──────────────────┤
+│ S3 + CloudWatch + Secrets + transfer    │ $70–120          │
+├─────────────────────────────────────────┼──────────────────┤
+│ Clerk                                   │ ~$25             │
+├─────────────────────────────────────────┼──────────────────┤
+│ Fixed subtotal                          │ ~$750–860        │
+├─────────────────────────────────────────┼──────────────────┤
+│ Bedrock LLM (66,000 × $0.026, no cache) │ ~$1,716          │
+├─────────────────────────────────────────┼──────────────────┤
+│ TOTAL                                   │ ~$2,470–2,580/mo │
+├─────────────────────────────────────────┼──────────────────┤
+│ Per user (÷100)                         │ ~$25 / user / mo │
+└─────────────────────────────────────────┴──────────────────┘
+
+So dropping the cache adds ~$525/mo (~$5/user) vs the cached version. (Multi-AZ RDS +$205; 50 queries/user/day pushes LLM to ~$2,860 → total ~$3,650, ~$36/user.)
+
 4. Takeaways
 
 - LLM dominates variable cost. At 100 users, Bedrock is ~60% of the bill and scales linearly with query volume; infra amortizes (economies of scale) but LLM does not.

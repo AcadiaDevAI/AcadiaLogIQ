@@ -34,6 +34,7 @@ from .schemas import (
     Stage2HistoricalMatches,
     Stage3TroubleshootingApproach,
     Stage4SearchKB,
+    StoreChatSummaryResponse,
 )
 from .stage0_confidence import compute_stage0
 from .stage0_environment import build_environment_profile
@@ -719,6 +720,47 @@ async def post_escalation_handoff_note(
         escalation_reasons=escalation_reasons,
     )
     return EscalationHandoffNoteResponse(note=note, used_fallback=used_fallback)
+
+
+# ─────────────────────────────────────────────────────────────
+# US Pharma — /store-chat-summary — LLM digest of the topics the
+# engineer asked about across ALL their "Discuss Store Specifics with
+# LogIQ" chats for this journey's store. Shown on the Escalation
+# screen next to the existing time-spent-on-KB metrics so a Tier-2
+# colleague can see which areas were already explored.
+#
+# Deliberately NOT cached: the frontend re-fetches every time the
+# engineer lands on Escalation / Handoff, so a summary regenerated
+# after they went back and asked more reflects the latest interaction.
+# Store-scoped + owner-scoped; changing the store number naturally
+# re-scopes the digest to that store's chats. Empty (no store / no
+# questions) → summary=None and the frontend hides the section, leaving
+# the escalation report exactly as it was before. Failure-open.
+# ─────────────────────────────────────────────────────────────
+@router.get(
+    "/{session_id}/store-chat-summary",
+    response_model=StoreChatSummaryResponse,
+)
+async def get_store_chat_summary(
+    session_id: str,
+    user_id: Optional[str] = Depends(_lazy_auth_dependency),
+) -> StoreChatSummaryResponse:
+    owner_id = user_id or "anonymous"  # mirrors api._normalize_owner_id
+    try:
+        from .store_chat_summary import build_store_chat_summary
+        result = build_store_chat_summary(session_id, owner_id)
+    except Exception as exc:
+        logger.warning(
+            "[journey.store_chat_summary] build failed sid=%s err=%s",
+            session_id, exc,
+        )
+        result = {}
+    return StoreChatSummaryResponse(
+        summary=result.get("summary"),
+        store_id=result.get("store_id"),
+        question_count=int(result.get("question_count", 0) or 0),
+        chat_count=int(result.get("chat_count", 0) or 0),
+    )
 
 
 # ─────────────────────────────────────────────────────────────

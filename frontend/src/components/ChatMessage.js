@@ -206,6 +206,17 @@ export default function ChatMessage({ msg, index, sessionId, onClarificationSele
       const originalQuery = priorUserMessage?.content || null;
       const currentMode = state.selectedMode || null;
 
+      // US Pharma — a 👎 must NOT trigger the Acadia troubleshooting KB/runbook
+      // pivot pipeline. That pipeline is a heavy LLM + vector/BM25 search flow
+      // built for Acadia's ticket/KB corpus; in a US Pharma store-scoped chat
+      // it runs silently (no loading indicator), finds no matching Acadia KB,
+      // and appends a confusing "No matching KB…" follow-up — which reads like
+      // the good answer was replaced. Suppress it by withholding the mode +
+      // original_query the backend requires to pivot (see /feedback/state
+      // `_should_pivot`). Feedback is still recorded and the semantic-cache row
+      // still invalidated; the dislike just registers quietly, like 👍.
+      const suppressPivot = isUSPharma(activeOrg?.slug);
+
       // Pass the semantic cache id (if any) so the backend can invalidate
       // that specific cached row — protecting every subsequent user.
       saveFeedbackState(
@@ -213,8 +224,8 @@ export default function ChatMessage({ msg, index, sessionId, onClarificationSele
         index,
         "dislike",
         msg.semanticCacheId || null,
-        currentMode,
-        originalQuery,
+        suppressPivot ? null : currentMode,
+        suppressPivot ? null : originalQuery,
       )
         .then((res) => {
           const pivot = res?.data?.pivot;

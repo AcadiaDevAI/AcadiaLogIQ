@@ -8,6 +8,10 @@ const initialState = {
   sessions: [],
   uploadedFiles: [],
   isLoading: false,
+  // Human-readable label for the current answer phase (SSE staged progress
+  // from /ask/stream), e.g. "Retrieving relevant context…". Null → the
+  // TypingIndicator shows the bare three dots. Cleared when loading ends.
+  loadingStage: null,
   isUploading: false,
   sidebarOpen: true,
   // Gate for the hover-to-peek auto-expand. Only the Resolution
@@ -413,7 +417,17 @@ function reducer(state, action) {
       };
 
     case "SET_LOADING":
-      return { ...state, isLoading: action.payload };
+      // Clear any stale stage label when loading turns off so the next
+      // request starts from the bare dots.
+      return {
+        ...state,
+        isLoading: action.payload,
+        loadingStage: action.payload ? state.loadingStage : null,
+      };
+
+    // SSE staged-progress label for the in-flight answer (from /ask/stream).
+    case "SET_LOADING_STAGE":
+      return { ...state, loadingStage: action.payload || null };
 
     case "SET_UPLOADING":
       return { ...state, isUploading: action.payload };

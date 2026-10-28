@@ -2,7 +2,7 @@ import React, { useRef, useEffect, useCallback, useState } from "react";
 import { message, Button } from "antd";
 import { ArrowLeftOutlined } from "@ant-design/icons";
 import { useChat } from "../hooks/ChatContext";
-import { askQuestion, listSessions } from "../services/api";
+import { askQuestion, askQuestionStream, listSessions } from "../services/api";
 import ChatMessage from "./ChatMessage";
 import ChatInput from "./ChatInput";
 import ModeBadge from "./ModeBadge";
@@ -11,7 +11,7 @@ import TechForm from "./TechForm";
 import PatternResponseCard from "./PatternResponseCard";
 import ContextBreakModal from "./ContextBreakModal";
 
-function TypingIndicator() {
+function TypingIndicator({ stage }) {
   return (
     <div className="flex gap-3 px-4 py-4 md:px-8 lg:px-16 xl:px-24 t-bg-assistant animate-fade-in">
       <div
@@ -20,10 +20,17 @@ function TypingIndicator() {
       >
         <span className="text-white text-xs font-bold">A</span>
       </div>
-      <div className="flex items-center gap-1.5 pt-2">
-        <div className="typing-dot" />
-        <div className="typing-dot" />
-        <div className="typing-dot" />
+      <div className="flex items-center gap-2 pt-2">
+        <div className="flex items-center gap-1.5">
+          <div className="typing-dot" />
+          <div className="typing-dot" />
+          <div className="typing-dot" />
+        </div>
+        {/* SSE staged-progress label (from /ask/stream). Falls back to just
+            the animated dots when no stage has been reported yet. */}
+        {stage && (
+          <span className="text-xs t-text-muted animate-fade-in">{stage}</span>
+        )}
       </div>
     </div>
   );
@@ -67,10 +74,23 @@ export default function ChatArea() {
     async (question) => {
       dispatch({ type: "ADD_USER_MESSAGE", payload: question });
       dispatch({ type: "SET_LOADING", payload: true });
+      dispatch({ type: "SET_LOADING_STAGE", payload: "Analyzing your question…" });
 
       try {
-        const res = await askQuestion(question, state.sessionId);
-        const data = res.data;
+        // Prefer the SSE stream (real staged progress). If it fails for ANY
+        // reason — transport, auth, unsupported proxy — transparently fall
+        // back to the plain POST so answers never break.
+        let data;
+        try {
+          data = await askQuestionStream(question, state.sessionId, {
+            onStage: (s) =>
+              dispatch({ type: "SET_LOADING_STAGE", payload: s.label }),
+          });
+        } catch (streamErr) {
+          console.warn("[chat] /ask/stream failed — falling back to /ask", streamErr);
+          const res = await askQuestion(question, state.sessionId);
+          data = res.data;
+        }
 
         dispatch({
           type: "ADD_ASSISTANT_MESSAGE",
@@ -314,7 +334,7 @@ export default function ChatArea() {
             {state.isLoading &&
               state.messages.length > 0 &&
               state.messages[state.messages.length - 1]?.role === "user" && (
-                <TypingIndicator />
+                <TypingIndicator stage={state.loadingStage} />
               )}
           </div>
         )}
